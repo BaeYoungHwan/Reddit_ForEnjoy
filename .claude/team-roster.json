@@ -1,0 +1,51 @@
+{
+  "members": [
+    {
+      "name": "임소리",
+      "aliases": ["소리", "임소리", "sori"],
+      "role": "게임 플레이 / Phaser 담당",
+      "lane": "client-phaser",
+      "ownedPaths": ["src/client/game.html", "src/client/game.tsx", "docs/design-docs/vision-system.md", "docs/design-docs/traps.md"],
+      "responsibilities": [
+        "그리드 이동, 캐릭터 애니메이션",
+        "안개(블라인드) 시야 시스템 — 상세: docs/design-docs/vision-system.md (개인 클라이언트 로컬 상태, 서버 저장 없음)",
+        "함정 4종 이펙트 — 상세: docs/design-docs/traps.md",
+        "아이템 이펙트 — docs/design-docs/items.md 확정 후 구현 (⚠️ 현재 팀 확정 대기 중, 1차 관리자)",
+        "게임 시작 전 아이템 로드아웃 선택 UI 연동",
+        "조작감·비주얼 폴리싱"
+      ],
+      "branchPrefix": "sori"
+    },
+    {
+      "name": "배영환",
+      "aliases": ["영환", "배영환", "younghwan"],
+      "role": "백엔드 / 비동기 데이터 담당",
+      "lane": "server-data",
+      "ownedPaths": ["src/server", "devvit.json"],
+      "responsibilities": [
+        "Redis 데이터 모델(발자국·함정·아이템·랭킹)",
+        "비동기 전달 로직(다음 접속자에게 힌트/함정 전달)",
+        "데일리 자정 리셋 로직",
+        "tRPC/Hono API 라우트",
+        "devvit.json 트리거/메뉴 연동"
+      ],
+      "branchPrefix": "younghwan"
+    },
+    {
+      "name": "송원호",
+      "aliases": ["원호", "송원호", "wonho"],
+      "role": "UI·콘텐츠·통합 담당",
+      "lane": "ui-content-qa",
+      "ownedPaths": ["src/client (React 파트)", "docs/product-specs", "assets"],
+      "responsibilities": [
+        "스플래시/메뉴/리더보드 UI",
+        "게임 시작 전 아이템 로드아웃 선택 화면 (4종 중 1개 선택 UI)",
+        "맵 디자인(고정 맵 1~2개 그리드 데이터)",
+        "아트(캐릭터·벽·바닥·출구·발자국·함정·아이템·UI 아이콘), 사운드",
+        "데일리 리셋 UX, 모바일 대응",
+        "QA(통합테스트), 제출물(앱 리스팅/데모포스트/플레이 영상)"
+      ],
+      "branchPrefix": "wonho"
+    }
+  ]
+}

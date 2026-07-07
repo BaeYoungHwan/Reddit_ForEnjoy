@@ -1,0 +1,22 @@
+# Node
+node_modules/
+dist/
+.env
+
+# Logs
+logs/
+*.log
+
+# Claude Code 세션 상태 (로컬 전용, 팀원 간 공유 안 함)
+docs/ref/session-state.md
+.cache/
+
+# Claude Code 개인 설정 (팀 규칙은 .claude/settings.json, 개인 설정은 여기)
+.claude/settings.local.json
+
+# 개인 세션 역할 상태 (팀원별로 다름, /role 커맨드가 생성 — .claude/team-roster.json은 공유)
+.claude/current-role.local.json
+
+# OS
+.DS_Store
+Thumbs.db

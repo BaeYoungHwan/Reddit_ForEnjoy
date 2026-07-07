@@ -1,0 +1,497 @@
+https://redditgameswithahook.devpost.com/
+
+Overview
+Reddit is hosting a virtual hackathon from June 17th to July 15th. We’re offering developers $40,000 in prizes for games built to delight users.
+
+The challenge: create a new Reddit game for the users of Reddit using Devvit, our Developer Platform.
+
+For this hackathon, we're asking developers to use Devvit Web, which allows you to build Devvit apps using web technologies you’re already familiar with (e.g. React, Phaser, three.js), or your favorite game engine (Godot, GameMaker, Unity, etc).
+
+Participants will also have access to Phaser to make their game shine. The best app to use Phaser will be eligible for a special award. 
+
+What to build
+Build a game on Devvit (Reddit’s Developer Platform) using our Interactive Posts feature that inspires collective joy.
+
+The Best Experience That Will Keep People Coming Back: Apps that give redditors a reason to return day after day. This could come from progression, daily challenges, fresh content, meaningful choices, social dynamics, or simply the anticipation of what happens next. We're looking for experiences that create excitement between sessions and leave players wanting to check back tomorrow. The strongest entries make every visit feel worthwhile. Players should have something to work toward, discover, unlock, influence, or look forward to each time they return. The format can vary widely, but the core focus should be creating a compelling loop that builds momentum over time and turns a one-time visitor into a regular player.
+
+Examples of games on Reddit that bring users back day over day
+
+r/honk, r/colorpuzzlegame, r/bunnytrials, r/alignmentchartFills, r/hotandcold, r/dailyguess, r/bridgedit, r/battlebirds, r/kraw r/LETTERSET
+
+What we’re NOT looking for:
+AI Slop: Did you use AI? Fantastic! But it shouldn’t be obvious the moment we open your app. Fit the UI in the viewport, give your app a unique identity, and make sure you’re thinking of your human players. You can even ask your agentic assistant to help hide their involvement!
+
+On the nose Reddit theming: Reddit-y does not mean the game is about Reddit, karma, subreddits, Snoo, etc. Reddit-y means human-first, embracing community, meritocracy, creativity…it’s in the spirit of the app and your use of all the things subreddits have to offer (comments, flair, feeds, community)! While making the app about the topic of Reddit itself is not forbidden, it is also not a hack for making an app “Reddit-y”.
+
+Literal interpretations on “Games with a Hook”: While we're not opposed to seeing a fishing game or two, games with a "hook" shouldn't be taken literally. We want to see hooky games as in retentive and replayable.
+
+Common Ideas: Your game might not score as well if we’ve seen it many times before. We see a lot of: space shooters, clone apps of popular games, simple platformers, collaborative storytelling apps, and trivia apps. If you do make one of these apps, make sure it's extremely unique.
+
+Sub-challenges
+In addition to an excellent retentive experience, we’re looking for standout apps that also achieve the following:
+
+Best Use of Phaser: Recognizes the most innovative use of the Phaser game development framework within the Reddit Devvit platform.
+
+Best Use of Retention Mechanisms: Reddit apps are discoverable in our users’ feeds. This means that apps that create daily, or recurring, content tend to see better growth and retention. This award will go to the best use of retentive mechanics in a game.
+
+Best Use of User Contributions: Apps that enable users to generate content (comments, posts, drawings, puzzles, levels) drive redditor engagement and conversation. This award will go to the app that makes the best use of user-generated content.
+
+Games must be built on Devvit Web and be compliant with our Devvit Rules. Read our guide on how to build games for Reddit for more guidance on building for our platform.
+
+For this event we are looking for polish, meaning apps that are as close to launch-ready as possible (bonus points for a good mobile experience). We understand that not all projects will reach this threshold, but projects that are well tested and concept-complete will score higher.
+
+While we are accepting existing projects for this event, please note the game should be significantly updated during the hackathon period to qualify for this event.
+
+Getting started
+Get started with the Quickstart
+
+Browse our Template Library for building with a familiar framework
+
+You can use the Phaser Template here
+
+View examples of existing games on r/GameOnReddit
+
+Join us on Discord for live support and office hours
+
+ 
+
+Requirements
+What to Submit
+
+App listing – Link to your app on developer.reddit.com.
+Demo post – Link to your subreddit and a public post running your game. Judging will primarily be evaluating community play based on the demo link, so make sure to make the experience as self explanatory as possible.
+
+[Optional] Developer Platform feedback – Complete our developer satisfaction survey for a shot at the Best Feedback prize.
+Prizes
+$40,000 in prizes
+Best App with a Hook
+$15,000 in cash
+1 winner
+Best Use of Phaser
+$5,000 in cash
+1 winner
+Best Use of Retention Mechanics
+$3,000 in cash
+1 winner
+Best Use of User Contributions
+$3,000 in cash
+1 winner
+Honorable Mentions
+$1,000 in cash
+10 winners
+Devvit Helper Award
+$500 in cash
+6 winners
+Feedback Awards
+$200 in cash
+5 winners
+
+
+Judging Criteria
+Delightful UX
+Experiences should be built with exciting layouts and themes. While apps do not need to be perfect, it should be easy and fun to uncover what the app has to offer.
+Polish
+Your submission should be as close to publishable as possible and compliant with Devvit Rules. Judges should be able to understand everything we need to know by interacting with example posts. The closer to launch quality, the higher the score here.
+Reddit-y
+Reddit is all about community and embracing topics people care about, no matter how weird. We want apps to have their own identity, be community-minded, and bring something fresh to the platform. The best apps will bring a community together.
+Hook-y
+Does your app provide a compelling reason for users to return regularly? Strong apps create anticipation, ongoing goals, evolving experiences, or fresh opportunities that encourage users to come back day after day.
+[Phaser Category] Phaser Innovation
+Phaser judges will look for creative, effective use of Phaser’s tools and workflow that meaningfully elevates gameplay, polish, and technical execution.
+
+
+Reddit’s Games with a Hook Hackathon (the “Hackathon”) Official Rules
+NO PURCHASE OR PAYMENT NECESSARY TO ENTER OR WIN. A PURCHASE OR PAYMENT WILL NOT INCREASE YOUR CHANCES OF WINNING. 
+
+SUBMISSION OF ANY ENTRY CONSTITUTES AGREEMENT TO THESE OFFICIAL RULES AS A CONTRACT BETWEEN ENTRANT (AND EACH INDIVIDUAL MEMBER OF ENTRANT), THE HACKATHON SPONSOR, AND DEVPOST.
+
+ 
+
+1. Dates and Timing
+Submission Period: Wednesday, June 17, 2026  (12:00 pm Pacific Time) – Wednesday, July 15, 2026  (6:00 pm Pacific Time) (“Submission Period”).
+
+Feedback Period: Wednesday, June 17, 2026(12:00 pm Pacific Time) – Wednesday, July 15, 2026  (6:00 pm Pacific Time) (“Submission Period”).
+
+Judging Period:Thursday, July 16, 2026 (12:00 am Pacific Time) – Monday, July 27, 2026 (6:00 pm Pacific Time) (“Judging Period”).
+
+Winners Announced: On or around  Wednesday, July 29, 2026  (3:00 pm Pacific Time).
+
+ 
+
+2. Sponsor and Administrator
+Sponsor and Administrator: Reddit, Inc., 548 Market St #16093, San Francisco, CA 94104, United States
+
+ 
+
+3. Eligibility
+The Hackathon IS open to: 
+
+Individuals who are at least the age of majority where they reside as of the time of entry (“Eligible Individuals”);
+
+Teams of Eligible Individuals (“Teams”); and
+
+Organizations (including corporations, not-for-profit corporations and other nonprofit organizations, limited liability companies, partnerships, and other legal entities) that exist and have been organized or incorporated at the time of entry (“Organizations”)
+
+(the above are collectively, “Entrants”)
+
+An Eligible Individual may join more than one Team or Organization and an Eligible Individual who is part of a Team or Organization may also enter the Hackathon on an individual basis. If a Team or Organization is entering the Hackathon, they must appoint and authorize one individual (the “Representative”) to represent, act, and enter a Submission, on their behalf. By entering a Submission on behalf of a Team or Organization you represent and warrant that you are the Representative authorized to act on behalf of your Team or Organization.
+
+The Hackathon IS NOT open to: 
+
+Individuals who are residents of, or Organizations domiciled in, a country, state, province or territory where the laws of the United States or local law prohibits participating or receiving a prize in the Hackathon (including, but not limited to, Brazil, Quebec, Russia, Crimea, Cuba, Iran, North Korea, Syria and any other country designated by the United States Treasury's Office of Foreign Assets Control) 
+
+Organizations involved with the design, production, paid promotion, execution, or distribution of the Hackathon, including the Sponsor and Administrator (“Promotion Entities”).
+
+Employees, representatives and agents** of such Promotion Entities, and all members of their immediate family or household*
+
+Any other individual involved with the design, production, promotion, execution, or distribution of the Hackathon, and each member of their immediate family or household*
+
+Any Judge (defined below), or company or individual that employs a Judge
+
+Any parent company, subsidiary, or other affiliate*** of any organization described above
+
+Any other individual or organization whose participation in the Hackathon would create, in the sole discretion of the Sponsor and/or Administrator, a real or apparent conflict of interest 
+
+*The members of an individual’s immediate family include the individual’s spouse, children and stepchildren, parents and stepparents, and siblings and stepsiblings. The members of an individual’s household include any other person that shares the same residence as the individual for at least three (3) months out of the year. 
+
+**Agents include individuals or organizations that in creating a Submission to the Hackathon, are acting on behalf of, and at the direction of, a Promotion Entity through a contractual or similar relationship.
+
+***An affiliate is: (a) an organization that is under common control, sharing a common majority or controlling owner, or common management; or (b) an organization that has a substantial ownership in, or is substantially owned by the other organization.
+
+ 
+
+4. How To Enter 
+Entrants may enter by visiting redditgameswithahook.devpost.com (“Hackathon Website”) and following the below steps:
+
+Register for the Hackathon on the Hackathon Website by clicking the “Join Hackathon” button. To complete registration, sign up to create a free Devpost account, or log in with an existing Devpost account. This will enable you to receive important updates and to create your Submission.
+
+Entrants will obtain access to Reddit’s Developer Platform and tools and complete a Project described below in Project Requirements. Use of the developer tools will be subject to Reddit’s Developer Terms, Developer Documentation, and Devvit Rules. Entry in the Hackathon constitutes consent for the Sponsor and Devpost to collect and maintain an entrant’s personal information for the purpose of operating and publicizing the Hackathon.
+
+Sign up for a Devvit account at developers.reddit.com.
+
+To be considered for the Most Valuable Feedback bonus prizes, participants must be registered for the hackathon on Devpost, have started a Project, and complete the online form (each a “Feedback Submission”). Feedback must be submitted during the Feedback Period. Participants who have begun a  Project must complete the survey with actionable comments that Reddit can use to improve the SDKs or related documentation (for example, bug reports, user interface improvements, suggested integrations, and more). One feedback form per entrant.
+
+To be considered for the Devvit Helpers bonus prize, participants must be registered for the hackathon on Devpost and engage within the support channels (the “Community”) during the Submission Period.
+
+Complete and enter all of the required fields on the “Enter a Submission” page of the Hackathon Website (each a “Submission”) during the Submission Period and follow the requirements below.
+
+Project Requirements
+
+What to Create: Entrants must create a game for the communities of Reddit using Reddit’s Developer Platform that falls into one of the 2 categories below (each a “Project”).
+
+Categories:
+
+The Best Experience That Will Keep People Coming Back: Apps that bring redditors together through shared play, collaboration, or competition. These experiences should feel native to Reddit by sparking conversations, inside jokes, and collective problem-solving within a community. While the format can vary—multiplayer challenges, team-based mechanics, or community-driven outcomes—the core should center on interaction between users rather than solo play. We’re looking for games that turn comment sections into part of the gameplay itself and create memorable, social moments unique to Reddit communities. Examples of some community games we love include r/honk, r/colorpuzzlegame, r/bunnytrails, r/alignmentcharts, r/hotandcold, r/dailyguess, r/bridgedit, r/battlebirds, r/kraw. 
+
+Sub-challenges: In addition to an excellent daily experience, we’re looking for standout apps that also achieve the following: 
+
+Best Use of Phaser: Recognizes the most innovative use of the Phaser game development framework within the Reddit Devvit platform. [Add in link to direct export or doc page for using Phaser w/ Reddit]
+
+Best Use of Retention Mechanisms: Reddit apps are discoverable in our users’ feeds. This means that apps that create daily, or recurring, content tend to see better growth and retention. This award will go to the best use of retentive mechanics in a community game app such as: leaderboard, streaks, use of community flair, etc. 
+
+Best Use of User Contributions: Apps that enable users to generate content (comments, posts, drawings, puzzles, levels) drive redditor engagement and conversation. This award will go to the app that makes the best use of user-generated content.
+
+Functionality: The Project must be capable of being successfully installed and running consistently on the platform for which it is intended and must function as depicted in the video and/or expressed in the text description.
+
+Platforms: A submitted Project must run on the platform for which it is intended and which is specified in the Submission Requirements. 
+
+New & Existing: Projects must be either newly created by the Entrant or, if the Entrant’s Project existed prior to the Hackathon Submission Period, must have significantly updated after the start of the Hackathon Submission Period. Entrants should explain how their Project was significantly updated during the Submission Period. Projects that have won any of Reddit’s previous Hackathons are not eligible for this hackathon.
+
+Third Party Integrations: If a Project integrates any third-party SDK, APIs and/or data, Entrant must be authorized to use them in accordance with any terms and conditions or licensing requirements of the tool.
+
+ 
+
+Submission Requirements 
+
+Submissions to the Hackathon must meet the following requirements:
+
+Include a Project built using Reddit’s Developer Platform and meets the above Project Requirements.
+
+Include a text description that should explain the features and functionality of your Project.
+
+Include an optional demonstration video of your Project. The video portion of the Submission:
+
+should be less than one (1) minute. Judges are not required to watch beyond one minute 
+
+should include footage that shows the Project functioning on the device for which it was built; and
+
+must be uploaded to and made publicly visible on YouTube, Vimeo, Facebook Video, or Youku, and a link to the video must be provided on the submission form on the Hackathon Website.
+
+App listing: Include your unique app link (developers.reddit.com/apps/{app-name}), which is created after you upload your app.
+
+Include a detailed README.md in the root directory of your app that describes the game and how to play.
+
+Demo post: Include a link to your a) test subreddit b) a post running your game. Please make sure your subreddit is public, OR you can install the following app into your subreddit to allow admins to join automatically: https://developers.reddit.com/apps/dr-admin-approve. 
+
+[Optional] Link to public repository: Provide a URL to your public code repository of the Project.
+
+[Optional] Developer Platform feedback: Complete our developer satisfaction survey to qualify for the Most Valuable Feedback prize.
+
+Use only materials (including in the Project or demo video) that Entrant owns the rights to or otherwise have the necessary licenses or authorizations to use. The Submission must: (a) be your (or if you’re a Representative, your Team’s or Organization’s) original work product; and (b) not violate the intellectual property rights or other rights including but not limited to copyright, trademark, patent, contract, and/or privacy rights, of any other person or entity. An Entrant may contract with a third party for technical assistance to create the Submission provided the Submission components are solely the Entrant’s work product and the result of the Entrant’s ideas and creativity, and the Entrant owns all rights to them.
+
+Multiple Submissions 
+
+An Entrant may submit more than one Submission, however, each Submission must be unique and substantially different from each of the Entrant’s other Submissions, as determined by the Sponsor and Devpost in their sole discretion.
+
+Testing 
+
+Access must be provided to an Entrant’s working Project for judging and testing by providing a link to a Reddit post running your game. Entrants should make this post in a public subreddit with less than 200 members. The Entrant must make the Project available free of charge and without any restriction, for testing, evaluation and use by the Sponsor, Administrator and Judges until the Judging Period ends. Judges are not required to test the Project and may choose to judge based solely on the text description, images, and video provided in the Submission.
+
+Language Requirements
+
+All Submission materials must be in English or, if not in English, the Entrant must provide an English translation of the demonstration video, text description, and testing instructions as well as all other materials submitted. 
+
+Team Representation
+
+If a team or organization is entering the Hackathon, they must appoint and authorize one individual (the “Representative”) to represent, act, and enter a Submission, on their behalf. The Representative must meet the eligibility requirements above. By entering a Submission on the Hackathon Website on behalf of a team or organization you represent and warrant that you are the Representative authorized to act on behalf of your team or organization.
+
+Financial or Preferential Support 
+
+A Project must not have been developed, or derived from a Project developed, with financial or preferential support from the Sponsor or Administrator. Such Projects include, but are not limited to, those that received funding or investment for their development, were developed under contract, or received a commercial license, from the Sponsor or Administrator any time prior to the end of Hackathon Submission Period. The Sponsor, at their sole discretion, may disqualify a Project, if awarding a prize to the Project would create a real or apparent conflict of interest.
+
+ 
+
+5. Submission Modifications
+Draft Submissions 
+
+Prior to the end of the Submission Period, you may save draft versions of your submission on Devpost to your portfolio before submitting the Submission materials to the Hackathon for evaluation. Once the Submission Period has ended, you may not make any changes or alterations to your Submission, but you may continue to update the Project in your Devpost portfolio.
+
+Modifications After the Submission Period. 
+
+After the Submission Period. The Sponsor and Devpost may permit you to modify part of your Submission after the Submission Period for the purpose of adding, removing or replacing material that potentially infringes a third party mark or right, discloses personally identifiable information, or is otherwise inappropriate. The modified Submission must remain substantively the same as the original Submission with the only modification being what the Sponsor and Devpost permits. 
+
+ 
+
+6. Judges & Criteria
+Eligible submissions will be evaluated by a panel of judges selected by the Sponsor (the “Judges”). Judges may be employees of the sponsor or third parties, may or may not be listed individually on the Hackathon Website, and may change before or during the Judging Period. Judging may take place in one or more rounds with one or more panels of Judges, at the discretion of the sponsor. 
+
+Stage One) The first stage will determine via pass/fail whether the ideas meet a baseline level of viability, in that the Project reasonably fits the theme and reasonably applies the required APIs/SDKs featured in the Hackathon.
+
+Stage Two) All Submissions that pass Stage One will be evaluated in Stage Two based on the following equally weighted criteria (the “Judging Criteria”):
+
+Entries will be judged on the following equally weighted criteria, and according to the sole and absolute discretion of the judges:
+
+Delightful UX
+
+Experiences should be built with exciting layouts and themes. While apps do not need to be perfect, it should be easy and fun to uncover what the app has to offer.
+
+ 
+
+Polish
+
+Your submission should be as close to publishable as possible and compliant with Devvit Rules. Judges should be able to understand everything we need to know by interacting with example posts. The closer to launch quality, the higher the score here.
+
+ 
+
+Reddity 
+
+Reddit is all about community and embracing topics people care about, no matter how weird. We want apps to have their own identity, be community-minded, and bring something fresh to the platform. The best apps will bring a community together. 
+
+ 
+
+Hook
+
+Does your app provide a compelling reason for users to return regularly? Strong apps create anticipation, ongoing goals, evolving experiences, or fresh opportunities that encourage users to come back day after day.
+
+ 
+
+[For the Phaser Category] Phaser Innovation
+
+Phaser judges will look for creative, effective use of Phaser’s tools and workflow that meaningfully elevates gameplay, polish, and technical execution.
+
+ 
+
+The scores from the Judges will determine the potential winners of the applicable prizes. The Entrant(s) that are eligible for a Prize, and whose Submissions earn the highest overall scores based on the applicable Judging Criteria, will become potential winners of that Prize.
+
+Feedback Submission Criteria
+
+Eligible Feedback Submissions will be evaluated based on the completeness, viability, and potential impact of the feedback. Entrants can submit feedback via this form.
+
+Devvit Helpers Judging Criteria
+
+Entrants who offer their support to others in the hackathon community (each a “Community Contributor”) over the Devvit Discord and the r/devvit subreddit will be considered for the Devvit Helpers prize. These prizes will be awarded at the sole discretion of team members of the Sponsor. The Devvit Helpers Prize will be awarded to those Community Contributors who offer impactful contributions throughout the Submission Period. Impact of the contributions is measured by how helpful and valuable the contributions are. This includes posting and/or responding to questions that assists other participants in making progress towards resolving issues or questions.
+
+Tie Breaking 
+
+For each Prize listed below, if two or more Submissions are tied, the tied Submission with the highest score in the first applicable criterion listed above will be considered the higher scoring Submission. In the event any ties remain, this process will be repeated, as needed, by comparing the tied Submissions’ scores on the next applicable criterion. If two or more Submissions are tied on all applicable criteria, the panel of Judges will vote on the tied Submissions.
+
+ 
+
+7. Intellectual Property Rights
+Subject to Reddit’s Developer Terms and Reddit’s ownership in Reddit Licensed Materials (as defined in the Developer Terms), all Submissions remain the intellectual property of the individuals or organizations that developed them. By submitting an entry, Entrants agree that the Sponsor is granted a fully paid, non-exclusive license to use such submitted materials in connection with running the Hackathon, including for judging the entry. Some Submission components may be displayed to the public. Other Submission materials may be viewed by the Sponsor, Devpost, and judges for screening and evaluation. By submitting an entry or accepting any prize, you (and, if you are a Representative, on behalf of your Team or Organization) represent and warrant that (a) you own or have all necessary rights to all submitted content, including the Submission(s) and demo video, and to grant the licenses under these Official Rules and the Developer Terms; (b) the submitted content does not violate the intellectual property or proprietary rights of any third party; and (c) the content submitted does not contain any viruses, Trojan horses, worms, spyware or other disabling devices or harmful or malicious code.
+
+8. Prizes
+ 
+
+Winner
+
+Prize
+
+Qty
+
+Eligible Submissions 
+
+Grand Prizes
+
+Best App with a Hook 
+
+$15,000 USD
+
+1
+
+All Eligible Submissions. 
+
+Honorable Mentions
+
+$1,000 USD
+
+10
+
+All Eligible Submissions. 
+
+Sub Categories
+
+Best Use of Phaser
+
+$5,000 USD
+
+1
+
+All Eligible Submissions
+
+Best Use of Retention Mechanics
+
+$3,000
+
+1
+
+All Eligible Submissions
+
+Best Use of User Contributions
+
+$3,000
+
+1
+
+All Eligible Submissions
+
+Bonus Prizes
+
+Devvit Helpers
+
+$500 USD
+
+6
+
+All Eligible Submissions
+
+Other Prizes
+
+Feedback Award 
+
+$200 USD
+
+5
+
+All Eligible Feedback Submissions
+
+
+IMPORTANT NOTES ON MULTIPLE PRIZE ELIGIBILITY:
+
+A project can only win one (1) prize. 
+
+Each Individual Entrant is eligible for one Most Valuable Feedback Prize. Eligible individuals who only submit Most Valuable Feedback Surveys will NOT be eligible for any additional prizes. Feedback Prizes are awarded to individuals, not to Projects and will not be visible on the platform.
+
+Each Community Contributor is eligible for one Devvit Helpers Prize. Devvit Helpers Prizes are awarded to individuals, not to Projects and will not be visible on the platform.
+
+
+Substitutions & Changes: Prizes are non-transferable by the winner. Sponsor in its sole discretion has the right to make a prize substitution of equivalent or greater value. Sponsor will not award a prize if there are no eligible Submissions entered in the Hackathon, or if there are no eligible Entrants or Submissions for a specific prize.
+
+Verification Requirement: THE AWARD OF A PRIZE TO A POTENTIAL WINNER IS SUBJECT TO VERIFICATION OF THE IDENTITY, QUALIFICATIONS AND ROLE OF THE POTENTIAL WINNER IN THE CREATION OF THE SUBMISSION. No Submission or Entrant shall be deemed a winning Submission or winner until their post-competition prize affidavits have been completed and verified, even if prospective winners have been announced verbally or on the competition website. The final decision to designate a winner shall be made by the Sponsor and/or Administrator. 
+
+Prize Delivery: Prizes will be payable to the Entrant, if an individual; to the Entrant’s Representative, if a Team; or to the Organization, if the Entrant is an Organization. It will be the responsibility of the winning Entrant’s Representative to allocate the Prize among their Team or Organization’s participating members, as the Representative deems appropriate. A monetary Prize will be mailed to the winning Entrant’s address (if an individual) or the Representative’s address (if a Team or Organization), or sent electronically to the Entrant, Entrant’s Representative, or Organization’s bank account, only after receipt of the completed winner affidavit and other required forms (collectively the “Required Forms”), if applicable. The deadline for returning the Required Forms to the Administrator is ten (10) business days after the Required Forms are sent. Failure to provide correct information on the Required Forms, or other correct information required for the delivery of a Prize, may result in delayed Prize delivery, disqualification of the Entrant, or forfeiture of a Prize. Prizes will be delivered within 60 days of the Sponsor or Devpost’s receipt of the completed Required Forms.
+
+Fees & Taxes: Winners (and in the case of Team or Organization, all participating members) are responsible for any fees associated with receiving or using a prize, including but not limited to, wiring fees or currency exchange fees. Winners (and in the case of Team or Organization, all participating members) are responsible for reporting and paying all applicable taxes in their jurisdiction of residence (federal, state/provincial/territorial and local). Winners may be required to provide certain information to facilitate receipt of the award, including completing and submitting any tax or other forms necessary for compliance with applicable withholding and reporting requirements. United States residents may be required to provide a completed form W-9 and residents of other countries may be required to provide a completed W-8BEN form. Winners are also responsible for complying with foreign exchange and banking regulations in their respective jurisdictions and reporting the receipt of the Prize to relevant government departments/agencies, if necessary. The Sponsor, Devpost, and/or Prize provider reserves the right to withhold a portion of the prize amount to comply with the tax laws of the United States or other Sponsor jurisdiction, or those of a winner’s jurisdiction.
+
+ 
+
+9. Entry Conditions and Release
+By entering the Hackathon, you (and, if you are entering on behalf of a Team, Organization each participating members) agree(s) to the following:
+
+The relationship between you, the Entrant, and the Sponsor and Administrator, is not a confidential, fiduciary, or other special relationship.
+
+You will be bound by and comply with these Official Rules and the decisions of the Sponsor, Administrator, and/or the Hackathon Judges which are binding and final in all matters relating to the Hackathon.
+
+You release, indemnify, defend and hold harmless the Promotion Entities, and their respective parent, subsidiary, and affiliated companies, the Prize suppliers and any other organizations responsible for sponsoring, fulfilling, administering, advertising or promoting the Hackathon, and all of their respective past and present officers, directors, employees, agents and representatives (hereafter the “Released Parties”) from and against any and all claims, expenses, and liabilities (including reasonable attorneys’ fees), including but not limited to negligence and damages of any kind to persons and property, defamation, slander, libel, violation of right of publicity, infringement of trademark, copyright or other intellectual property rights, property damage, or death or personal injury arising out of or relating to an Entrant’s entry, creation of Submission or entry of a Submission, participation in the Hackathon, acceptance or use or misuse of the Prize (including any travel or activity related thereto) and/or the broadcast, transmission, performance, exploitation or use of the Submission as authorized or licensed by these Official Rules. 
+
+Without limiting the foregoing, the Released Parties shall have no liability in connection with: 
+
+Any incorrect or inaccurate information, whether caused by the Sponsor or Administrator’s electronic or printing error, or by any of the equipment or programming associated with or utilized in the Hackathon; 
+
+Technical failures of any kind, including, but not limited to malfunctions, interruptions, or disconnections in phone lines, internet connectivity or electronic transmission errors, or network hardware or software or failure of the Hackathon Website;
+
+Unauthorized human intervention in any part of the entry process or the Hackathon; 
+
+Technical or human error which may occur in the administration of the Hackathon or the processing of Submissions; or 
+
+Any injury or damage to persons or property which may be caused, directly or indirectly, in whole or in part, from the Entrant’s participation in the Hackathon or receipt or use or misuse of any Prize.
+
+The Released Parties are not responsible for incomplete, late, misdirected, damaged, lost, illegible, or incomprehensible Submissions or for address or email address changes of the Entrants. Proof of sending or submitting the aforementioned will not be deemed to be proof of receipt by the Sponsor or Administrator. If for any reason any Entrant’s Submission is determined to have not been received or been erroneously deleted, lost, or otherwise destroyed or corrupted, the Entrant’s sole remedy is to request the opportunity to resubmit its Submission. Such a request must be made promptly after the Entrant knows or should have known there was a problem and will be determined at the sole discretion of the Sponsor.
+
+ 
+
+10. Publicity
+By participating in the Hackathon, Entrant consents to the use and display of the Entrant’s Submission, and to the use of personal information about themselves, for promotional purposes, by the Sponsor, Administrator, and third parties acting on their behalf, during the Hackathon Period and for three years after. Such personal information includes, but is not limited to, your name, likeness, photograph, voice, opinions, comments and hometown and country of residence. It may be used in any existing or newly created media, worldwide without further payment or consideration or right of review, unless prohibited by law. Authorized use includes but is not limited to advertising and promotional purposes. 
+
+ 
+
+11. General Conditions 
+Sponsor and Administrator reserve the right, in their sole discretion, to cancel, suspend and/or modify the Hackathon, or any part of it, in the event of a technical failure, fraud, or any other factor or event that was not anticipated or is not within their control.
+
+Sponsor and Administrator reserve the right in their sole discretion to disqualify any individual or Entrant if it finds to be actually or presenting the appearance of tampering with the entry process or the operation of the Hackathon or to be acting in violation of these Official Rules or in a manner that is inappropriate, unsportsmanlike, not in the best interests of this Hackathon, or a violation of any applicable law or regulation.
+
+Any attempt by any person to undermine the proper conduct of the Hackathon may be a violation of criminal and civil law. Should the Sponsor or Administrator suspect that such an attempt has been made or is threatened, they reserve the right to take appropriate action including but not limited to requiring an Entrant to cooperate with an investigation and referral to criminal and civil law enforcement authorities.
+
+If there is any discrepancy or inconsistency between the terms and conditions of the Official Rules and disclosures or other statements contained in any Hackathon materials, including but not limited to the Hackathon Submission form, Hackathon Website, or advertising, the terms and conditions of the Official Rules shall prevail.
+
+The terms and conditions of the Official Rules are subject to change at any time, including the rights or obligations of the Entrant, the Sponsor and Administrator. The Sponsor and Administrator will post the terms and conditions of the amended Official Rules on the Hackathon Website. To the fullest extent permitted by law, any amendment will become effective at the time specified in the posting of the amended Official Rules or, if no time is specified, the time of posting.
+
+If at any time prior to the deadline, an Entrant or prospective Entrant believes that any term in the Official Rules is or may be ambiguous, they must submit a written request for clarification. 
+
+The Sponsor or Administrator’s failure to enforce any term of these Official Rules shall not constitute a waiver of that provision. Should any provision of these Official Rules be or become illegal or unenforceable in any jurisdiction whose laws or regulations may apply to an Entrant, such illegality or unenforceability shall leave the remainder of these Official Rules, including the Rule affected, to the fullest extent permitted by law, unaffected and valid. The illegal or unenforceable provision shall be replaced by a valid and enforceable provision that comes closest and best reflects the Sponsor’s intention in a legal and enforceable manner with respect to the invalid or unenforceable provision.
+
+Excluding Submissions, all intellectual property related to this Hackathon, including but not limited to copyrighted material, trademarks, trade-names, logos, designs, promotional materials, web pages, source codes, drawings, illustrations, slogans and representations are owned or used under license by the Sponsor and/or Administrator. All rights are reserved. Unauthorized copying or use of any copyrighted material or intellectual property without the express written consent of its owners is strictly prohibited. Any use in a Submission of Sponsor or Administrator’s intellectual property shall be solely to the extent provided for in these Official Rules.
+
+ 
+
+12. Limitations of Liability
+By entering, all Entrants (including, in the case of a Team or Organization, all participating members) agree to release the Released Parties from any and all liability in connection with the Prizes or Entrant’s participation in the Hackathon. Provided, however, that any liability limitation regarding gross negligence or intentional acts, or events of death or body injury shall not be applicable in jurisdictions where such limitation is not legal.
+
+ 
+
+13. Disputes
+Except where prohibited by law, as a condition of participating in this Hackathon, Entrant agrees that:
+
+Any and all disputes and causes of action arising out of or connected with this Hackathon, or any Prizes awarded, shall be resolved individually, without resort to any form of class action lawsuit, and exclusively by final and binding arbitration under the rules of the American Arbitration Association and held at the AAA regional office nearest the contestant;
+
+The Federal Arbitration Act shall govern the interpretation, enforcement and all proceedings at such arbitration; and
+
+Judgment upon such arbitration award may be entered in any court having jurisdiction.
+
+Under no circumstances will Entrant be permitted to obtain awards for, and Entrant hereby waives all rights to claim, punitive, incidental or consequential damages, or any other damages, including attorneys’ fees, other than contestant’s actual out-of-pocket expenses (i.e., costs associated with entering this Hackathon), and Entrant further waives all rights to have damages multiplied or increased.
+
+All issues and questions concerning the construction, validity, interpretation and enforceability of these Official Rules, or the rights and obligations of the Entrant and Sponsor in connection with this Hackathon, shall be governed by, and construed in accordance with, the substantive laws of the State of New York, USA without regard to New York choice of law rules.
+
+SOME JURISDICTIONS DO NOT ALLOW THE LIMITATIONS OR EXCLUSION OF LIABILITY FOR INCIDENTAL OR CONSEQUENTIAL DAMAGES, SO THE ABOVE LIMITATIONS OF LIABILITY MAY NOT APPLY TO YOU.
+
+ 
+
+14. Additional Terms
+Please review the Devpost Terms of Service at https://info.devpost.com/terms for additional rules that apply to your participation in the Hackathon and more generally your use of the Hackathon Website. Such Terms of Service are incorporated by reference into these Official Rules, including that the term "Poster" in the Terms of Service shall mean the same as "Sponsor" in these Official Rules." If there is a conflict between the Terms of Service and these Official Rules, these Official Rules shall control with respect to this Hackathon only.
+
+ 
+
+15. Entrant’s Personal Information
+Information collected from Entrants is subject to Devpost’s Privacy Policy, which is available at https://info.devpost.com/privacy.
+
+For questions, send an email to support@devpost.com.
