@@ -44,6 +44,14 @@ leaderboard:{mapId}:{date}   Sorted Set, 멤버 userId, 스코어 clearTimeMs
 
 동일한 date-key 규칙을 따르므로 별도 리셋 로직 불필요 — 새 날짜가 되면 새 빈 키에서 시작.
 
+### 위치 앵커 (이동 판정 권위, 보안 목적)
+
+```
+pos:{mapId}:{date}:{userId}   String, 값 "{x}:{y}"   TTL 2시간(세션 안전장치)
+```
+
+`trap.trigger`가 클라이언트가 보낸 좌표를 그대로 신뢰하면, 실제로 가본 적 없는 좌표를 무작위로 호출해 맵 전체의 함정 위치를 오라클처럼 알아낼 수 있다(4절 "타인 함정 비노출" 정책이 API 레벨에서 무력화됨). 이를 막기 위해 서버가 유저별 "마지막 확인된 위치"를 별도 키로 추적하고, 다음 요청이 인접 타일인지 검증한다. 발자국(ZSET)이나 리더보드처럼 게임의 영속 데이터가 아니라 순수 세션 방어용 앵커이므로 짧은 TTL로 자동 정리한다.
+
 ## 3. 함정 개수 제한 집행
 
 ```
@@ -51,18 +59,29 @@ function installTrap(mapId, date, userId, type, x, y):
   current = HGETALL(trap:installer:{mapId}:{date}:{userId})   // 최대 3개
   if len(current) >= TOTAL_TRAP_CAP: return FAIL("TOTAL_CAP_REACHED")
   if count(v == type for v in current.values()) >= PER_TYPE_CAP[type]: return FAIL("TYPE_CAP_REACHED")
-  if HEXISTS(trap:{mapId}:{date}, "{x}:{y}"): return FAIL("TILE_OCCUPIED")
+
+  // 타일 점유 판정은 HSETNX로 원자적으로 처리 (필드가 없을 때만 성공) —
+  // 두 유저가 같은 타일에 거의 동시에 설치를 시도해도 하나만 성공하도록 보장
+  placed = HSETNX(boardKey, "{x}:{y}", JSON({type, installerId: userId, installedAt: now}))
+  if not placed: return FAIL("TILE_OCCUPIED")
 
   WATCH installerKey
   MULTI
-    HSET boardKey "{x}:{y}" JSON({type, installerId: userId, installedAt: now})
     HSET installerKey "{x}:{y}" type
     EXPIRE boardKey / installerKey TTL_SECONDS
-  EXEC   // 레이스 발생 시 1회 재시도
+  ok = EXEC
+  if not ok:                          // 동일 유저의 동시 재설치 레이스 — 위에서 심은 보드 엔트리 롤백
+    HDEL boardKey "{x}:{y}"
+    return FAIL("RETRY")              // 클라이언트가 1회 재시도
 ```
 
 ```
 function triggerTrap(mapId, date, stepperId, x, y):
+  last = GET(pos:{mapId}:{date}:{stepperId})
+  if last is null: return FAIL("NO_SESSION")            // map.getState 없이 호출 — 비정상
+  if manhattanDistance(last, {x,y}) > 1: return FAIL("INVALID_MOVE")   // 인접 타일 아니면 거부(좌표 스캔 방지)
+  SET pos:{mapId}:{date}:{stepperId} "{x}:{y}" EX 7200   // 이동이 유효할 때만 위치 갱신
+
   raw = HGET(trap:{mapId}:{date}, "{x}:{y}")
   if not raw: return { hit: false }
   {type, installerId} = parse(raw)
@@ -70,10 +89,14 @@ function triggerTrap(mapId, date, stepperId, x, y):
 
   HDEL trap:{mapId}:{date} "{x}:{y}"
   HDEL trap:installer:{mapId}:{date}:{installerId} "{x}:{y}"   // 슬롯 즉시 반환
+  if type == "respawn":
+    SET pos:{mapId}:{date}:{stepperId} "{startX}:{startY}" EX 7200   // 순간이동 반영, 다음 인접 판정 기준점 갱신
   return { hit: true, type }
 ```
 
 **함정 발동 시 설치자 슬롯 즉시 반환으로 확정.** `traps.md`의 "설치 쿨다운 없음 — 개수 제한으로만 통제"가 의미를 가지려면 개수 제한이 지속적으로 순환하는 자원이어야 한다. 발동돼도 슬롯이 안 열리면 초반에 다 쓴 유저는 하루 종일 재설치 불가로 "쿨다운 없음"과 모순되고, 슬롯이 안 닫히면 함정이 무한 누적된다.
+
+**`trap.trigger`에 위치 인접성 검증을 추가한 이유(보안)**: 이 API는 4절 표에서 보듯 이동 중 새 타일에 진입할 때마다 이미 호출되므로, 별도의 전용 이동 엔드포인트를 새로 추가하지 않고 이 호출 안에서 위치 앵커를 함께 검증/갱신한다. 인접 타일 검증만으로 봇이 그리드 전체를 실제로 걸어서 훑는 것 자체를 막을 수는 없지만(그건 정상 플레이와 동일한 비용이 든다), 최소한 "한 번의 API 호출로 임의 좌표의 함정 유무를 즉시 조회"하는 오라클 공격은 차단된다 — "타인 함정 비노출" 정책이 API로 우회되지 않도록 하는 최소 방어선.
 
 `TOTAL_TRAP_CAP`, `PER_TYPE_CAP` 등은 하드코딩하지 않고 설정값으로 분리한다 — `traps.md`의 ⚠️ 수치가 플레이테스트로 확정되면 설정값만 갱신.
 
@@ -81,10 +104,10 @@ function triggerTrap(mapId, date, stepperId, x, y):
 
 | 프로시저 | 입력 | 출력 | 설명 |
 |---|---|---|---|
-| `map.getState` (query) | `{ mapId }` | `{ date, footprints: {x,y}[], myTraps: {x,y,type}[] }` | 맵 진입 시 1회. **타인 함정은 노출하지 않음** — 밟기 전까지 서프라이즈 유지 |
+| `map.getState` (query) | `{ mapId }` | `{ date, footprints: {x,y}[], myTraps: {x,y,type}[] }` | 맵 진입 시 1회. **타인 함정은 노출하지 않음** — 밟기 전까지 서프라이즈 유지. 위치 앵커(`pos:...`)를 시작 타일로 초기화 |
 | `footprint.record` (mutation) | `{ mapId, tiles: {x,y}[] }` | `{ recorded: number }` | 배치 기록 → ZADD 파이프라인 + 1회 트림 |
 | `trap.install` (mutation) | `{ mapId, type, x, y }` | `{ success, reason?, myTraps }` | 3절 로직. 성공 시 갱신된 내 슬롯 목록 반환 |
-| `trap.trigger` (mutation) | `{ mapId, x, y }` | `{ hit, type? }` | 이동 중 새 타일 진입 시 호출, 서버가 판정 권위자 |
+| `trap.trigger` (mutation) | `{ mapId, x, y }` | `{ hit, type? }` | 이동 중 새 타일 진입 시 호출. 위치 앵커로 인접성 검증 후 판정(3절) — 서버가 유일한 판정 권위자 |
 | `run.finish` (mutation) | `{ mapId, clearTimeMs }` | `{ rank, isNewRecord }` | 골인 시 리더보드 반영 |
 | `leaderboard.get` (query) | `{ mapId }` | `{ entries: {userId, clearTimeMs, rank}[] }` | 리더보드 조회 |
 
@@ -98,6 +121,8 @@ function triggerTrap(mapId, date, stepperId, x, y):
 - 함정 발동·골인·페이지 이탈 시 즉시
 
 발자국은 비authoritative 힌트 데이터라 배치 지연이나 마지막 몇 초 유실이 게임 진행에 영향 없다 — 매 타일 즉시 쓰기로 서버리스 호출 비용을 늘릴 이유가 없다.
+
+**의도적으로 다루지 않는 위험(accepted risk)**: `footprint.record`는 `trap.trigger`와 달리 위치 앵커 검증을 거치지 않으므로, 클라이언트가 가본 적 없는 좌표를 발자국으로 위조해 다른 유저를 잘못된 길로 유도할 수 있다. 발자국은 애초에 참고용 힌트일 뿐 진행에 필수가 아니고(위 문단), 검증을 추가하면 배치 처리 이점이 사라지므로 이번 설계에서는 의도적으로 방어하지 않는다. 어뷰징이 실제로 문제가 되면 위치 앵커와 대조해 앵커 경로에서 벗어난 좌표는 버리는 서버측 필터를 추가하는 것으로 확장 가능(7절).
 
 ## 6. 발자국 개수 상한: 맵당 최근 300개 서로 다른 타일
 
