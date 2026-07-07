@@ -1,0 +1,42 @@
+{
+  "statusLine": {
+    "type": "command",
+    "command": "bash ~/.claude/hooks/context-bar.sh"
+  },
+  "autoUpdatesChannel": "latest",
+  "_WARNING_bypassPermissions": "아래 두 설정은 모든 권한 프롬프트를 전역으로 비활성화합니다. 개인 환경 전용 — 팀/공용 환경에서는 제거하세요.",
+  "skipDangerousModePermissionPrompt": true,
+  "permissions": {
+    "defaultMode": "bypassPermissions"
+  },
+  "model": "sonnet",
+  "env": {
+    "LANG": "en_US.UTF-8",
+    "LC_ALL": "en_US.UTF-8",
+    "PYTHONIOENCODING": "utf-8"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ~/.claude/hooks/session_start.ps1",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ~/.claude/hooks/notify.ps1",
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}

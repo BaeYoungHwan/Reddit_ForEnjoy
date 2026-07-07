@@ -1,0 +1,50 @@
+# 환경 변수 & 시크릿
+.env
+.env.local
+.env.production
+.env.development
+config/secrets.*
+# .env.example 은 템플릿이므로 커밋 허용
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+
+# Node
+node_modules/
+.next/
+
+# 로그
+logs/
+*.log
+!logs/.gitkeep
+
+# 실행 계획 빈 폴더 유지
+!docs/exec-plans/active/.gitkeep
+!docs/exec-plans/completed/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/sessions/
+
+# 세션 상태 (로컬 전용)
+docs/ref/session-state.md
+
+# 캐시 (로컬 전용)
+.cache/
+
+# AI-readiness 스킬 생성 결과물 (로컬 전용)
+docs/ai-readiness-map.html
+docs/ai-readiness-score.json

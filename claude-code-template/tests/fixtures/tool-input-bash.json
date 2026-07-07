@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "ls -la"}, "tool_response": {"output": "file.txt\n"}}

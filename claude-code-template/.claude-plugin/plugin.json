@@ -1,0 +1,11 @@
+{
+  "name": "claude-code-template",
+  "description": "Opinionated Claude Code harness with hooks, skills, agents, and Karpathy behavioral guidelines. Korean-first workflow with audit logging, TDD enforcement, and parallel agent orchestration.",
+  "version": "1.0.0",
+  "author": {
+    "name": "밤하늘"
+  },
+  "license": "MIT",
+  "keywords": ["template", "harness", "hooks", "guidelines", "korean", "karpathy", "tdd", "workflow"],
+  "skills": ["./skills/karpathy-guidelines"]
+}
