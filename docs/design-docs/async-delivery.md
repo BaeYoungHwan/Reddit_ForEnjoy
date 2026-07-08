@@ -104,7 +104,7 @@ function triggerTrap(mapId, date, stepperId, x, y):
 
 | 프로시저 | 입력 | 출력 | 설명 |
 |---|---|---|---|
-| `map.getState` (query) | `{ mapId }` | `{ date, footprints: {x,y}[], myTraps: {x,y,type}[] }` | 맵 진입 시 1회. **타인 함정은 노출하지 않음** — 밟기 전까지 서프라이즈 유지. 위치 앵커(`pos:...`)를 시작 타일로 초기화 |
+| `map.getState` (query) | `{ mapId }` | `{ date, footprints: {x,y}[], myTraps: {x,y,type}[] }` | 맵 진입 시 호출. **타인 함정은 노출하지 않음** — 밟기 전까지 서프라이즈 유지. 위치 앵커(`pos:...`)가 없을 때만(NX) 시작 타일로 초기화 — 세션 중 재호출(탭 재포커스 등)돼도 진행 중인 앵커를 되돌리지 않는다. 새 런은 `run.finish`가 앵커를 지워야 다시 초기화됨 |
 | `footprint.record` (mutation) | `{ mapId, tiles: {x,y}[] }` | `{ recorded: number }` | 배치 기록 → ZADD 파이프라인 + 1회 트림 |
 | `trap.install` (mutation) | `{ mapId, type, x, y }` | `{ success, reason?, myTraps }` | 3절 로직. 성공 시 갱신된 내 슬롯 목록 반환 |
 | `trap.trigger` (mutation) | `{ mapId, x, y }` | `{ hit, type? }` | 이동 중 새 타일 진입 시 호출. 위치 앵커로 인접성 검증 후 판정(3절) — 서버가 유일한 판정 권위자 |
@@ -139,3 +139,45 @@ function triggerTrap(mapId, date, stepperId, x, y):
 - 폴링 도입 시 ZSET 스코어를 `since` 파라미터로 활용한 증분 조회
 - "내 함정에 걸렸다" 알림(댓글/DM) — PRD의 재방문 훅 강화, P1 이후 검토
 - 실시간 동시 플레이는 현재 요구사항 밖 — 필요해지면 Devvit Realtime/Pub-Sub이 필요한 별도 아키텍처이므로 지금 설계에 무리하게 끼워 넣지 않는다
+
+## 8. PR #3 리뷰 후속 조치 (기획안)
+
+> 근거: PR #3 코드 리뷰 | 상태: 초안 — 우선순위/일정은 스탠드업에서 재확인
+
+### 8.1 `map.getState` 세션 계약 명문화 (Priority: High, 즉시 가능) — ✅ 조치 완료 (2026-07-08)
+- 문제: 위치 앵커는 "맵 진입당 1회 호출"을 전제로 매번 시작 좌표로 리셋된다(1절과 일치하는 의도된 동작). 클라이언트가 세션 중 재호출하면 앵커가 되돌아가 이후 정상 이동까지 `INVALID_MOVE`로 거부된다.
+- 조치(3번 방어책 채택, 1·2번 각주 대신 코드로 계약을 안전하게 만들어 재호출 제약 자체를 없앰):
+  1. `map.getState`가 위치 앵커를 `SET ... NX`로만 초기화하도록 변경 — 이미 앵커가 있으면 덮어쓰지 않아 세션 중 재호출에 안전
+  2. `run.finish`에서 위치 앵커를 삭제 — 다음 `map.getState` 호출(새 런 시작)이 NX로 다시 시작 좌표를 초기화할 수 있도록 함. 자정 리셋 시에는 날짜가 바뀌어 키 자체가 새로 시작되므로 별도 처리 불필요
+  3. 임소리(client-phaser) 확인은 더 이상 필수 아님 — 재호출해도 안전하므로 탭 재포커스/리렌더링 시 재호출 여부를 굳이 통제할 필요 없음
+
+### 8.2 `mapId` 화이트리스트 검증 (Priority: Medium, 맵 데이터 확정 후)
+- 문제: 임의의 `mapId` 문자열이 그대로 Redis 키에 쓰여 키 스팸 여지가 있음(`maps.ts`가 미확정 mapId에도 `{0,0}`으로 조용히 통과)
+- 조치: 맵 확정 후 `mapIdSchema`를 확정 맵 목록 기반 `z.enum(...)`으로 교체하거나 프로시저 진입부에 존재 검증 추가
+
+### 8.3 `run.finish` clearTimeMs 하한 검증 (Priority: Low, 맵 데이터 확정 후)
+- 문제: 비현실적으로 작은 클리어 시간도 그대로 리더보드에 반영됨
+- 조치: 맵별 최소 예상 클리어 시간을 `gameConfig.ts` 상수로 추가하고 `z.number().int().min(MIN_CLEAR_TIME_MS)`로 강화
+
+### 8.4 동시성 회귀 테스트 추가 (Priority: High, 즉시 가능)
+- 문제: `trap.install`의 HSETNX+WATCH/MULTI/EXEC 레이스 방지, `trap.trigger`의 인접 타일 검증에 대한 자동 테스트가 없음(PR 본문도 "Redis 실연동 미검증"으로 자인)
+- 조치(해커톤 일정 고려, 최소 범위):
+  1. 최우선 시나리오 2개만 커버 — ① 동일 유저가 서로 다른 두 타일에 동시에 `trap.install` 호출 시 정확히 하나만 성공하고 나머지는 `RETRY` ② `map.getState` 없이 `trap.trigger` 호출 시 `NO_SESSION`, 앵커에서 2칸 이상 떨어진 좌표는 `INVALID_MOVE`
+  2. 테스트 위치: `src/server/**/*.test.ts` (vitest로 이번에 컨벤션 확립)
+  3. `devvit playtest`로 실제 Redis 연동 1회 수동 검증 (PR에 이미 후속 작업으로 명시됨)
+
+### 8.5 `parseTile` NaN 방어 (Priority: Low, nice-to-have) — ✅ 조치 완료 (2026-07-08)
+- 문제: `x ?? 0` / `y ?? 0`은 `NaN`을 걸러내지 못함(현재는 내부 생성 문자열만 파싱해 실사용 위험은 낮음)
+- 조치: `Number.isFinite` 체크로 교체 (`src/server/core/redisKeys.ts`)
+
+### 우선순위 배치
+
+| 항목 | 우선순위 | 선행조건 | 담당(제안) |
+|---|---|---|---|
+| 8.1 세션 계약 명문화 | High | 없음 | 배영환 + 임소리 확인 |
+| 8.4 동시성 테스트 | High | 없음 | 배영환 |
+| 8.2 mapId 검증 | Medium | 맵 데이터 확정 | 배영환 |
+| 8.3 clearTimeMs 하한 | Low | 맵 데이터 확정 | 배영환 |
+| 8.5 parseTile 방어 | Low | 없음 | 배영환 |
+
+> PRD 8절(MVP 제외 사항) 침범 없음 — 신규 기능이 아니라 이미 구현된 P1 로직의 견고화.
