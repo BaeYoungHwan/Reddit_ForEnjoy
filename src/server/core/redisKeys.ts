@@ -27,3 +27,10 @@ export const leaderboardKey = (mapId: string, date: string): string => `leaderbo
 
 export const positionAnchorKey = (mapId: string, date: string, userId: string): string =>
   `pos:${mapId}:${date}:${userId}`;
+
+/**
+ * 발자국/함정/랭킹/위치앵커는 키 이름에 날짜가 포함돼 자정이 지나면 자동으로 새 키에서
+ * 시작하므로(async-delivery.md 2절/8.1) 별도 삭제 로직이 필요 없다. 이 키는 그 자동 리셋이
+ * 실제로 발동했는지 확인하기 위한 관측용 마커일 뿐, 게임 로직이 이 키를 참조하지는 않는다.
+ */
+export const DAILY_RESET_MARKER_KEY = 'system:last-daily-reset';

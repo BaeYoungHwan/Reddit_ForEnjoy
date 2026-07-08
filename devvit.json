@@ -41,8 +41,19 @@
   "triggers": {
     "onAppInstall": "/internal/triggers/on-app-install"
   },
+  "scheduler": {
+    "tasks": {
+      "daily-reset": {
+        "endpoint": "/internal/scheduler/daily-reset",
+        "cron": "0 15 * * *"
+      }
+    }
+  },
   "scripts": {
     "dev": "vite build --watch",
     "build": "vite build"
+  },
+  "dev": {
+    "subreddit": "maze_footprints_dev"
   }
 }
