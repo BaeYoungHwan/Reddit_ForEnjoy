@@ -233,23 +233,24 @@ class MazeScene extends Phaser.Scene {
     return null;
   }
 
+  // 그리드 좌표(x, y)로 이동/통과 가능한지 확인하는 함수 (맵 범위 안 + 벽 아님).
+  // 일반 이동(tryMove)과 슬라이드(slideStep) 둘 다 같은 기준으로 판정해야 해서 하나로 뽑아둠.
+  private isWalkable(x: number, y: number): boolean {
+    const isOutOfBounds =
+      y < 0 || y >= TEMP_MAP.length || x < 0 || x >= TEMP_MAP[0]!.length;
+    if (isOutOfBounds) return false;
+
+    return TEMP_MAP[y]![x] === 0;
+  }
+
   // 한 칸 이동을 시도하는 함수.
   // dx, dy는 "어느 방향으로 한 칸 움직이려 하는지" (-1, 0, 1 중 하나씩)
   private tryMove(dx: number, dy: number) {
     const targetX = this.playerGridX + dx;
     const targetY = this.playerGridY + dy;
 
-    // 맵 범위를 벗어나면 이동 취소
-    const isOutOfBounds =
-      targetY < 0 ||
-      targetY >= TEMP_MAP.length ||
-      targetX < 0 ||
-      targetX >= TEMP_MAP[0]!.length;
-    if (isOutOfBounds) return;
-
-    // 벽이면 이동 취소
-    const isWall = TEMP_MAP[targetY]![targetX] === 1;
-    if (isWall) return;
+    // 맵 범위 밖이거나 벽이면 이동 취소
+    if (!this.isWalkable(targetX, targetY)) return;
 
     this.isMoving = true;
     this.playerGridX = targetX;
@@ -321,14 +322,7 @@ class MazeScene extends Phaser.Scene {
     const targetX = this.playerGridX + dx;
     const targetY = this.playerGridY + dy;
 
-    const isOutOfBounds =
-      targetY < 0 ||
-      targetY >= TEMP_MAP.length ||
-      targetX < 0 ||
-      targetX >= TEMP_MAP[0]!.length;
-    const isWall = !isOutOfBounds && TEMP_MAP[targetY]![targetX] === 1;
-
-    if (isOutOfBounds || isWall) {
+    if (!this.isWalkable(targetX, targetY)) {
       // 벽(또는 맵 끝)에 부딪혀서 미끄러짐이 끝남 → 다시 방향키 입력을 받을 수 있게 풀어줌
       this.isMoving = false;
       return;
