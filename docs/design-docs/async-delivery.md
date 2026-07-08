@@ -104,7 +104,7 @@ function triggerTrap(mapId, date, stepperId, x, y):
 
 | 프로시저 | 입력 | 출력 | 설명 |
 |---|---|---|---|
-| `map.getState` (query) | `{ mapId }` | `{ date, footprints: {x,y}[], myTraps: {x,y,type}[] }` | 맵 진입 시 1회. **타인 함정은 노출하지 않음** — 밟기 전까지 서프라이즈 유지. 위치 앵커(`pos:...`)를 시작 타일로 초기화 |
+| `map.getState` (query) | `{ mapId }` | `{ date, footprints: {x,y}[], myTraps: {x,y,type}[] }` | 맵 진입 시 호출. **타인 함정은 노출하지 않음** — 밟기 전까지 서프라이즈 유지. 위치 앵커(`pos:...`)가 없을 때만(NX) 시작 타일로 초기화 — 세션 중 재호출(탭 재포커스 등)돼도 진행 중인 앵커를 되돌리지 않는다. 새 런은 `run.finish`가 앵커를 지워야 다시 초기화됨 |
 | `footprint.record` (mutation) | `{ mapId, tiles: {x,y}[] }` | `{ recorded: number }` | 배치 기록 → ZADD 파이프라인 + 1회 트림 |
 | `trap.install` (mutation) | `{ mapId, type, x, y }` | `{ success, reason?, myTraps }` | 3절 로직. 성공 시 갱신된 내 슬롯 목록 반환 |
 | `trap.trigger` (mutation) | `{ mapId, x, y }` | `{ hit, type? }` | 이동 중 새 타일 진입 시 호출. 위치 앵커로 인접성 검증 후 판정(3절) — 서버가 유일한 판정 권위자 |
@@ -144,12 +144,12 @@ function triggerTrap(mapId, date, stepperId, x, y):
 
 > 근거: PR #3 코드 리뷰 | 상태: 초안 — 우선순위/일정은 스탠드업에서 재확인
 
-### 8.1 `map.getState` 세션 계약 명문화 (Priority: High, 즉시 가능)
+### 8.1 `map.getState` 세션 계약 명문화 (Priority: High, 즉시 가능) — ✅ 조치 완료 (2026-07-08)
 - 문제: 위치 앵커는 "맵 진입당 1회 호출"을 전제로 매번 시작 좌표로 리셋된다(1절과 일치하는 의도된 동작). 클라이언트가 세션 중 재호출하면 앵커가 되돌아가 이후 정상 이동까지 `INVALID_MOVE`로 거부된다.
-- 조치:
-  1. 4절 표의 `map.getState` 설명에 "맵 진입당 정확히 1회, 세션 중 재호출 금지" 각주 추가
-  2. 임소리(client-phaser)와 확인: 탭 재포커스/리렌더링 시 재호출 여부 점검
-  3. (옵션, 스트레치) 서버 방어책 검토: 앵커가 이미 있으면 덮어쓰지 않는 방식 — 단 자정 리셋 후 재진입 시나리오와 충돌 여부 확인 필요
+- 조치(3번 방어책 채택, 1·2번 각주 대신 코드로 계약을 안전하게 만들어 재호출 제약 자체를 없앰):
+  1. `map.getState`가 위치 앵커를 `SET ... NX`로만 초기화하도록 변경 — 이미 앵커가 있으면 덮어쓰지 않아 세션 중 재호출에 안전
+  2. `run.finish`에서 위치 앵커를 삭제 — 다음 `map.getState` 호출(새 런 시작)이 NX로 다시 시작 좌표를 초기화할 수 있도록 함. 자정 리셋 시에는 날짜가 바뀌어 키 자체가 새로 시작되므로 별도 처리 불필요
+  3. 임소리(client-phaser) 확인은 더 이상 필수 아님 — 재호출해도 안전하므로 탭 재포커스/리렌더링 시 재호출 여부를 굳이 통제할 필요 없음
 
 ### 8.2 `mapId` 화이트리스트 검증 (Priority: Medium, 맵 데이터 확정 후)
 - 문제: 임의의 `mapId` 문자열이 그대로 Redis 키에 쓰여 키 스팸 여지가 있음(`maps.ts`가 미확정 mapId에도 `{0,0}`으로 조용히 통과)
@@ -166,7 +166,7 @@ function triggerTrap(mapId, date, stepperId, x, y):
   2. 테스트 위치: `src/server/**/*.test.ts` (vitest로 이번에 컨벤션 확립)
   3. `devvit playtest`로 실제 Redis 연동 1회 수동 검증 (PR에 이미 후속 작업으로 명시됨)
 
-### 8.5 `parseTile` NaN 방어 (Priority: Low, nice-to-have)
+### 8.5 `parseTile` NaN 방어 (Priority: Low, nice-to-have) — ✅ 조치 완료 (2026-07-08)
 - 문제: `x ?? 0` / `y ?? 0`은 `NaN`을 걸러내지 못함(현재는 내부 생성 문자열만 파싱해 실사용 위험은 낮음)
 - 조치: `Number.isFinite` 체크로 교체 (`src/server/core/redisKeys.ts`)
 

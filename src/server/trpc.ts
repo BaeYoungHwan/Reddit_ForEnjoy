@@ -60,9 +60,12 @@ export const appRouter = t.router({
         redis.hGetAll(trapInstallerKey(mapId, date, ctx.userId)),
       ]);
 
+      // NX: 세션 중 map.getState가 재호출돼도(탭 재포커스 등) 이미 진행 중인 앵커를 시작 좌표로
+      // 되돌리지 않는다 — 되돌리면 이후 정상 이동까지 trap.trigger에서 INVALID_MOVE로 거부된다.
+      // 새 런을 시작할 때는 run.finish가 앵커를 지우므로 그때만 다시 시작 좌표로 초기화된다.
       const start = getMapStartPosition(mapId);
       const posKey = positionAnchorKey(mapId, date, ctx.userId);
-      await redis.set(posKey, tileMember(start));
+      await redis.set(posKey, tileMember(start), { nx: true });
       await redis.expire(posKey, POSITION_ANCHOR_TTL_SECONDS);
 
       return {
@@ -204,6 +207,8 @@ export const appRouter = t.router({
         }
 
         const rank = await redis.zRank(key, ctx.userId);
+        // 런 종료 — 다음 map.getState가 (NX로) 위치 앵커를 다시 시작 좌표로 초기화할 수 있도록 지운다.
+        await redis.del(positionAnchorKey(mapId, date, ctx.userId));
         return { rank: (rank ?? 0) + 1, isNewRecord };
       }),
   }),
@@ -224,3 +229,6 @@ export const appRouter = t.router({
 });
 
 export type AppRouter = typeof appRouter;
+
+// 테스트/서버 내부 호출용 — HTTP 왕복 없이 라우터를 직접 호출할 때 사용.
+export const createCaller = t.createCallerFactory(appRouter);

@@ -13,7 +13,7 @@ export const tileMember = (pos: Position): string => `${pos.x}:${pos.y}`;
 
 export function parseTile(member: string): Position {
   const [x, y] = member.split(':').map(Number);
-  return { x: x ?? 0, y: y ?? 0 };
+  return { x: Number.isFinite(x) ? x! : 0, y: Number.isFinite(y) ? y! : 0 };
 }
 
 export const footprintKey = (mapId: string, date: string): string => `footprint:${mapId}:${date}`;
