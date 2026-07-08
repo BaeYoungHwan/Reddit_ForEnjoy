@@ -1,15 +1,50 @@
 import './index.css';
 
 import { context, requestExpandedMode } from '@devvit/web/client';
-import { StrictMode, useState, type MouseEvent, type ReactNode } from 'react';
+import {
+  StrictMode,
+  useEffect,
+  useState,
+  type CSSProperties,
+  type MouseEvent,
+  type ReactNode,
+} from 'react';
 import { createRoot } from 'react-dom/client';
 import { useLeaderboard } from './hooks/useLeaderboard';
-import { generateDecorativeMazeBackground } from './mazePattern';
+import { buildMazeBackground, findPath, tileToPercent } from './mazePattern';
 import { formatClearTime } from './format';
-import type { LeaderboardEntry } from '../shared/game-types';
+import { getMazeMap } from '../shared/maps';
+import type { LeaderboardEntry, Position } from '../shared/game-types';
 
 const DEFAULT_MAP_ID = 'map-1';
-const DECORATIVE_MAZE_BACKGROUND = generateDecorativeMazeBackground(14, 20);
+const MAIN_MAP = getMazeMap(DEFAULT_MAP_ID);
+const MAIN_MAP_BACKGROUND = buildMazeBackground(MAIN_MAP);
+
+const WALK_STRIDE = 2;
+const STEP_INTERVAL_SEC = 0.45;
+const WALK_CYCLE_PAUSE_SEC = 1.2;
+const WALK_ICON_SIZES = ['w-9 h-9', 'w-10 h-10'];
+
+function angleBetween(a: Position, b: Position): number {
+  return (Math.atan2(b.y - a.y, b.x - a.x) * 180) / Math.PI + 90;
+}
+
+const FULL_WALK_PATH = findPath(MAIN_MAP);
+const WALK_TILES = FULL_WALK_PATH.filter(
+  (_, i) => i % WALK_STRIDE === 0 || i === FULL_WALK_PATH.length - 1
+);
+
+const FOOTPRINTS = WALK_TILES.map((tile, i) => {
+  const facing = WALK_TILES[i + 1] ?? WALK_TILES[i - 1] ?? tile;
+  return {
+    ...tileToPercent(MAIN_MAP, tile),
+    rotate: `${angleBetween(tile, facing)}deg`,
+    delay: `${i * STEP_INTERVAL_SEC}s`,
+    size: WALK_ICON_SIZES[i % WALK_ICON_SIZES.length]!,
+  };
+});
+
+const WALK_CYCLE_MS = (FOOTPRINTS.length * STEP_INTERVAL_SEC + WALK_CYCLE_PAUSE_SEC) * 1000;
 
 type View = 'menu' | 'leaderboard';
 
@@ -68,7 +103,7 @@ const HudButton = ({ onClick, label, icon }: { onClick: () => void; label: strin
 
 const PlayButton = ({ onClick }: { onClick: (e: MouseEvent<HTMLButtonElement>) => void }) => (
   <button
-    className="relative flex flex-col items-center justify-center gap-0.5 w-32 h-32 rounded-full bg-gradient-to-b from-[#ff7a4d] to-[#d93900] border-b-[7px] border-[#7a2400] text-white shadow-[0_0_32px_rgba(255,92,51,0.5)] cursor-pointer select-none transition active:translate-y-[4px] active:border-b-[2px] hover:brightness-110 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-400"
+    className="relative flex flex-col items-center justify-center gap-0.5 w-32 h-32 rounded-full bg-gradient-to-b from-[#ff7a4d] to-[#d93900] border-b-[7px] border-[#7a2400] text-white animate-glow-pulse cursor-pointer select-none transition active:translate-y-[4px] active:border-b-[2px] hover:brightness-110 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-400"
     onClick={onClick}
   >
     <span
@@ -77,24 +112,62 @@ const PlayButton = ({ onClick }: { onClick: (e: MouseEvent<HTMLButtonElement>) =
     />
     <span className="relative text-4xl drop-shadow-[1px_1px_0_rgba(0,0,0,0.25)]">▶</span>
     <span className="relative font-display text-sm tracking-wide drop-shadow-[1px_1px_0_rgba(0,0,0,0.25)]">
-      입장하기
+      Play
     </span>
   </button>
 );
 
-const MazeBackdrop = () => (
+const FootprintIcon = ({
+  className,
+  style,
+}: {
+  className?: string;
+  style?: CSSProperties;
+}) => (
+  <svg viewBox="0 0 24 24" className={className} style={style} fill="currentColor" aria-hidden>
+    {/* 발바닥(발볼+뒤꿈치) */}
+    <ellipse cx="12" cy="8" rx="5" ry="4.2" />
+    <ellipse cx="12" cy="17" rx="3.8" ry="4.8" />
+    {/* 발가락 5개 */}
+    <ellipse cx="6.6" cy="4.6" rx="1.6" ry="2.1" />
+    <ellipse cx="9.6" cy="2.7" rx="1.4" ry="1.9" />
+    <ellipse cx="12.7" cy="2.3" rx="1.4" ry="1.9" />
+    <ellipse cx="15.5" cy="2.9" rx="1.3" ry="1.7" />
+    <ellipse cx="17.8" cy="4.7" rx="1.1" ry="1.4" />
+  </svg>
+);
+
+const MazeBackdrop = ({ cycleKey }: { cycleKey: number }) => (
   <div aria-hidden className="absolute inset-0 overflow-hidden pointer-events-none">
     <div
-      className="absolute inset-0 opacity-[0.12]"
+      className="absolute inset-0 opacity-[0.22]"
       style={{
-        ...DECORATIVE_MAZE_BACKGROUND,
+        ...MAIN_MAP_BACKGROUND,
         backgroundRepeat: 'no-repeat',
-        backgroundSize: 'cover',
-        backgroundPosition: 'center',
+        backgroundSize: '100% 100%',
       }}
     />
     <div className="absolute inset-0 bg-gradient-to-b from-slate-950/40 via-transparent to-slate-950/80" />
     <div className="absolute left-1/2 top-1/3 -translate-x-1/2 -translate-y-1/2 w-80 h-80 rounded-full bg-orange-600/25 blur-3xl" />
+    <div key={cycleKey}>
+      {FOOTPRINTS.map((step, i) => (
+        <span
+          key={i}
+          className="absolute"
+          style={{ left: step.left, top: step.top }}
+        >
+          <FootprintIcon
+            className={`${step.size} text-orange-300 animate-step-in`}
+            style={{ animationDelay: step.delay, '--step-rotate': step.rotate } as CSSProperties}
+          />
+        </span>
+      ))}
+    </div>
+    <div
+      className="absolute inset-0 opacity-[0.05]"
+      style={{ backgroundImage: 'repeating-linear-gradient(0deg, #fff 0, #fff 1px, transparent 1px, transparent 3px)' }}
+    />
+    <div className="absolute inset-0 shadow-[inset_0_0_120px_60px_rgba(2,6,23,0.9)]" />
   </div>
 );
 
@@ -110,20 +183,20 @@ const LogoTitle = ({ size = 'text-4xl' }: { size?: string }) => (
   <h1
     className={`font-display ${size} tracking-wide bg-gradient-to-b from-orange-100 to-orange-300 bg-clip-text text-transparent [-webkit-text-stroke:1.5px_#7a2400] drop-shadow-[3px_3px_0_rgba(0,0,0,0.4)]`}
   >
-    미로의 발자국
+    Maze Footprints
   </h1>
 );
 
 const Menu = ({ onShowLeaderboard }: { onShowLeaderboard: () => void }) => (
   <>
-    <HudButton onClick={onShowLeaderboard} label="리더보드" icon={<RankIcon />} />
+    <HudButton onClick={onShowLeaderboard} label="Leaderboard" icon={<RankIcon />} />
     <PawTrail />
     <div className="flex flex-col items-center gap-2">
       <LogoTitle />
       <p className="text-sm text-slate-400 text-center leading-relaxed">
-        안개 속 미로를 걸으며 발자국을 남기고,
+        Walk the foggy maze and leave your footprints,
         <br />
-        다른 탐험가의 흔적과 함정을 마주하세요.
+        then cross paths with other explorers&apos; traces and traps.
       </p>
     </div>
     <PlayButton onClick={(e) => requestExpandedMode(e.nativeEvent, 'game')} />
@@ -131,7 +204,7 @@ const Menu = ({ onShowLeaderboard }: { onShowLeaderboard: () => void }) => (
       <div className="flex items-center gap-1.5 bg-slate-800/80 border border-slate-700 rounded-full pl-1 pr-3 py-1">
         <span className="w-4 h-4 rounded-full bg-orange-500" aria-hidden />
         <span className="text-xs text-slate-300">
-          <span className="text-slate-100 font-medium">{context.username}</span>님, 오늘의 미로가 기다리고 있어요
+          <span className="text-slate-100 font-medium">{context.username}</span>, today&apos;s maze awaits
         </span>
       </div>
     ) : null}
@@ -168,15 +241,15 @@ const Leaderboard = ({ onBack }: { onBack: () => void }) => {
         <button
           className="flex items-center justify-center w-9 h-9 rounded-xl border-2 border-slate-700 text-slate-300 hover:text-white hover:border-slate-500 transition cursor-pointer"
           onClick={onBack}
-          aria-label="뒤로"
+          aria-label="Back"
         >
           ←
         </button>
-        <h1 className="font-display text-lg tracking-wide text-white">오늘의 리더보드</h1>
+        <h1 className="font-display text-lg tracking-wide text-white">Today&apos;s Leaderboard</h1>
       </div>
 
       <div className="flex flex-col gap-3 min-h-[160px] justify-center">
-        {loading ? <p className="text-sm text-slate-500 text-center">불러오는 중...</p> : null}
+        {loading ? <p className="text-sm text-slate-500 text-center">Loading...</p> : null}
         {error ? (
           <div className="flex flex-col items-center gap-2">
             <p className="text-sm text-red-400 text-center">{error}</p>
@@ -184,14 +257,14 @@ const Leaderboard = ({ onBack }: { onBack: () => void }) => {
               className="text-slate-300 hover:text-white transition text-xs cursor-pointer underline underline-offset-4"
               onClick={reload}
             >
-              다시 시도
+              Retry
             </button>
           </div>
         ) : null}
         {!loading && !error && entries.length === 0 ? (
           <p className="text-sm text-slate-500 text-center">
-            아직 기록이 없어요.
-            <br />첫 기록의 주인공이 되어보세요!
+            No records yet.
+            <br />Be the first to set one!
           </p>
         ) : null}
 
@@ -223,10 +296,16 @@ const Leaderboard = ({ onBack }: { onBack: () => void }) => {
 
 export const Splash = () => {
   const [view, setView] = useState<View>('menu');
+  const [walkCycle, setWalkCycle] = useState(0);
+
+  useEffect(() => {
+    const id = setInterval(() => setWalkCycle((cycle) => cycle + 1), WALK_CYCLE_MS);
+    return () => clearInterval(id);
+  }, []);
 
   return (
     <div className="relative flex flex-col justify-center items-center min-h-screen bg-slate-950 text-white px-4 overflow-hidden">
-      <MazeBackdrop />
+      <MazeBackdrop cycleKey={walkCycle} />
       <div className="relative z-10 w-full max-w-sm">
         <RivetPanel>
           {view === 'menu' ? (

@@ -3,4 +3,31 @@
 
 @theme {
   --font-display: 'Jua', sans-serif;
+  --animate-glow-pulse: glow-pulse 2.2s ease-in-out infinite;
+  --animate-step-in: step-in 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes glow-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 28px rgba(255, 92, 51, 0.45);
+  }
+  50% {
+    box-shadow: 0 0 46px rgba(255, 92, 51, 0.75);
+  }
+}
+
+@keyframes step-in {
+  0% {
+    opacity: 0;
+    transform: scale(0.4) rotate(var(--step-rotate, 0deg));
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1.15) rotate(var(--step-rotate, 0deg));
+  }
+  100% {
+    opacity: 0.85;
+    transform: scale(1) rotate(var(--step-rotate, 0deg));
+  }
 }

@@ -24,7 +24,7 @@ export const useLeaderboard = (mapId: string) => {
         const { entries } = await trpc.leaderboard.get.query({ mapId });
         if (!cancelled) setState({ entries, loading: false, error: null });
       } catch {
-        if (!cancelled) setState({ entries: [], loading: false, error: '리더보드를 불러오지 못했어요' });
+        if (!cancelled) setState({ entries: [], loading: false, error: 'Failed to load the leaderboard' });
       }
     };
     void load();
