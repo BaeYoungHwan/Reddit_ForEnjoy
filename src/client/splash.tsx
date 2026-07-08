@@ -5,20 +5,13 @@ import { StrictMode, useState, type MouseEvent, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { useLeaderboard } from './hooks/useLeaderboard';
 import { generateDecorativeMazeBackground } from './mazePattern';
+import { formatClearTime } from './format';
 import type { LeaderboardEntry } from '../shared/game-types';
 
 const DEFAULT_MAP_ID = 'map-1';
 const DECORATIVE_MAZE_BACKGROUND = generateDecorativeMazeBackground(14, 20);
 
 type View = 'menu' | 'leaderboard';
-
-function formatClearTime(ms: number): string {
-  const totalSeconds = Math.floor(ms / 1000);
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  const millis = ms % 1000;
-  return `${minutes}:${String(seconds).padStart(2, '0')}.${String(millis).padStart(3, '0')}`;
-}
 
 const RANK_STYLES: Record<number, string> = {
   1: 'bg-amber-400 border-amber-600 text-amber-950',
