@@ -54,6 +54,11 @@ export function tileToPercent(map: MazeMap, pos: Position): { left: string; top:
   };
 }
 
+/** a에서 b로 향하는 각도(도). 발자국 아이콘이 "위쪽(0deg)"을 향한다고 가정하고 +90 보정한다. */
+export function angleBetween(a: Position, b: Position): number {
+  return (Math.atan2(b.y - a.y, b.x - a.x) * 180) / Math.PI + 90;
+}
+
 /** map.start에서 map.exit까지 최단 경로(BFS)를 타일 좌표 목록으로 반환한다. 랜덤 없음, 항상 같은 결과. */
 export function findPath(map: MazeMap): Position[] {
   const rows = map.grid.length;

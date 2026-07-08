@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildMazeBackground, findPath, tileToPercent } from './mazePattern';
+import { angleBetween, buildMazeBackground, findPath, tileToPercent } from './mazePattern';
 import { MAZE_MAPS } from '../shared/maps';
 
 const map = MAZE_MAPS['map-1']!;
@@ -49,5 +49,23 @@ describe('findPath', () => {
 
   it('is deterministic — same map always produces the same path', () => {
     expect(findPath(map)).toEqual(findPath(map));
+  });
+});
+
+describe('angleBetween', () => {
+  it('points right (east) as 0deg', () => {
+    expect(angleBetween({ x: 0, y: 0 }, { x: 1, y: 0 })).toBeCloseTo(90 + 0);
+  });
+
+  it('points down (south) when moving in +y', () => {
+    expect(angleBetween({ x: 0, y: 0 }, { x: 0, y: 1 })).toBeCloseTo(180);
+  });
+
+  it('points left (west) when moving in -x', () => {
+    expect(angleBetween({ x: 1, y: 0 }, { x: 0, y: 0 })).toBeCloseTo(270);
+  });
+
+  it('points up (north) when moving in -y', () => {
+    expect(angleBetween({ x: 0, y: 1 }, { x: 0, y: 0 })).toBeCloseTo(0);
   });
 });

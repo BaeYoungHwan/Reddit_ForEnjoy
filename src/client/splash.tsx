@@ -11,10 +11,10 @@ import {
 } from 'react';
 import { createRoot } from 'react-dom/client';
 import { useLeaderboard } from './hooks/useLeaderboard';
-import { buildMazeBackground, findPath, tileToPercent } from './mazePattern';
+import { angleBetween, buildMazeBackground, findPath, tileToPercent } from './mazePattern';
 import { formatClearTime } from './format';
 import { getMazeMap } from '../shared/maps';
-import type { LeaderboardEntry, Position } from '../shared/game-types';
+import type { LeaderboardEntry } from '../shared/game-types';
 
 const DEFAULT_MAP_ID = 'map-1';
 const MAIN_MAP = getMazeMap(DEFAULT_MAP_ID);
@@ -25,20 +25,19 @@ const STEP_INTERVAL_SEC = 0.45;
 const WALK_CYCLE_PAUSE_SEC = 1.2;
 const WALK_ICON_SIZES = ['w-9 h-9', 'w-10 h-10'];
 
-function angleBetween(a: Position, b: Position): number {
-  return (Math.atan2(b.y - a.y, b.x - a.x) * 180) / Math.PI + 90;
-}
-
 const FULL_WALK_PATH = findPath(MAIN_MAP);
 const WALK_TILES = FULL_WALK_PATH.filter(
   (_, i) => i % WALK_STRIDE === 0 || i === FULL_WALK_PATH.length - 1
 );
 
 const FOOTPRINTS = WALK_TILES.map((tile, i) => {
-  const facing = WALK_TILES[i + 1] ?? WALK_TILES[i - 1] ?? tile;
+  const next = WALK_TILES[i + 1];
+  const prev = WALK_TILES[i - 1];
+  // 다음 타일이 있으면 그쪽을 향하고, 마지막 타일이면 이전 타일→현재 방향(진행 방향 유지)을 그대로 쓴다.
+  const rotateDeg = next ? angleBetween(tile, next) : prev ? angleBetween(prev, tile) : 0;
   return {
     ...tileToPercent(MAIN_MAP, tile),
-    rotate: `${angleBetween(tile, facing)}deg`,
+    rotate: `${rotateDeg}deg`,
     delay: `${i * STEP_INTERVAL_SEC}s`,
     size: WALK_ICON_SIZES[i % WALK_ICON_SIZES.length]!,
   };
@@ -117,12 +116,14 @@ const PlayButton = ({ onClick }: { onClick: (e: MouseEvent<HTMLButtonElement>) =
   </button>
 );
 
+type StepIconStyle = CSSProperties & { '--step-rotate'?: string };
+
 const FootprintIcon = ({
   className,
   style,
 }: {
   className?: string;
-  style?: CSSProperties;
+  style?: StepIconStyle;
 }) => (
   <svg viewBox="0 0 24 24" className={className} style={style} fill="currentColor" aria-hidden>
     {/* 발바닥(발볼+뒤꿈치) */}
@@ -153,12 +154,12 @@ const MazeBackdrop = ({ cycleKey }: { cycleKey: number }) => (
       {FOOTPRINTS.map((step, i) => (
         <span
           key={i}
-          className="absolute"
+          className="absolute -translate-x-1/2 -translate-y-1/2"
           style={{ left: step.left, top: step.top }}
         >
           <FootprintIcon
             className={`${step.size} text-orange-300 animate-step-in`}
-            style={{ animationDelay: step.delay, '--step-rotate': step.rotate } as CSSProperties}
+            style={{ animationDelay: step.delay, '--step-rotate': step.rotate }}
           />
         </span>
       ))}
