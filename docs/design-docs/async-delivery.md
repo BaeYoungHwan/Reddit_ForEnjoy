@@ -139,3 +139,45 @@ function triggerTrap(mapId, date, stepperId, x, y):
 - 폴링 도입 시 ZSET 스코어를 `since` 파라미터로 활용한 증분 조회
 - "내 함정에 걸렸다" 알림(댓글/DM) — PRD의 재방문 훅 강화, P1 이후 검토
 - 실시간 동시 플레이는 현재 요구사항 밖 — 필요해지면 Devvit Realtime/Pub-Sub이 필요한 별도 아키텍처이므로 지금 설계에 무리하게 끼워 넣지 않는다
+
+## 8. PR #3 리뷰 후속 조치 (기획안)
+
+> 근거: PR #3 코드 리뷰 | 상태: 초안 — 우선순위/일정은 스탠드업에서 재확인
+
+### 8.1 `map.getState` 세션 계약 명문화 (Priority: High, 즉시 가능)
+- 문제: 위치 앵커는 "맵 진입당 1회 호출"을 전제로 매번 시작 좌표로 리셋된다(1절과 일치하는 의도된 동작). 클라이언트가 세션 중 재호출하면 앵커가 되돌아가 이후 정상 이동까지 `INVALID_MOVE`로 거부된다.
+- 조치:
+  1. 4절 표의 `map.getState` 설명에 "맵 진입당 정확히 1회, 세션 중 재호출 금지" 각주 추가
+  2. 임소리(client-phaser)와 확인: 탭 재포커스/리렌더링 시 재호출 여부 점검
+  3. (옵션, 스트레치) 서버 방어책 검토: 앵커가 이미 있으면 덮어쓰지 않는 방식 — 단 자정 리셋 후 재진입 시나리오와 충돌 여부 확인 필요
+
+### 8.2 `mapId` 화이트리스트 검증 (Priority: Medium, 맵 데이터 확정 후)
+- 문제: 임의의 `mapId` 문자열이 그대로 Redis 키에 쓰여 키 스팸 여지가 있음(`maps.ts`가 미확정 mapId에도 `{0,0}`으로 조용히 통과)
+- 조치: 맵 확정 후 `mapIdSchema`를 확정 맵 목록 기반 `z.enum(...)`으로 교체하거나 프로시저 진입부에 존재 검증 추가
+
+### 8.3 `run.finish` clearTimeMs 하한 검증 (Priority: Low, 맵 데이터 확정 후)
+- 문제: 비현실적으로 작은 클리어 시간도 그대로 리더보드에 반영됨
+- 조치: 맵별 최소 예상 클리어 시간을 `gameConfig.ts` 상수로 추가하고 `z.number().int().min(MIN_CLEAR_TIME_MS)`로 강화
+
+### 8.4 동시성 회귀 테스트 추가 (Priority: High, 즉시 가능)
+- 문제: `trap.install`의 HSETNX+WATCH/MULTI/EXEC 레이스 방지, `trap.trigger`의 인접 타일 검증에 대한 자동 테스트가 없음(PR 본문도 "Redis 실연동 미검증"으로 자인)
+- 조치(해커톤 일정 고려, 최소 범위):
+  1. 최우선 시나리오 2개만 커버 — ① 동일 유저가 서로 다른 두 타일에 동시에 `trap.install` 호출 시 정확히 하나만 성공하고 나머지는 `RETRY` ② `map.getState` 없이 `trap.trigger` 호출 시 `NO_SESSION`, 앵커에서 2칸 이상 떨어진 좌표는 `INVALID_MOVE`
+  2. 테스트 위치: `src/server/**/*.test.ts` (vitest로 이번에 컨벤션 확립)
+  3. `devvit playtest`로 실제 Redis 연동 1회 수동 검증 (PR에 이미 후속 작업으로 명시됨)
+
+### 8.5 `parseTile` NaN 방어 (Priority: Low, nice-to-have)
+- 문제: `x ?? 0` / `y ?? 0`은 `NaN`을 걸러내지 못함(현재는 내부 생성 문자열만 파싱해 실사용 위험은 낮음)
+- 조치: `Number.isFinite` 체크로 교체 (`src/server/core/redisKeys.ts`)
+
+### 우선순위 배치
+
+| 항목 | 우선순위 | 선행조건 | 담당(제안) |
+|---|---|---|---|
+| 8.1 세션 계약 명문화 | High | 없음 | 배영환 + 임소리 확인 |
+| 8.4 동시성 테스트 | High | 없음 | 배영환 |
+| 8.2 mapId 검증 | Medium | 맵 데이터 확정 | 배영환 |
+| 8.3 clearTimeMs 하한 | Low | 맵 데이터 확정 | 배영환 |
+| 8.5 parseTile 방어 | Low | 없음 | 배영환 |
+
+> PRD 8절(MVP 제외 사항) 침범 없음 — 신규 기능이 아니라 이미 구현된 P1 로직의 견고화.
