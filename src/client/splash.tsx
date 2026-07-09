@@ -174,6 +174,15 @@ const FlashlightIcon = () => (
   </svg>
 );
 
+// 로드아웃 카드가 선택됐을 때 오른쪽에 뜨는 작은 체크 배지. 배지 배경(bg-current)이
+// 카드의 accent 색을 그대로 물려받으므로, 체크 표시 자체는 그 반대색(어두운 배경)으로 그려야
+// 잘 보인다 — 부모(button)의 currentColor가 아니라 슬레이트 950 고정색을 씀.
+const CheckIcon = () => (
+  <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="#020617" strokeWidth="3" aria-hidden>
+    <path d="M4 12.5 9.5 18 20 6" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
 // 3종 로드아웃 정의 — 색은 게임 화면(game.tsx ITEM_COLORS)의 손전등/쉴드 색과 맞추고,
 // 함정 탐지기는 기존 함정 4색(파랑/보라/회색/주황)과 안 겹치는 에메랄드로 새로 지정.
 const LOADOUT_OPTIONS: {
@@ -312,7 +321,7 @@ const Loadout = ({ onBack }: { onBack: () => void }) => {
     <div className="w-full flex flex-col gap-4">
       <div className="flex items-center gap-2">
         <button
-          className="flex items-center justify-center w-9 h-9 rounded-xl border-2 border-slate-700 text-slate-300 hover:text-white hover:border-slate-500 transition cursor-pointer"
+          className="flex items-center justify-center w-9 h-9 rounded-xl border-2 border-slate-700 text-slate-300 hover:text-white hover:border-slate-500 transition cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-400"
           onClick={onBack}
           aria-label="Back"
         >
@@ -321,23 +330,39 @@ const Loadout = ({ onBack }: { onBack: () => void }) => {
         <h1 className="font-display text-lg tracking-wide text-white">Choose Your Item</h1>
       </div>
 
-      <div className="flex flex-col gap-2.5">
+      <div className="flex flex-col gap-2.5" role="radiogroup" aria-label="Choose your item">
         {LOADOUT_OPTIONS.map((opt) => {
           const isSelected = selected === opt.id;
           return (
             <button
               key={opt.id}
               onClick={() => setSelected(opt.id)}
-              className={`flex items-center gap-3 rounded-2xl border-2 px-4 py-3 text-left transition cursor-pointer ${
+              role="radio"
+              aria-checked={isSelected}
+              className={`flex items-center gap-3 rounded-2xl border-2 px-4 py-3 text-left transition cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-400 ${
                 isSelected
                   ? opt.accent
                   : 'border-slate-700 bg-slate-800/50 text-slate-300 hover:border-slate-500'
               }`}
             >
-              <span className={isSelected ? '' : 'text-slate-400'}>{opt.icon}</span>
-              <span className="flex flex-col">
+              <span
+                className={`flex items-center justify-center w-10 h-10 rounded-full shrink-0 transition ${
+                  isSelected ? 'bg-black/25' : 'bg-slate-900/60 text-slate-400'
+                }`}
+              >
+                {opt.icon}
+              </span>
+              <span className="flex flex-col flex-1">
                 <span className="text-sm font-semibold">{opt.label}</span>
                 <span className="text-xs opacity-80">{opt.description}</span>
+              </span>
+              <span
+                aria-hidden
+                className={`flex items-center justify-center w-5 h-5 rounded-full border-2 shrink-0 transition ${
+                  isSelected ? 'bg-current border-current' : 'border-slate-600'
+                }`}
+              >
+                {isSelected ? <CheckIcon /> : null}
               </span>
             </button>
           );
@@ -345,7 +370,7 @@ const Loadout = ({ onBack }: { onBack: () => void }) => {
       </div>
 
       <button
-        className="mt-1 w-full rounded-full bg-gradient-to-b from-[#ff7a4d] to-[#d93900] border-b-[4px] border-[#7a2400] py-2.5 font-display text-sm tracking-wide text-white transition cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 disabled:grayscale active:translate-y-[2px] active:border-b-[2px] hover:brightness-110"
+        className="mt-1 w-full rounded-full bg-gradient-to-b from-[#ff7a4d] to-[#d93900] border-b-[4px] border-[#7a2400] py-2.5 font-display text-sm tracking-wide text-white transition cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 disabled:grayscale active:translate-y-[2px] active:border-b-[2px] hover:brightness-110 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-400"
         onClick={handleConfirm}
         disabled={!selected}
       >
