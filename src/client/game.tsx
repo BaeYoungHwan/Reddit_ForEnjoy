@@ -4,11 +4,16 @@ import Phaser from 'phaser';
 import { StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { getMazeMap } from '../shared/maps';
+import { trpc } from './trpcClient';
+import type { TrapInstance, TrapType } from '../shared/game-types';
 
 // 실제 고정 맵 데이터(송원호 담당, src/shared/maps.ts). splash.tsx의 배경 미리보기와 같은 데이터.
 const MAIN_MAP = getMazeMap('map-1');
 const MAP_WIDTH = MAIN_MAP.grid[0]!.length;
 const MAP_HEIGHT = MAIN_MAP.grid.length;
+
+// 서버에 등록된 실제 맵 ID. 함정/발자국 API는 mapId 단위로 데이터를 구분한다.
+const MAP_ID = 'map-1';
 
 const TILE_SIZE = 64; // 타일 한 칸의 픽셀 크기 (정사각형 한 변의 길이)
 
@@ -48,30 +53,15 @@ const GOAL_POSITION = MAIN_MAP.exit;
 // visible  → 지금 캐릭터 시야 범위 안 (원래 밝기로 표시)
 type TileState = 'hidden' | 'explored' | 'visible';
 
-// traps.md 기준 함정 4종. (slow → slide로 이름 변경: 이제 "느려지는" 효과가 아니라
-// "미끄러지는" 효과라서, 이름이 효과와 안 맞아 팀원이 헷갈릴 수 있다는 의견 반영)
-type TrapType = 'slide' | 'respawn' | 'blind' | 'reverse';
-type TrapDef = { x: number; y: number; type: TrapType };
-
-// 함정 종류별 마커 색 (진짜 아트 나오기 전 임시 표시)
+// traps.md 기준 함정 4종. 서버 스키마(src/shared/game-types.ts)는 여전히 'slow'라는
+// 이름을 쓰지만(이미 PR #3에서 API에 배포된 값이라 그대로 둠), 실제 효과는 팀 협의로
+// "느려짐"이 아니라 "벽에 부딪힐 때까지 미끄러짐"으로 바뀌었다 — 아래 applySlideTrap 참고.
 const TRAP_COLORS: Record<TrapType, number> = {
-  slide: 0x3399ff, // 파랑
+  slow: 0x3399ff, // 파랑 (미끄러짐 이펙트)
   respawn: 0xaa00ff, // 보라
   blind: 0x888888, // 회색
   reverse: 0xff8800, // 주황
 };
-
-// 임시 테스트용 함정 배치.
-// 실제로는 배영환님의 서버 데이터(src/shared/game-types.ts의 TrapInstance[])로 대체될 예정.
-// 지금은 "함정을 밟았을 때 어떤 이펙트가 나오는지"만 확인하는 용도라 좌표를 직접 박아둠.
-// map-1 실제 데이터 기준 좌표 — 좌표 자체는 유지하되(2026-07-09 미로 재설계 후에도
-// 전부 바닥 타일로 확인됨), 맵이 바뀔 때마다 여기 좌표도 유효한지 다시 확인 필요.
-const TEMP_TRAPS: TrapDef[] = [
-  { x: 5, y: 7, type: 'slide' },
-  { x: 9, y: 3, type: 'respawn' },
-  { x: 3, y: 5, type: 'blind' },
-  { x: 7, y: 3, type: 'reverse' },
-];
 
 // Phaser의 "씬(Scene)" = 게임 화면 한 장을 담당하는 클래스.
 // 우리 게임은 미로 플레이 화면 하나만 있으면 되니 씬도 하나만 만듭니다.
@@ -112,9 +102,14 @@ class MazeScene extends Phaser.Scene {
   // 각 타일의 현재 상태(hidden/explored/visible)를 기억해두는 표
   private tileStates: TileState[][] = [];
 
-  // 함정 마커 도형. TEMP_TRAPS에 있는 좌표에만 존재. 안개 상태에 맞춰 같이 밝기 조정됨
+  // 함정 마커 도형. 안개 상태에 맞춰 같이 밝기 조정됨
   // (함정 탐지기 아이템 없이는 안개에 덮인 함정이 안 보이게 하기 위함).
   private trapRects: (Phaser.GameObjects.Arc | undefined)[][] = [];
+
+  // 서버에서 받아온 "내가 설치한 함정" 목록. 다른 유저가 설치한 함정 좌표는 서버가
+  // trap.trigger(인접 타일만 조회 가능)를 통해서만 알려주므로 클라이언트에 절대 미리 내려주지
+  // 않는다 — 여기서 다른 유저 함정까지 렌더링하면 함정 위치를 미리 알아내는 치트가 된다.
+  private myTraps: TrapInstance[] = [];
 
   // 지금 적용 중인 시야 반경. 평소엔 VISION_RADIUS와 같고, 시야차단 함정에 걸리면 잠깐 줄어듦.
   private currentVisionRadius = VISION_RADIUS;
@@ -187,18 +182,6 @@ class MazeScene extends Phaser.Scene {
       }
     }
 
-    // 함정 마커를 배치 (테스트용 고정 좌표 — TEMP_TRAPS 참고)
-    for (const trap of TEMP_TRAPS) {
-      const marker = this.add.circle(
-        trap.x * TILE_SIZE + TILE_SIZE / 2,
-        trap.y * TILE_SIZE + TILE_SIZE / 2,
-        PATH_WIDTH * 0.35,
-        TRAP_COLORS[trap.type]
-      );
-      marker.setDepth(6); // 타일(기본 depth 0)보다 위, 캐릭터(depth 10)보다 아래
-      this.trapRects[trap.y]![trap.x] = marker;
-    }
-
     // 골인 지점 마커 배치 (초록색 사각형)
     this.goalRect = this.add.rectangle(
       GOAL_POSITION.x * TILE_SIZE + TILE_SIZE / 2,
@@ -209,7 +192,7 @@ class MazeScene extends Phaser.Scene {
     );
     this.goalRect.setDepth(6);
 
-    // 캐릭터를 맵 (1,1) 칸(SPAWN_POSITION)에 배치 (테두리는 벽이라 그 안쪽 첫 바닥 칸부터 시작).
+    // 캐릭터를 맵 시작 칸(SPAWN_POSITION)에 배치.
     // 일단 노란 사각형으로 표현 (나중에 실제 캐릭터 이미지로 교체 예정)
     this.playerGridX = SPAWN_POSITION.x;
     this.playerGridY = SPAWN_POSITION.y;
@@ -227,6 +210,36 @@ class MazeScene extends Phaser.Scene {
     this.cursors = this.input.keyboard!.createCursorKeys();
 
     // 게임 시작하자마자 시작 지점 기준으로 시야(안개)부터 계산해서 보여줌
+    this.updateFog();
+
+    // 서버에 위치 앵커를 초기화하고 내가 설치한 함정 목록을 받아온다 (fire-and-forget).
+    void this.loadServerState();
+  }
+
+  // map.getState를 호출해 서버 쪽 위치 앵커를 시작 지점으로 초기화하고,
+  // 내가 설치한 함정 목록을 받아와 마커로 표시한다.
+  private async loadServerState() {
+    try {
+      const state = await trpc.map.getState.query({ mapId: MAP_ID });
+      this.myTraps = state.myTraps;
+      this.renderTrapMarkers();
+    } catch (err) {
+      console.error('map.getState 실패', err);
+    }
+  }
+
+  // this.myTraps를 화면에 마커로 그린다. 안개 상태를 바로 반영하기 위해 마지막에 updateFog도 호출.
+  private renderTrapMarkers() {
+    for (const trap of this.myTraps) {
+      const marker = this.add.circle(
+        trap.x * TILE_SIZE + TILE_SIZE / 2,
+        trap.y * TILE_SIZE + TILE_SIZE / 2,
+        PATH_WIDTH * 0.35,
+        TRAP_COLORS[trap.type]
+      );
+      marker.setDepth(6); // 타일(기본 depth 0)보다 위, 캐릭터(depth 10)보다 아래
+      this.trapRects[trap.y]![trap.x] = marker;
+    }
     this.updateFog();
   }
 
@@ -300,8 +313,7 @@ class MazeScene extends Phaser.Scene {
   // 그리드 좌표(x, y)로 이동/통과 가능한지 확인하는 함수 (맵 범위 안 + 벽 아님).
   // 일반 이동(tryMove)과 슬라이드(slideStep) 둘 다 같은 기준으로 판정해야 해서 하나로 뽑아둠.
   private isWalkable(x: number, y: number): boolean {
-    const isOutOfBounds =
-      y < 0 || y >= MAP_HEIGHT || x < 0 || x >= MAP_WIDTH;
+    const isOutOfBounds = y < 0 || y >= MAP_HEIGHT || x < 0 || x >= MAP_WIDTH;
     if (isOutOfBounds) return false;
 
     return MAIN_MAP.grid[y]![x] !== 'wall';
@@ -332,9 +344,9 @@ class MazeScene extends Phaser.Scene {
 
         if (this.checkGoalReached(targetX, targetY)) return; // 골인했으면 함정 확인 없이 종료
 
-        // 도착한 칸에 함정이 있는지 확인. dx, dy(눌렀던 방향)를 같이 넘겨서
+        // 도착한 칸에 함정이 있는지 서버에 확인. dx, dy(눌렀던 방향)를 같이 넘겨서
         // 슬라이드 함정이 "어느 방향으로 미끄러질지" 알 수 있게 함.
-        this.checkTrapTrigger(targetX, targetY, dx, dy);
+        void this.checkTrapTrigger(targetX, targetY, dx, dy);
       },
     });
 
@@ -342,15 +354,27 @@ class MazeScene extends Phaser.Scene {
     this.updateFog();
   }
 
-  // 방금 도착한 칸에 함정이 있는지 확인하고, 있으면 종류에 맞는 효과를 적용하는 함수.
-  // dx, dy는 지금 막 이동해온 방향 (슬라이드 함정이 미끄러질 방향을 정하는 데 사용).
-  private checkTrapTrigger(x: number, y: number, dx: number, dy: number) {
-    const trap = TEMP_TRAPS.find((t) => t.x === x && t.y === y);
-    if (!trap) return;
+  // trap.trigger를 호출해 서버 쪽 위치 앵커를 동기화하고, 함정에 걸렸는지 응답을 받는다.
+  // 실패하면 콘솔에만 남기고 넘어간다(useLeaderboard와 동일한 수준의 처리 — 프로토타입 단계라
+  // 재시도/오프라인 큐 같은 복구 로직은 아직 두지 않음).
+  private async reportPosition(x: number, y: number) {
+    try {
+      return await trpc.trap.trigger.mutate({ mapId: MAP_ID, x, y });
+    } catch (err) {
+      console.error('trap.trigger 실패', err);
+      return null;
+    }
+  }
 
-    if (trap.type === 'slide') this.applySlideTrap(dx, dy);
-    else if (trap.type === 'respawn') this.applyRespawnTrap();
-    else if (trap.type === 'blind') this.applyBlindTrap();
+  // 방금 도착한 칸에 함정이 있는지 서버에 확인하고, 있으면 종류에 맞는 효과를 적용하는 함수.
+  // dx, dy는 지금 막 이동해온 방향 (슬라이드 함정이 미끄러질 방향을 정하는 데 사용).
+  private async checkTrapTrigger(x: number, y: number, dx: number, dy: number) {
+    const result = await this.reportPosition(x, y);
+    if (!result?.hit || !result.type) return;
+
+    if (result.type === 'slow') this.applySlideTrap(dx, dy);
+    else if (result.type === 'respawn') this.applyRespawnTrap();
+    else if (result.type === 'blind') this.applyBlindTrap();
     else this.applyReverseTrap();
   }
 
@@ -368,7 +392,7 @@ class MazeScene extends Phaser.Scene {
   // 효과: 밟으면 방금 누르고 있던 방향으로, 벽에 부딪힐 때까지 자동으로 한 칸씩 계속 미끄러짐.
   // 단, 미끄러지는 도중 "다른" 방향키를 누르면 그 자리에서 탈출 가능 (팀원 피드백 반영).
   private applySlideTrap(dx: number, dy: number) {
-    this.flashPlayer(TRAP_COLORS.slide);
+    this.flashPlayer(TRAP_COLORS.slow);
     this.isMoving = true; // 미끄러지는 동안은 방향키 입력을 무시하게 잠가둠
     this.slideStep(dx, dy);
   }
@@ -396,9 +420,14 @@ class MazeScene extends Phaser.Scene {
     this.playerGridY = targetY;
     this.updateFog();
 
-    // 일반 이동(BASE_MOVE_DURATION)보다 짧은 시간으로 빠르게 미끄러지는 느낌을 냄.
-    // 슬라이딩 도중 지나가는 칸에 다른 함정이 있어도 이번 구현에서는 재발동시키지 않음
+    // 슬라이딩 도중 지나가는 칸에 다른 함정이 있어도 이번 구현에서는 이펙트를 재발동시키지 않음
     // (여러 함정 중첩 처리는 traps.md에도 "안 정해짐"으로 남아있어 임의로 정하지 않음).
+    // 단, 서버의 위치 앵커(trap.trigger의 인접 타일 검증 기준)는 매 칸마다 갱신해줘야
+    // 슬라이딩이 끝난 뒤 다음 이동이 "너무 멀리 떨어진 좌표"로 거부되지 않는다 —
+    // 그래서 이펙트는 무시하되(result를 안 씀) 호출 자체는 매 칸마다 한다.
+    void this.reportPosition(targetX, targetY);
+
+    // 일반 이동(BASE_MOVE_DURATION)보다 짧은 시간으로 빠르게 미끄러지는 느낌을 냄.
     this.tweens.add({
       targets: this.playerRect,
       x: targetX * TILE_SIZE + TILE_SIZE / 2,
@@ -500,10 +529,7 @@ class MazeScene extends Phaser.Scene {
       for (let x = 0; x < MAP_WIDTH; x++) {
         // 체비셰프 거리(Chebyshev distance): 가로/세로/대각선 이동을 동일하게 1칸으로 치는 거리 계산 방식.
         // 원형보다 정사각형에 가깝게 시야가 퍼지지만, 그리드 게임에서 흔히 쓰는 단순한 방식.
-        const distance = Math.max(
-          Math.abs(x - this.playerGridX),
-          Math.abs(y - this.playerGridY)
-        );
+        const distance = Math.max(Math.abs(x - this.playerGridX), Math.abs(y - this.playerGridY));
 
         if (distance <= this.currentVisionRadius) {
           // 지금 시야 범위 안 → 밝게 표시
