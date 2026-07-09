@@ -270,6 +270,78 @@ describe('map.getState 위치 앵커 (8.1 회귀 테스트)', () => {
   });
 });
 
+describe('map.getState 아이템 시딩', () => {
+  it('첫 호출 시 고정 스폰 좌표로 아이템이 채워지고, 재호출해도 같은 목록을 반환한다', async () => {
+    const caller = createCaller({ userId: 'user-k' });
+    const first = await caller.map.getState({ mapId: 'map-1' });
+    const second = await caller.map.getState({ mapId: 'map-1' });
+
+    expect(first.items).toEqual(
+      expect.arrayContaining([
+        { x: 3, y: 1, type: 'flashlight' },
+        { x: 7, y: 5, type: 'shield' },
+      ])
+    );
+    expect(second.items).toEqual(first.items);
+  });
+});
+
+describe('item.pickup 위치 앵커 검증', () => {
+  it('map.getState 없이 호출하면 NO_SESSION 오류', async () => {
+    const caller = createCaller({ userId: 'user-l' });
+    await expect(caller.item.pickup({ mapId: 'map-1', x: 5, y: 5 })).rejects.toMatchObject({
+      message: 'NO_SESSION',
+    });
+  });
+
+  it('앵커에서 2칸 이상 떨어진 좌표는 INVALID_MOVE 오류', async () => {
+    const caller = createCaller({ userId: 'user-m' });
+    await caller.map.getState({ mapId: 'map-1' });
+
+    await expect(caller.item.pickup({ mapId: 'map-1', x: 5, y: 5 })).rejects.toMatchObject({
+      message: 'INVALID_MOVE',
+    });
+  });
+
+  it('아이템이 없는 인접 타일은 picked: false를 반환한다', async () => {
+    const caller = createCaller({ userId: 'user-n' });
+    await caller.map.getState({ mapId: 'map-1' });
+
+    await expect(caller.item.pickup({ mapId: 'map-1', x: 1, y: 0 })).resolves.toEqual({
+      picked: false,
+    });
+  });
+});
+
+describe('item.pickup 동시성', () => {
+  it('같은 아이템을 두 유저가 거의 동시에 주우면 한 명만 성공한다', async () => {
+    const callerA = createCaller({ userId: 'user-o' });
+    const callerB = createCaller({ userId: 'user-p' });
+
+    // 두 유저 모두 아이템 좌표(3,1)에 인접하도록 앵커를 맞춰둔다.
+    await callerA.map.getState({ mapId: 'map-1' });
+    await callerA.item.pickup({ mapId: 'map-1', x: 1, y: 0 }); // 앵커: (1,0) → (3,1)과는 별개 경로
+    await callerB.map.getState({ mapId: 'map-1' });
+    await callerB.item.pickup({ mapId: 'map-1', x: 1, y: 0 });
+
+    // 두 유저 모두 인접 이동을 반복해 (3,1) 근처(2,1)까지 이동시킨다.
+    await callerA.item.pickup({ mapId: 'map-1', x: 2, y: 0 });
+    await callerA.item.pickup({ mapId: 'map-1', x: 2, y: 1 });
+    await callerB.item.pickup({ mapId: 'map-1', x: 2, y: 0 });
+    await callerB.item.pickup({ mapId: 'map-1', x: 2, y: 1 });
+
+    const [resultA, resultB] = await Promise.all([
+      callerA.item.pickup({ mapId: 'map-1', x: 3, y: 1 }),
+      callerB.item.pickup({ mapId: 'map-1', x: 3, y: 1 }),
+    ]);
+
+    const results = [resultA, resultB];
+    expect(results.filter((r) => r.picked)).toHaveLength(1);
+    expect(results.filter((r) => !r.picked)).toHaveLength(1);
+    expect(results.find((r) => r.picked)?.type).toBe('flashlight');
+  });
+});
+
 describe('leaderboard.get username 매핑', () => {
   it('reddit.getUserById로 조회된 username을 entry에 채운다', async () => {
     mocks.users.set('user-g', { username: 'maze-runner' });
