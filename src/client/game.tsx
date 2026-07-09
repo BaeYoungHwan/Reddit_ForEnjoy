@@ -327,7 +327,9 @@ class MazeScene extends Phaser.Scene {
       indices.push(botLeft, botRight, topRight, 0);
     }
 
-    this.goalClothMesh = this.add.mesh2d(clothAttachX, clothAttachY, GOAL_CLOTH_TEXTURE_KEY, vertices, indices);
+    // flipV=true: WebGL 텍스처 좌표는 아래→위(bottom-up)가 기본인데, 위 정점 배열은 이미지
+    // 좌표계(위→아래)로 v를 매겼기 때문에 그대로 두면 천 그림이 위아래로 뒤집혀 보인다.
+    this.goalClothMesh = this.add.mesh2d(clothAttachX, clothAttachY, GOAL_CLOTH_TEXTURE_KEY, vertices, indices, true);
     this.goalClothMesh.setOrigin(0, 0);
     this.goalClothElapsed = 0;
 
