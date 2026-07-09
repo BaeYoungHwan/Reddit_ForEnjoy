@@ -12,6 +12,10 @@ const MAP_HEIGHT = MAIN_MAP.grid.length;
 
 const TILE_SIZE = 64; // 타일 한 칸의 픽셀 크기 (정사각형 한 변의 길이)
 
+// 벽을 통로 폭 전체를 채우는 블록이 아니라 얇은 선으로 그릴 때의 두께(px).
+// 통로(TILE_SIZE) 대비 얇게 둬서 "타일 격자"가 아니라 실제 미로 통로처럼 보이게 함.
+const WALL_LINE_THICKNESS = 6;
+
 // vision-system.md 스펙: 기본 시야 반경 2칸.
 // 나중에 손전등(4칸)/시야차단 함정(0.5~1칸)을 만들 때 이 값을 상황에 맞게 바꿔주면 됨.
 const VISION_RADIUS = 2;
@@ -78,9 +82,14 @@ class MazeScene extends Phaser.Scene {
   // 나중에 아트가 나오면 이 부분만 스프라이트 이미지로 교체하면 됨.
   private playerRect!: Phaser.GameObjects.Rectangle;
 
-  // 타일마다 그려둔 사각형들을 [y][x] 좌표로 저장해둠.
+  // 바닥 타일마다 그려둔 사각형들을 [y][x] 좌표로 저장해둠 (벽 칸은 따로 그리지 않아 undefined).
   // 안개 상태가 바뀔 때마다 "다시 그리기"가 아니라 "이미 그려둔 도형의 밝기만 조정"하는 방식으로 처리.
-  private tileRects: Phaser.GameObjects.Rectangle[][] = [];
+  private tileRects: (Phaser.GameObjects.Rectangle | undefined)[][] = [];
+
+  // 각 바닥 타일이 벽과 맞닿은 변에 그려둔 얇은 "벽 선" 도형들. [y][x] 좌표(그 선이 속한 바닥 타일 기준)로
+  // 저장해서, 그 바닥 타일의 안개 상태가 바뀔 때 같이 밝기를 맞춘다. 벽을 꽉 찬 블록으로 칠하는 대신
+  // 통로 경계에만 얇은 선을 그려서 "타일 격자"가 아니라 "미로 통로"처럼 보이게 하기 위함.
+  private wallLineRects: Phaser.GameObjects.Rectangle[][][] = [];
 
   // 각 타일의 현재 상태(hidden/explored/visible)를 기억해두는 표
   private tileStates: TileState[][] = [];
@@ -112,27 +121,52 @@ class MazeScene extends Phaser.Scene {
 
   // create(): 게임이 시작될 때 딱 한 번만 실행됨. 여기서 맵과 캐릭터를 화면에 배치합니다.
   create() {
-    // 맵 크기만큼 타일 상태/도형 배열을 준비하고, 타일을 하나씩 그림
+    // 맵 크기만큼 타일 상태/도형 배열을 준비하고, 바닥 타일만 그림(벽 칸은 그리지 않고
+    // 검은 배경 그대로 남겨둠 — 안개로 덮인 곳과 벽이 시각적으로 자연스럽게 이어지도록 함).
     for (let y = 0; y < MAP_HEIGHT; y++) {
       this.tileRects[y] = [];
+      this.wallLineRects[y] = [];
       this.tileStates[y] = [];
       this.trapRects[y] = [];
 
       for (let x = 0; x < MAP_WIDTH; x++) {
-        const isWall = MAIN_MAP.grid[y]![x] === 'wall';
+        this.tileStates[y]![x] = 'hidden'; // 시작할 땐 전부 안개로 덮인 상태
+        this.wallLineRects[y]![x] = [];
 
-        // this.add.rectangle(중심x, 중심y, 너비, 높이, 색상) → 사각형 하나를 화면에 그려줌
+        if (MAIN_MAP.grid[y]![x] === 'wall') continue; // 벽 칸은 도형을 만들지 않고 건너뜀
+
+        // this.add.rectangle(중심x, 중심y, 너비, 높이, 색상) → 통로(바닥) 사각형 하나를 화면에 그려줌
         // TILE_SIZE - 2로 살짝 여백을 둬서 타일 사이에 격자 선처럼 보이게 함
         const rect = this.add.rectangle(
           x * TILE_SIZE + TILE_SIZE / 2,
           y * TILE_SIZE + TILE_SIZE / 2,
           TILE_SIZE - 2,
           TILE_SIZE - 2,
-          isWall ? 0x3a2a1a : 0x555555 // 벽=짙은 갈색, 바닥=회색 (진짜 아트 나오기 전 임시 색)
+          0x555555 // 통로 색(진짜 아트 나오기 전 임시 색)
         );
-
         this.tileRects[y]![x] = rect;
-        this.tileStates[y]![x] = 'hidden'; // 시작할 땐 전부 안개로 덮인 상태
+
+        // 벽과 맞닿은 변에만 얇은 "벽 선"을 그림 (통로 폭 전체를 채우는 두꺼운 블록 대신
+        // 경계선만 그려서 타일 격자가 아니라 실제 미로 통로처럼 보이게 함)
+        const wallEdges: { cx: number; cy: number; w: number; h: number }[] = [];
+        if (!this.isWalkable(x, y - 1)) {
+          wallEdges.push({ cx: x * TILE_SIZE + TILE_SIZE / 2, cy: y * TILE_SIZE, w: TILE_SIZE, h: WALL_LINE_THICKNESS });
+        }
+        if (!this.isWalkable(x, y + 1)) {
+          wallEdges.push({ cx: x * TILE_SIZE + TILE_SIZE / 2, cy: (y + 1) * TILE_SIZE, w: TILE_SIZE, h: WALL_LINE_THICKNESS });
+        }
+        if (!this.isWalkable(x - 1, y)) {
+          wallEdges.push({ cx: x * TILE_SIZE, cy: y * TILE_SIZE + TILE_SIZE / 2, w: WALL_LINE_THICKNESS, h: TILE_SIZE });
+        }
+        if (!this.isWalkable(x + 1, y)) {
+          wallEdges.push({ cx: (x + 1) * TILE_SIZE, cy: y * TILE_SIZE + TILE_SIZE / 2, w: WALL_LINE_THICKNESS, h: TILE_SIZE });
+        }
+
+        for (const edge of wallEdges) {
+          const line = this.add.rectangle(edge.cx, edge.cy, edge.w, edge.h, 0x3a2a1a); // 벽 색(진짜 아트 나오기 전 임시 색)
+          line.setDepth(1); // 통로(기본 depth 0)보다 위, 함정 마커(depth 6)보다 아래
+          this.wallLineRects[y]![x]!.push(line);
+        }
       }
     }
 
@@ -434,7 +468,9 @@ class MazeScene extends Phaser.Scene {
   // 그 타일에 함정이 있으면 함정 마커도 같은 밝기로 함께 맞춰줌
   // (함정도 안개에 덮인 곳에서는 안 보여야 자연스러움 — 함정 탐지기 아이템이 있어야 볼 수 있는 구조).
   private paintTile(x: number, y: number) {
-    const rect = this.tileRects[y]![x]!;
+    const rect = this.tileRects[y]![x];
+    if (!rect) return; // 벽 칸은 그려둔 도형이 없으니 안개 계산에서 제외
+
     const state = this.tileStates[y]![x]!;
     const trap = this.trapRects[y]?.[x];
 
@@ -449,6 +485,9 @@ class MazeScene extends Phaser.Scene {
 
     rect.setAlpha(alpha);
     trap?.setAlpha(alpha);
+    for (const line of this.wallLineRects[y]![x]!) {
+      line.setAlpha(alpha);
+    }
 
     if (x === GOAL_POSITION.x && y === GOAL_POSITION.y) {
       this.goalRect.setAlpha(alpha);
