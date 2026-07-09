@@ -32,7 +32,7 @@
 | Redis 데이터 모델(발자국·함정·랭킹) | ✅ | PR #3 (7306bed) | |
 | tRPC/Hono 코어 API 6종 | ✅ | PR #3 | `map.getState`/`footprint.record`/`trap.install`/`trap.trigger`/`run.finish`/`leaderboard.get` |
 | 비동기 전달 로직(위치 앵커) | ✅ | PR #3, 후속 버그픽스 139d003 | |
-| 함정 4종 서버 연동 | ✅ | 2026-07-09 (`src/client/game.tsx`) | 이동 시 `trap.trigger` 호출로 발동 여부/종류를 서버에서 받아 이펙트 적용, `map.getState`로 내 함정만 마커 표시(타 유저 함정 좌표는 노출 안 함 — 오라클 방지). 슬라이드 함정 중간 칸에서도 위치 앵커 동기화만 별도 호출. `trap.install`(함정 설치 UI)은 클라이언트에 아직 진입점 없음 — 별도 작업 |
+| 함정 4종 서버 연동 | ✅ | 2026-07-09 (`src/client/game.tsx`) | 이동 시 `trap.trigger` 호출로 발동 여부/종류를 서버에서 받아 이펙트 적용, `map.getState`로 내 함정만 마커 표시(타 유저 함정 좌표는 노출 안 함 — 오라클 방지). 슬라이드 함정 중간 칸에서도 위치 앵커 동기화만 별도 호출. `trap.install`(함정 설치 UI)은 클라이언트에 아직 진입점 없음 — 별도 작업. 2026-07-09 코드리뷰로 연속 이동 중 `trap.trigger` 응답 순서 역전 경쟁 상태 발견 → `src/client/sequentialDispatcher.ts` 신규 추가해 요청을 dispatch 순서대로 직렬화하도록 수정(`game.tsx` 영역 침범 — 임소리 리뷰 포함) |
 | 자정 리셋 트리거 + 로직(코드) | ✅ | c0f78f8 | |
 | 자정 리셋 실제 발동 시각(playtest 검증) | ⏳ | - | UTC 15:00=KST 00:00 가정, `devvit playtest` 실측 필요 — 오늘 자정 확인 예정 |
 | CI 자동 배포 파이프라인 | ✅ | c0f78f8 (`.github/workflows/deploy.yml`) | |

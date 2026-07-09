@@ -5,7 +5,8 @@ import { StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import { trpc } from './trpcClient';
-import type { TrapInstance, TrapType } from '../shared/game-types';
+import { SequentialDispatcher } from './sequentialDispatcher';
+import type { TrapInstance, TrapTriggerOutput, TrapType } from '../shared/game-types';
 
 // 서버에 등록된 실제 맵 ID. 맵 레이아웃 자체(TEMP_MAP)는 아직 테스트용이지만,
 // 함정/발자국 API는 mapId 단위로 데이터를 구분하므로 실제 ID를 지금부터 맞춰둔다.
@@ -106,6 +107,12 @@ class MazeScene extends Phaser.Scene {
   // trap.trigger(인접 타일만 조회 가능)를 통해서만 알려주므로 클라이언트에 절대 미리 내려주지
   // 않는다 — 여기서 다른 유저 함정까지 렌더링하면 함정 위치를 미리 알아내는 치트가 된다.
   private myTraps: TrapInstance[] = [];
+
+  // trap.trigger 호출이 dispatch된 순서대로만 네트워크로 나가도록 강제하는 큐.
+  // (연속 이동 중 여러 trap.trigger가 동시에 in-flight 상태가 되면 응답 순서가
+  //  역전돼 서버 위치 앵커가 뒤처진 채로 다음 이동을 검증해 정상 이동이
+  //  INVALID_MOVE로 오판정될 수 있다 — 이를 막기 위한 요청 직렬화.)
+  private trapDispatcher = new SequentialDispatcher<TrapTriggerOutput>();
 
   // 지금 적용 중인 시야 반경. 평소엔 VISION_RADIUS와 같고, 시야차단 함정에 걸리면 잠깐 줄어듦.
   private currentVisionRadius = VISION_RADIUS;
@@ -298,7 +305,9 @@ class MazeScene extends Phaser.Scene {
   // 재시도/오프라인 큐 같은 복구 로직은 아직 두지 않음).
   private async reportPosition(x: number, y: number) {
     try {
-      return await trpc.trap.trigger.mutate({ mapId: MAP_ID, x, y });
+      return await this.trapDispatcher.enqueue(() =>
+        trpc.trap.trigger.mutate({ mapId: MAP_ID, x, y })
+      );
     } catch (err) {
       console.error('trap.trigger 실패', err);
       return null;
