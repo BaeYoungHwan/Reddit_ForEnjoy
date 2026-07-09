@@ -3,33 +3,12 @@ import './index.css';
 import Phaser from 'phaser';
 import { StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
+import { getMazeMap } from '../shared/maps';
 
-// ── 임시 테스트용 맵 데이터 ──────────────────────────────
-// 실제 맵(송원호님 담당)이 아직 안 나와서, 손으로 만든 15x15 배열로 먼저 테스트합니다.
-// 나중에 진짜 맵 데이터가 나오면 이 배열만 통째로 교체하면 됩니다.
-// (좌표 표현 방식 자체는 src/shared/game-types.ts 의 Position 타입과 맞춰뒀어서
-//  로직을 다시 짤 필요 없이 데이터만 바꿔 끼우면 됩니다.)
-// 중앙(x=7, y=7)에 상하좌우로 뚫린 십자 교차로를 일부러 만들어둠 — 슬라이드 함정이
-// 위/아래/좌/우 어느 방향으로 진입해도 길게 미끄러질 수 있게 하기 위함.
-//
-// 0 = 바닥(이동 가능) / 1 = 벽(이동 불가)
-const TEMP_MAP: number[][] = [
-  [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
-  [1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
-  [1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1],
-  [1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 1, 1],
-  [1, 0, 0, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1],
-  [1, 0, 0, 0, 1, 1, 1, 0, 1, 0, 1, 0, 0, 0, 1],
-  [1, 0, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1],
-  [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
-  [1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1],
-  [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1],
-  [1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1],
-  [1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1],
-  [1, 1, 0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 0, 0, 1],
-  [1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 1],
-  [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
-];
+// 실제 고정 맵 데이터(송원호 담당, src/shared/maps.ts). splash.tsx의 배경 미리보기와 같은 데이터.
+const MAIN_MAP = getMazeMap('map-1');
+const MAP_WIDTH = MAIN_MAP.grid[0]!.length;
+const MAP_HEIGHT = MAIN_MAP.grid.length;
 
 const TILE_SIZE = 64; // 타일 한 칸의 픽셀 크기 (정사각형 한 변의 길이)
 
@@ -44,11 +23,11 @@ const BASE_MOVE_DURATION = 150;
 // 기본 이동보다 짧게 줘서 "제어권을 잃고 빠르게 밀려나는" 느낌을 냄.
 const SLIDE_STEP_DURATION = 80;
 
-// 캐릭터 시작 위치 (테두리가 벽이라 그 안쪽 첫 바닥 칸). 리스폰 함정이 여길 기준으로 되돌림.
-const SPAWN_POSITION = { x: 1, y: 1 };
+// 캐릭터 시작 위치 (map-1의 실제 시작 칸 S). 리스폰 함정이 여길 기준으로 되돌림.
+const SPAWN_POSITION = MAIN_MAP.start;
 
-// 골인 지점. 테스트용으로 시작점에서 먼 반대쪽 구석에 둠.
-const GOAL_POSITION = { x: 13, y: 13 };
+// 골인 지점 (map-1의 실제 출구 칸 E).
+const GOAL_POSITION = MAIN_MAP.exit;
 
 // 타일 하나가 지금 어떤 상태인지 3가지로 구분합니다.
 // hidden   → 한 번도 안 가본 곳 (완전히 안 보임)
@@ -72,13 +51,14 @@ const TRAP_COLORS: Record<TrapType, number> = {
 // 임시 테스트용 함정 배치.
 // 실제로는 배영환님의 서버 데이터(src/shared/game-types.ts의 TrapInstance[])로 대체될 예정.
 // 지금은 "함정을 밟았을 때 어떤 이펙트가 나오는지"만 확인하는 용도라 좌표를 직접 박아둠.
-// 슬라이드 함정은 십자 교차로 정중앙(7,7)에 둠 — 위/아래/좌/우 어느 방향으로 밟아도
-// 그 방향으로 길게 뚫린 통로가 있어서 자연스럽게 미끄러지는 걸 확인할 수 있음.
+// map-1 실제 데이터 기준 좌표(이전엔 15x15 임시 맵 기준 좌표라 11x9 실제 맵 범위를 벗어났음).
+// 슬라이드 함정은 세로 통로(x=5)와 가로 통로(y=7)가 만나는 지점에 둠 — 위/좌/우 3방향으로
+// 벽에 부딪힐 때까지 길게 미끄러지는 걸 확인할 수 있음.
 const TEMP_TRAPS: TrapDef[] = [
-  { x: 7, y: 7, type: 'slide' },
-  { x: 11, y: 10, type: 'respawn' },
-  { x: 11, y: 3, type: 'blind' },
-  { x: 3, y: 11, type: 'reverse' },
+  { x: 5, y: 7, type: 'slide' },
+  { x: 9, y: 3, type: 'respawn' },
+  { x: 3, y: 5, type: 'blind' },
+  { x: 7, y: 3, type: 'reverse' },
 ];
 
 // Phaser의 "씬(Scene)" = 게임 화면 한 장을 담당하는 클래스.
@@ -134,13 +114,13 @@ class MazeScene extends Phaser.Scene {
   // create(): 게임이 시작될 때 딱 한 번만 실행됨. 여기서 맵과 캐릭터를 화면에 배치합니다.
   create() {
     // 맵 크기만큼 타일 상태/도형 배열을 준비하고, 타일을 하나씩 그림
-    for (let y = 0; y < TEMP_MAP.length; y++) {
+    for (let y = 0; y < MAP_HEIGHT; y++) {
       this.tileRects[y] = [];
       this.tileStates[y] = [];
       this.trapRects[y] = [];
 
-      for (let x = 0; x < TEMP_MAP[y]!.length; x++) {
-        const isWall = TEMP_MAP[y]![x] === 1;
+      for (let x = 0; x < MAP_WIDTH; x++) {
+        const isWall = MAIN_MAP.grid[y]![x] === 'wall';
 
         // this.add.rectangle(중심x, 중심y, 너비, 높이, 색상) → 사각형 하나를 화면에 그려줌
         // TILE_SIZE - 2로 살짝 여백을 둬서 타일 사이에 격자 선처럼 보이게 함
@@ -237,10 +217,10 @@ class MazeScene extends Phaser.Scene {
   // 일반 이동(tryMove)과 슬라이드(slideStep) 둘 다 같은 기준으로 판정해야 해서 하나로 뽑아둠.
   private isWalkable(x: number, y: number): boolean {
     const isOutOfBounds =
-      y < 0 || y >= TEMP_MAP.length || x < 0 || x >= TEMP_MAP[0]!.length;
+      y < 0 || y >= MAP_HEIGHT || x < 0 || x >= MAP_WIDTH;
     if (isOutOfBounds) return false;
 
-    return TEMP_MAP[y]![x] === 0;
+    return MAIN_MAP.grid[y]![x] !== 'wall';
   }
 
   // 한 칸 이동을 시도하는 함수.
@@ -362,8 +342,8 @@ class MazeScene extends Phaser.Scene {
     );
 
     // 지금까지 탐색해서 기억해둔 모든 타일을 다시 'hidden'으로 되돌림 (탐험 진행도 페널티)
-    for (let y = 0; y < TEMP_MAP.length; y++) {
-      for (let x = 0; x < TEMP_MAP[y]!.length; x++) {
+    for (let y = 0; y < MAP_HEIGHT; y++) {
+      for (let x = 0; x < MAP_WIDTH; x++) {
         this.tileStates[y]![x] = 'hidden';
       }
     }
@@ -378,8 +358,8 @@ class MazeScene extends Phaser.Scene {
     this.flashPlayer(TRAP_COLORS.blind);
 
     // 지금까지 탐색해서 기억해둔 모든 타일을 다시 'hidden'으로 되돌림 (탐험 진행도 페널티)
-    for (let y = 0; y < TEMP_MAP.length; y++) {
-      for (let x = 0; x < TEMP_MAP[y]!.length; x++) {
+    for (let y = 0; y < MAP_HEIGHT; y++) {
+      for (let x = 0; x < MAP_WIDTH; x++) {
         this.tileStates[y]![x] = 'hidden';
       }
     }
@@ -414,8 +394,8 @@ class MazeScene extends Phaser.Scene {
 
     this.add
       .text(
-        (TEMP_MAP[0]!.length * TILE_SIZE) / 2,
-        (TEMP_MAP.length * TILE_SIZE) / 2,
+        (MAP_WIDTH * TILE_SIZE) / 2,
+        (MAP_HEIGHT * TILE_SIZE) / 2,
         '🎉 GOAL!',
         { fontSize: '64px', color: '#ffffff', fontStyle: 'bold' }
       )
@@ -428,8 +408,8 @@ class MazeScene extends Phaser.Scene {
   // 안개(시야) 상태를 다시 계산하는 함수.
   // vision-system.md 규칙: 기본 시야 2칸 안쪽은 밝게, 지나간 타일은 안개가 다시 덮이지 않고 유지.
   private updateFog() {
-    for (let y = 0; y < TEMP_MAP.length; y++) {
-      for (let x = 0; x < TEMP_MAP[y]!.length; x++) {
+    for (let y = 0; y < MAP_HEIGHT; y++) {
+      for (let x = 0; x < MAP_WIDTH; x++) {
         // 체비셰프 거리(Chebyshev distance): 가로/세로/대각선 이동을 동일하게 1칸으로 치는 거리 계산 방식.
         // 원형보다 정사각형에 가깝게 시야가 퍼지지만, 그리드 게임에서 흔히 쓰는 단순한 방식.
         const distance = Math.max(
@@ -482,8 +462,8 @@ class MazeScene extends Phaser.Scene {
 const phaserConfig: Phaser.Types.Core.GameConfig = {
   type: Phaser.AUTO, // 브라우저가 WebGL을 지원하면 WebGL로, 아니면 자동으로 Canvas 방식으로 그림
   parent: 'phaser-container',
-  width: TEMP_MAP[0]!.length * TILE_SIZE,
-  height: TEMP_MAP.length * TILE_SIZE,
+  width: MAP_WIDTH * TILE_SIZE,
+  height: MAP_HEIGHT * TILE_SIZE,
   backgroundColor: '#000000', // hidden 타일은 투명해서 이 검은 배경이 그대로 "안개"처럼 보임
   scene: [MazeScene],
 };

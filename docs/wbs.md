@@ -21,7 +21,7 @@
 |------|------|------|------|
 | 방향키 그리드 이동 + 이동 애니메이션 | ✅ | 07.08 커밋(`src/client/game.tsx`) | 트윈 기반 한 칸 이동 + 방향키 홀드 시 연속 이동 |
 | 안개(블라인드) 시야 시스템 | ✅ | 07.08 커밋(`src/client/game.tsx`) | 스펙: `design-docs/vision-system.md`. hidden/explored/visible 3단계 + 시야 반경 가변(시야차단 함정 연동) |
-| 함정 4종 이펙트 | 🔄 | 07.08 커밋(`src/client/game.tsx`) | 스펙: `design-docs/traps.md`(슬라이드 함정은 팀 협의로 스펙 변경 — traps.md 문서는 아직 미갱신). 4종 전부 시각 이펙트 구현했으나 임시 좌표(`TEMP_TRAPS`)로 로컬 테스트 중 — 서버 API(`trap.install`/`trap.trigger`, 2️⃣ PR #3 완료)와의 실연동은 미착수 |
+| 함정 4종 이펙트 | 🔄 | 07.08 커밋(`src/client/game.tsx`), 2026-07-09 송원호 커밋(맵 교체) | 스펙: `design-docs/traps.md`(슬라이드 함정은 팀 협의로 스펙 변경 — traps.md 문서는 아직 미갱신). 4종 전부 시각 이펙트 구현했으나 좌표(`TEMP_TRAPS`)는 여전히 로컬 테스트용 하드코딩 — 서버 API(`trap.install`/`trap.trigger`, 2️⃣ PR #3 완료)와의 실연동은 미착수. 2026-07-09: 맵이 15x15 임시 배열 → 실제 map-1(11x9)로 교체되면서 기존 좌표가 범위를 벗어나 크래시 위험 있었음 — map-1 실제 바닥 타일 기준으로 4개 좌표 재배치(송원호, 아래 3️⃣ 행 참조) |
 | 발자국 렌더링 | ⬜ | - | 서버 API(`map.getState`/`footprint.record`)는 완료(2️⃣ PR #3). 자기 발자국은 안개 시스템으로 이미 경로가 보이므로 렌더링 불필요 판단 — 다른 유저 발자국 표시만 남음(서버 연동 후 착수) |
 | 아이템 이펙트 | ⏳ | - | `items.md` 미확정 — 전체 블로커 참조 |
 
@@ -44,7 +44,7 @@
 | 작업 | 상태 | 근거 | 블로커/비고 |
 |------|------|------|------|
 | 스플래시/메인화면 UI | 🔄 | PR #15 (872386a), f52a9a0, 19782b8, `splash.tsx` | 2026-07-08 실제 `r/maze_footprints_dev`에서 스플래시 화면 렌더링 확인(스크린샷). 발자국 애니메이션이 JS `setInterval` 리마운트 방식이라 Devvit iframe에서 반복 재생이 안 되던 버그, PLAY 버튼(128px)이 실제 inline 카드 대비 과대 크기이던 문제 발견 → f52a9a0에서 순수 CSS `animation-iteration-count: infinite`로 교체 + 버튼 96px로 축소해 수정. 2026-07-09 PR #18 리뷰 중 후속 버그 발견: CSS 전환 과정에서 `animation-fill-mode`가 빠져 최초 로드 시 전체 발자국이 한꺼번에 노출됐다 팝(pop)되는 회귀 가능성 확인 → `animationFillMode: 'backwards'` 추가로 수정, `npm run build` 정적 산출물을 Playwright 헤드리스로 렌더링해 순차 노출 정상 동작 확인(콘솔 에러 0건). 게임 화면(Phaser)은 아직 업데이트 전 |
-| 고정 맵 데이터 (map-1) | ✅ | PR #15, `src/shared/maps.ts` | map-2 이상 추가 맵은 미착수 — 전체 블로커의 "데일리 맵 로테이션 정책" 확정 전까지 보류 |
+| 고정 맵 데이터 (map-1) | ✅ | PR #15, `src/shared/maps.ts`; 2026-07-09 game.tsx 연동(ecba535) | map-2 이상 추가 맵은 미착수 — 전체 블로커의 "데일리 맵 로테이션 정책" 확정 전까지 보류. 2026-07-09: `src/client/game.tsx`가 15x15 임시 배열(`TEMP_MAP`)로 로컬 테스트 중이던 것을 실제 `getMazeMap('map-1')`(11x9)로 교체 — 시작/골인 좌표도 `MAIN_MAP.start`/`.exit`로 연동. 기존 `TEMP_TRAPS` 좌표 4개가 새 맵 범위를 벗어나 있어(크래시 위험) 실제 바닥 타일 기준으로 재배치. `npm run build` 후 Playwright 헤드리스로 이동/안개/함정 마커 렌더링 확인(콘솔 에러 0건). 1️⃣ 임소리 담당 파일(`game.tsx`) 수정이라 PR 리뷰어에 임소리 포함 필요 |
 | 리더보드 UI 훅 | 🔄 | `src/client/hooks/useLeaderboard.ts`, PR #15 | 서버 `leaderboard.get`과 연동 코드는 존재하고 메뉴 화면은 실제 Reddit에서 렌더링 확인됨 — 리더보드 뷰 자체(HUD 아이콘 클릭 후 화면)는 아직 실환경 스크린샷 미확인 |
 | 로드아웃 선택 화면 | ⏳ | - | `items.md` 미확정 — 전체 블로커 참조 |
 | 아트/사운드/모바일 대응/QA 총괄 | ⬜ | - | 일정상 Day4~7(7/11~7/14) 구간 예정 |
