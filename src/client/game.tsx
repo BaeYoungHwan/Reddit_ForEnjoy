@@ -66,6 +66,23 @@ const ITEM_MARKER_SIZE = 40; // 마커 표시 크기(px, 정사각형 — 원본
 const ITEM_MARK_BOB_PX = 4; // 물음표가 위아래로 움직이는 거리(px)
 const ITEM_MARK_BOB_MS = 600; // 물음표 한 방향 이동에 걸리는 시간(ms, yoyo라 왕복은 2배)
 
+// 골인 지점 깃발 이미지. 깃대+깃발 천이 한 장(public/sprites/GolaFlag.png, 512x512)으로
+// 합쳐져 있던 걸, 깃대는 파란색·천은 흑백 체크무늬라는 색 차이를 이용해 열(column) 82를
+// 경계로 잘라 GoalFlag-pole.png(깃대)/GoalFlag-cloth.png(천) 두 장으로 분리했다.
+// 깃대는 고정하고 천만 펄럭이게 하려면 회전 중심이 "깃대에 붙어있는 왼쪽 변"이어야 하는데,
+// Phaser 이미지는 기본 회전 중심이 이미지 중앙이라 원본에서의 위치 관계를 좌표 계산으로
+// 복원해야 한다 — 아래 두 상수(원본 512x512 캔버스 기준 바운딩 박스)가 그 계산에 쓰인다.
+const GOAL_POLE_TEXTURE_KEY = 'goal-flag-pole';
+const GOAL_CLOTH_TEXTURE_KEY = 'goal-flag-cloth';
+// 원본 캔버스(512x512)에서 각 조각이 차지하던 바운딩 박스 — 잘라낸 PNG의 크기/위치와 일치한다.
+const GOAL_FLAG_CANVAS = 512;
+const GOAL_POLE_BOUNDS = { minX: 27, maxX: 81, minY: 11, maxY: 511 };
+const GOAL_CLOTH_BOUNDS = { minX: 82, maxX: 484, minY: 0, maxY: 506 };
+const GOAL_FLAG_DISPLAY_SIZE = TILE_SIZE * 0.85; // 깃발 전체(원본 512 기준)를 이 크기로 축소해 표시
+const GOAL_FLAG_SCALE = GOAL_FLAG_DISPLAY_SIZE / GOAL_FLAG_CANVAS;
+const GOAL_FLAG_WAVE_DEG = 6; // 깃발 천이 좌우로 흔들리는 각도(도)
+const GOAL_FLAG_WAVE_MS = 500; // 천이 한쪽으로 기우는 데 걸리는 시간(ms, yoyo라 왕복은 2배)
+
 // vision-system.md 스펙: 기본 시야 반경 2칸.
 // 나중에 손전등(4칸)/시야차단 함정(0.5~1칸)을 만들 때 이 값을 상황에 맞게 바꿔주면 됨.
 const VISION_RADIUS = 2;
@@ -150,8 +167,9 @@ class MazeScene extends Phaser.Scene {
   // 역방향 함정에 걸린 상태인지 여부. true면 방향키 입력을 반대로 뒤집어서 처리함.
   private isReversed = false;
 
-  // 골인 지점 마커 도형. 안개 상태에 맞춰 밝기가 같이 조정됨 (다른 타일들과 동일하게 탐색해야 보임).
-  private goalRect!: Phaser.GameObjects.Rectangle;
+  // 골인 지점 깃발 마커(깃대+천 컨테이너). 안개 상태에 맞춰 밝기가 같이 조정됨
+  // (다른 타일들과 동일하게 탐색해야 보임).
+  private goalRect!: Phaser.GameObjects.Container;
 
   // 골인했는지 여부. true가 되면 더 이상 방향키 입력을 받지 않음(테스트용 종료 처리).
   private hasFinished = false;
@@ -169,6 +187,8 @@ class MazeScene extends Phaser.Scene {
     this.load.image(FOOTPRINT_TEXTURE_KEY, FOOTPRINT_TEXTURE_URI);
     this.load.image(ITEM_BOX_TEXTURE_KEY, '/sprites/ItemBox-box.png');
     this.load.image(ITEM_MARK_TEXTURE_KEY, '/sprites/ItemBox-mark.png');
+    this.load.image(GOAL_POLE_TEXTURE_KEY, '/sprites/GoalFlag-pole.png');
+    this.load.image(GOAL_CLOTH_TEXTURE_KEY, '/sprites/GoalFlag-cloth.png');
   }
 
   // create(): 게임이 시작될 때 딱 한 번만 실행됨. 여기서 맵과 캐릭터를 화면에 배치합니다.
@@ -204,15 +224,46 @@ class MazeScene extends Phaser.Scene {
       }
     }
 
-    // 골인 지점 마커 배치 (초록색 사각형)
-    this.goalRect = this.add.rectangle(
-      GOAL_POSITION.x * TILE_SIZE + TILE_SIZE / 2,
-      GOAL_POSITION.y * TILE_SIZE + TILE_SIZE / 2,
-      PATH_WIDTH * 0.9,
-      PATH_WIDTH * 0.9,
-      0x33ff66
-    );
+    // 골인 지점 깃발 배치. 깃대 밑동이 타일 중심에 오도록 기준점을 잡고, 깃대/천을 각각
+    // 원본 캔버스에서의 위치(GOAL_*_BOUNDS)만큼 오프셋해서 원래 그림과 같은 배치로 복원한다.
+    const goalTileX = GOAL_POSITION.x * TILE_SIZE + TILE_SIZE / 2;
+    const goalTileY = GOAL_POSITION.y * TILE_SIZE + TILE_SIZE / 2;
+    const goalOriginX = goalTileX - (GOAL_FLAG_CANVAS / 2) * GOAL_FLAG_SCALE; // 원본 캔버스 (0,0)의 화면 위치
+    const goalOriginY = goalTileY - GOAL_POLE_BOUNDS.maxY * GOAL_FLAG_SCALE; // 깃대 밑동을 타일 중심에 맞춤
+
+    // 깃대: 고정, 원본에서의 좌상단 위치로 배치(origin 기본값 0.5라서 중심 기준 좌표로 변환)
+    const poleWidth = (GOAL_POLE_BOUNDS.maxX - GOAL_POLE_BOUNDS.minX + 1) * GOAL_FLAG_SCALE;
+    const poleHeight = (GOAL_POLE_BOUNDS.maxY - GOAL_POLE_BOUNDS.minY + 1) * GOAL_FLAG_SCALE;
+    const poleImg = this.add
+      .image(
+        goalOriginX + GOAL_POLE_BOUNDS.minX * GOAL_FLAG_SCALE + poleWidth / 2,
+        goalOriginY + GOAL_POLE_BOUNDS.minY * GOAL_FLAG_SCALE + poleHeight / 2,
+        GOAL_POLE_TEXTURE_KEY
+      )
+      .setDisplaySize(poleWidth, poleHeight);
+
+    // 깃발 천: 회전 중심(origin)을 깃대에 붙는 왼쪽 변으로 옮겨야 "깃대에서 펄럭이는" 것처럼 보인다.
+    const clothWidth = (GOAL_CLOTH_BOUNDS.maxX - GOAL_CLOTH_BOUNDS.minX + 1) * GOAL_FLAG_SCALE;
+    const clothHeight = (GOAL_CLOTH_BOUNDS.maxY - GOAL_CLOTH_BOUNDS.minY + 1) * GOAL_FLAG_SCALE;
+    const clothAttachX = goalOriginX + GOAL_CLOTH_BOUNDS.minX * GOAL_FLAG_SCALE;
+    const clothAttachY = goalOriginY + ((GOAL_CLOTH_BOUNDS.minY + GOAL_CLOTH_BOUNDS.maxY) / 2) * GOAL_FLAG_SCALE;
+    const clothImg = this.add
+      .image(clothAttachX, clothAttachY, GOAL_CLOTH_TEXTURE_KEY)
+      .setDisplaySize(clothWidth, clothHeight)
+      .setOrigin(0, 0.5); // 왼쪽 변 중앙을 기준점으로 — 이 점을 축으로 회전시키면 깃대에 붙어 흔들림
+
+    this.goalRect = this.add.container(0, 0, [poleImg, clothImg]);
     this.goalRect.setDepth(6);
+
+    // 깃발 천만 좌우로 살짝 기울며 펄럭이는 애니메이션 (깃대는 고정)
+    this.tweens.add({
+      targets: clothImg,
+      angle: GOAL_FLAG_WAVE_DEG,
+      duration: GOAL_FLAG_WAVE_MS,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.easeInOut',
+    });
 
     // 캐릭터를 맵 시작 칸(SPAWN_POSITION)에 배치.
     // 일단 노란 사각형으로 표현 (나중에 실제 캐릭터 이미지로 교체 예정)
