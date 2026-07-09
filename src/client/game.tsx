@@ -68,14 +68,14 @@ const ITEM_MARK_BOB_MS = 600; // 물음표 한 방향 이동에 걸리는 시간
 
 // 골인 지점 깃발 이미지. 깃대+깃발 천이 한 장(public/sprites/GolaFlag.png, 512x512)으로
 // 합쳐져 있던 걸, 깃대는 파란색·천은 흑백 체크무늬라는 색 차이를 이용해 열(column) 82를
-// 경계로 잘라 GoalFlag-pole.png(깃대)로 분리했다. 천 부분은 통짜 한 장으로 회전시키면
-// 뻣뻣한 판자가 위아래로 기울기만 하는 것처럼 보여서("펄럭임"이 아니라 "흔들림"), 실제 천이
-// 나부끼는 느낌을 내려고 세로로 3등분(GoalFlag-cloth-1/2/3.png)한 뒤 체인처럼 중첩된
-// Container로 연결한다 — 각 조각을 부모 조각의 오른쪽 끝에 매달고, 위상을 살짝씩 늦춰
-// 회전시키면 파도가 깃대에서 끝자락으로 흘러가는 것처럼 보인다(로프/꼬리 시뮬레이션과 동일한 기법).
-// 깃대는 고정, 첫 조각은 깃대에 붙여야 하므로 회전 중심이 "왼쪽 변"이어야 하는데, Phaser
-// 이미지는 기본 회전 중심이 중앙이라 원본에서의 위치 관계를 좌표 계산으로 복원해야 한다 —
-// 아래 상수(원본 512x512 캔버스 기준 바운딩 박스)가 그 계산에 쓰인다.
+// 경계로 잘라 GoalFlag-pole.png(깃대)로 분리했다.
+// 천은 세로로 3등분(GoalFlag-cloth-1/2/3.png)해서 조각마다 "제자리에서 위상차를 두고 위아래로
+// 살짝 흔드는" 방식으로 움직인다 — 실제 깃발이 나부낄 때도 천 전체가 통째로 기울어지는 게
+// 아니라, 가로 방향을 따라 위상이 어긋난 채 각 부분이 오르내리며 그 물결이 깃대에서 끝자락으로
+// 흘러가는 것처럼 보이는 원리를 그대로 흉내낸 것. (한 번은 조각을 "회전"시켜 체인처럼 이었더니
+// 조각마다 각도가 달라 이음매가 벌어져 찢어지는 것처럼 보였다 — 회전은 이음매의 x좌표를
+// 어긋나게 만들기 때문. 회전 대신 순수 y축 이동만 쓰면 조각들의 좌우 경계가 항상 같은 x축에
+// 붙어있어 절대 벌어지지 않는다.)
 const GOAL_POLE_TEXTURE_KEY = 'goal-flag-pole';
 const GOAL_CLOTH_TEXTURE_KEYS = ['goal-flag-cloth-1', 'goal-flag-cloth-2', 'goal-flag-cloth-3'];
 // 원본 캔버스(512x512)에서 각 조각이 차지하던 바운딩 박스 — 잘라낸 PNG의 크기/위치와 일치한다.
@@ -86,9 +86,9 @@ const GOAL_CLOTH_BOUNDS = { minX: 82, maxX: 484, minY: 0, maxY: 506 };
 const GOAL_CLOTH_SEG_PIXEL_WIDTHS = [134, 134, 135];
 const GOAL_FLAG_DISPLAY_SIZE = TILE_SIZE * 0.85; // 깃발 전체(원본 512 기준)를 이 크기로 축소해 표시
 const GOAL_FLAG_SCALE = GOAL_FLAG_DISPLAY_SIZE / GOAL_FLAG_CANVAS;
-const GOAL_FLAG_WAVE_DEG = 6; // 조각 하나가 부모 기준으로 좌우로 흔들리는 각도(도) — 조각마다 회전이 누적되어 끝으로 갈수록 진폭이 커짐
-const GOAL_FLAG_WAVE_MS = 500; // 조각이 한쪽으로 기우는 데 걸리는 시간(ms, yoyo라 왕복은 2배)
-const GOAL_FLAG_WAVE_DELAY_MS = 120; // 다음 조각이 같은 애니메이션을 이만큼 늦게 시작 — 이 위상차가 "파도가 이동하는" 것처럼 보이게 함
+const GOAL_FLAG_WAVE_PX = 3; // 조각 하나가 제자리에서 위아래로 움직이는 거리(px)
+const GOAL_FLAG_WAVE_MS = 450; // 조각이 한쪽으로 움직이는 데 걸리는 시간(ms, yoyo라 왕복은 2배)
+const GOAL_FLAG_WAVE_DELAY_MS = 120; // 다음 조각이 같은 애니메이션을 이만큼 늦게 시작 — 이 위상차가 "물결이 이동하는" 것처럼 보이게 함
 
 // vision-system.md 스펙: 기본 시야 반경 2칸.
 // 나중에 손전등(4칸)/시야차단 함정(0.5~1칸)을 만들 때 이 값을 상황에 맞게 바꿔주면 됨.
@@ -251,29 +251,27 @@ class MazeScene extends Phaser.Scene {
       )
       .setDisplaySize(poleWidth, poleHeight);
 
-    // 깃발 천: 3조각을 체인처럼 중첩된 Container로 연결한다. 각 조각 Container는 자신의
-    // 로컬 (0,0)이 "이전 조각의 오른쪽 끝(=자신의 회전 축)"이 되도록 배치하고, 그 안의
-    // Image는 origin(0, 0.5)로 왼쪽 변 중앙을 (0,0)에 맞춰 오른쪽으로 펼쳐지게 그린다.
-    // Container 회전은 항상 자신의 (0,0) 기준이라 이 배치만으로 조각별 회전 축이 자동으로
-    // "이전 조각 끝"이 되고, 안쪽 Container의 회전은 부모 Container 회전에 얹혀 누적되므로
-    // 깃대에서 먼 조각일수록 실제 화면상 흔들림 폭이 커진다 — 로프/꼬리 시뮬레이션과 동일한 원리.
+    // 깃발 천: 3조각을 가로로 나란히 붙여 배치하고(회전 없이, 좌우 경계는 항상 고정된 x좌표),
+    // 조각마다 위상차를 두고 제자리에서 위아래로만 살짝 움직인다. 좌우로 안 움직이니 이음매가
+    // 절대 벌어지지 않고, 위상이 어긋난 채 오르내리는 조각들이 나란히 있으니 그 자체로
+    // "물결이 깃대→끝자락으로 흘러가는" 것처럼 보인다.
     const clothHeight = (GOAL_CLOTH_BOUNDS.maxY - GOAL_CLOTH_BOUNDS.minY + 1) * GOAL_FLAG_SCALE;
     const clothAttachX = goalOriginX + GOAL_CLOTH_BOUNDS.minX * GOAL_FLAG_SCALE;
     const clothAttachY = goalOriginY + ((GOAL_CLOTH_BOUNDS.minY + GOAL_CLOTH_BOUNDS.maxY) / 2) * GOAL_FLAG_SCALE;
     const segWidths = GOAL_CLOTH_SEG_PIXEL_WIDTHS.map((w) => w * GOAL_FLAG_SCALE);
 
-    let clothRoot: Phaser.GameObjects.Container | undefined;
-    let parent: Phaser.GameObjects.Container | undefined;
+    const clothImages: Phaser.GameObjects.Image[] = [];
+    let segX = clothAttachX;
     for (let i = 0; i < GOAL_CLOTH_TEXTURE_KEYS.length; i++) {
       const segImg = this.add
-        .image(0, 0, GOAL_CLOTH_TEXTURE_KEYS[i]!)
+        .image(segX, clothAttachY, GOAL_CLOTH_TEXTURE_KEYS[i]!)
         .setDisplaySize(segWidths[i]!, clothHeight)
-        .setOrigin(0, 0.5); // 왼쪽 변 중앙 = 이 조각 Container의 회전 축(0,0)에 맞춤
+        .setOrigin(0, 0.5);
+      clothImages.push(segImg);
 
-      const segContainer = this.add.container(0, 0, [segImg]);
       this.tweens.add({
-        targets: segContainer,
-        angle: GOAL_FLAG_WAVE_DEG,
+        targets: segImg,
+        y: clothAttachY + GOAL_FLAG_WAVE_PX,
         duration: GOAL_FLAG_WAVE_MS,
         delay: i * GOAL_FLAG_WAVE_DELAY_MS,
         yoyo: true,
@@ -281,19 +279,10 @@ class MazeScene extends Phaser.Scene {
         ease: 'Sine.easeInOut',
       });
 
-      if (!parent) {
-        // 첫 조각(깃대에 붙는 쪽)만 실제 화면 좌표(clothAttachX/Y)에 배치
-        segContainer.setPosition(clothAttachX, clothAttachY);
-        clothRoot = segContainer;
-      } else {
-        // 다음 조각은 이전 조각의 오른쪽 끝(로컬 x = segWidths[i-1])에 매달아 체인 연결
-        segContainer.setPosition(segWidths[i - 1]!, 0);
-        parent.add(segContainer);
-      }
-      parent = segContainer;
+      segX += segWidths[i]!;
     }
 
-    this.goalRect = this.add.container(0, 0, [poleImg, clothRoot!]);
+    this.goalRect = this.add.container(0, 0, [poleImg, ...clothImages]);
     this.goalRect.setDepth(6);
 
     // 캐릭터를 맵 시작 칸(SPAWN_POSITION)에 배치.
