@@ -55,6 +55,17 @@ const FOOTPRINT_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height
 </svg>`;
 const FOOTPRINT_TEXTURE_URI = `data:image/svg+xml,${encodeURIComponent(FOOTPRINT_SVG)}`;
 
+// 맵 위 함정/아이템 마커 이미지. 원래 박스+물음표가 한 장으로 합쳐진 PNG(public/sprites/ItemBox.png)를
+// 물음표 부분(ItemBox-mark.png)과 박스 부분(ItemBox-box.png)으로 미리 잘라서 준비해뒀다 —
+// 박스는 고정, 물음표만 위아래로 통통 뜨게 하려면 두 레이어로 분리돼 있어야 하기 때문.
+// 4종 함정 전부 같은 "미스터리 박스" 모양으로 통일 — 밟기 전엔 안에 뭐가 들었는지 안 보이는
+// 컨셉과 잘 맞고, 어떤 함정인지는 밟았을 때 flashPlayer 색으로 구분된다.
+const ITEM_BOX_TEXTURE_KEY = 'item-box';
+const ITEM_MARK_TEXTURE_KEY = 'item-mark';
+const ITEM_MARKER_SIZE = 40; // 마커 표시 크기(px, 정사각형 — 원본 512x512 캔버스를 이 크기로 축소)
+const ITEM_MARK_BOB_PX = 4; // 물음표가 위아래로 움직이는 거리(px)
+const ITEM_MARK_BOB_MS = 600; // 물음표 한 방향 이동에 걸리는 시간(ms, yoyo라 왕복은 2배)
+
 // vision-system.md 스펙: 기본 시야 반경 2칸.
 // 나중에 손전등(4칸)/시야차단 함정(0.5~1칸)을 만들 때 이 값을 상황에 맞게 바꿔주면 됨.
 const VISION_RADIUS = 2;
@@ -118,9 +129,9 @@ class MazeScene extends Phaser.Scene {
   // 밝기 조정됨(다시 안개가 덮이면 같이 흐려짐) — 내 발자국은 그리지 않는다.
   private footprintRects: (Phaser.GameObjects.Image | undefined)[][] = [];
 
-  // 함정 마커 도형. 안개 상태에 맞춰 같이 밝기 조정됨
+  // 함정 마커 도형(박스+물음표 이미지를 담은 컨테이너). 안개 상태에 맞춰 같이 밝기 조정됨
   // (함정 탐지기 아이템 없이는 안개에 덮인 함정이 안 보이게 하기 위함).
-  private trapRects: (Phaser.GameObjects.Arc | undefined)[][] = [];
+  private trapRects: (Phaser.GameObjects.Container | undefined)[][] = [];
 
   // 서버에서 받아온 "내가 설치한 함정" 목록. 다른 유저가 설치한 함정 좌표는 서버가
   // trap.trigger(인접 타일만 조회 가능)를 통해서만 알려주므로 클라이언트에 절대 미리 내려주지
@@ -151,10 +162,13 @@ class MazeScene extends Phaser.Scene {
   }
 
   // preload(): 게임 시작 전에 이미지 등 리소스를 미리 불러오는 함수.
-  // 벽 석벽 텍스처, 발자국 아이콘(둘 다 SVG data URI)을 로드해둔다.
+  // 벽 석벽 텍스처, 발자국 아이콘(SVG data URI)과 함정/아이템 박스 이미지(public/sprites, 실제
+  // PNG 파일)를 로드해둔다.
   preload() {
     this.load.image(WALL_TILE_TEXTURE_KEY, WALL_TILE_TEXTURE_URI);
     this.load.image(FOOTPRINT_TEXTURE_KEY, FOOTPRINT_TEXTURE_URI);
+    this.load.image(ITEM_BOX_TEXTURE_KEY, '/sprites/ItemBox-box.png');
+    this.load.image(ITEM_MARK_TEXTURE_KEY, '/sprites/ItemBox-mark.png');
   }
 
   // create(): 게임이 시작될 때 딱 한 번만 실행됨. 여기서 맵과 캐릭터를 화면에 배치합니다.
@@ -253,17 +267,31 @@ class MazeScene extends Phaser.Scene {
     this.renderFootprintMarkers(footprints);
   }
 
-  // this.myTraps를 화면에 마커로 그린다. 안개 상태를 바로 반영하기 위해 마지막에 updateFog도 호출.
+  // this.myTraps를 화면에 마커(박스 + 위아래로 통통 뜨는 물음표)로 그린다.
+  // 안개 상태를 바로 반영하기 위해 마지막에 updateFog도 호출.
   private renderTrapMarkers() {
     for (const trap of this.myTraps) {
-      const marker = this.add.circle(
-        trap.x * TILE_SIZE + TILE_SIZE / 2,
-        trap.y * TILE_SIZE + TILE_SIZE / 2,
-        PATH_WIDTH * 0.35,
-        TRAP_COLORS[trap.type]
-      );
+      const cx = trap.x * TILE_SIZE + TILE_SIZE / 2;
+      const cy = trap.y * TILE_SIZE + TILE_SIZE / 2;
+
+      // 박스는 고정, 물음표만 따로 애니메이션을 걸어야 해서 두 이미지를 각각 만든 뒤
+      // 컨테이너로 묶는다 — 컨테이너에 setAlpha를 하면 두 이미지가 함께 밝기 조정된다.
+      const boxImg = this.add.image(0, 0, ITEM_BOX_TEXTURE_KEY).setDisplaySize(ITEM_MARKER_SIZE, ITEM_MARKER_SIZE);
+      const markImg = this.add.image(0, 0, ITEM_MARK_TEXTURE_KEY).setDisplaySize(ITEM_MARKER_SIZE, ITEM_MARKER_SIZE);
+
+      const marker = this.add.container(cx, cy, [boxImg, markImg]);
       marker.setDepth(6); // 타일(기본 depth 0)보다 위, 캐릭터(depth 10)보다 아래
       this.trapRects[trap.y]![trap.x] = marker;
+
+      // 물음표만 위아래로 살짝 통통 뜨는 애니메이션 (박스는 움직이지 않음)
+      this.tweens.add({
+        targets: markImg,
+        y: markImg.y - ITEM_MARK_BOB_PX,
+        duration: ITEM_MARK_BOB_MS,
+        yoyo: true,
+        repeat: -1,
+        ease: 'Sine.easeInOut',
+      });
     }
     this.updateFog();
   }
