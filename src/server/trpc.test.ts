@@ -170,11 +170,25 @@ const mocks = vi.hoisted(() => {
     }
   }
 
-  return { redis: new FakeRedis() };
+  const users = new Map<string, { username: string }>();
+  const rejectIds = new Set<string>();
+
+  return {
+    redis: new FakeRedis(),
+    reddit: {
+      getUserById: async (id: string) => {
+        if (rejectIds.has(id)) throw new Error(`getUserById 실패 (mock): ${id}`);
+        return users.get(id);
+      },
+    },
+    users,
+    rejectIds,
+  };
 });
 
 vi.mock('@devvit/web/server', () => ({
   redis: mocks.redis,
+  reddit: mocks.reddit,
   context: { userId: undefined },
 }));
 
@@ -182,6 +196,8 @@ const { createCaller } = await import('./trpc');
 
 beforeEach(() => {
   mocks.redis.reset();
+  mocks.users.clear();
+  mocks.rejectIds.clear();
 });
 
 describe('trap.install 동시성 (8.4 회귀 테스트)', () => {
@@ -251,5 +267,44 @@ describe('map.getState 위치 앵커 (8.1 회귀 테스트)', () => {
     await expect(caller.trap.trigger({ mapId: 'map-1', x: 2, y: 0 })).rejects.toMatchObject({
       message: 'INVALID_MOVE',
     });
+  });
+});
+
+describe('leaderboard.get username 매핑', () => {
+  it('reddit.getUserById로 조회된 username을 entry에 채운다', async () => {
+    mocks.users.set('user-g', { username: 'maze-runner' });
+    const caller = createCaller({ userId: 'user-g' });
+    await caller.run.finish({ mapId: 'map-1', clearTimeMs: 5000 });
+
+    const { entries } = await caller.leaderboard.get({ mapId: 'map-1' });
+    expect(entries).toEqual([{ userId: 'user-g', username: 'maze-runner', clearTimeMs: 5000, rank: 1 }]);
+  });
+
+  it('탈퇴/정지 등으로 조회가 안 되는 유저는 userId로 폴백한다', async () => {
+    const caller = createCaller({ userId: 'user-h' });
+    await caller.run.finish({ mapId: 'map-1', clearTimeMs: 6000 });
+
+    const { entries } = await caller.leaderboard.get({ mapId: 'map-1' });
+    expect(entries[0]?.username).toBe('user-h');
+  });
+
+  it('한 엔트리의 getUserById가 reject해도 나머지 엔트리는 정상 반환되고, 실패한 엔트리는 userId로 폴백한다', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    mocks.users.set('user-i', { username: 'runner-i' });
+    mocks.rejectIds.add('user-j');
+
+    await createCaller({ userId: 'user-i' }).run.finish({ mapId: 'map-1', clearTimeMs: 4000 });
+    await createCaller({ userId: 'user-j' }).run.finish({ mapId: 'map-1', clearTimeMs: 5000 });
+
+    const { entries } = await createCaller({ userId: 'user-i' }).leaderboard.get({ mapId: 'map-1' });
+
+    expect(entries).toEqual([
+      { userId: 'user-i', username: 'runner-i', clearTimeMs: 4000, rank: 1 },
+      { userId: 'user-j', username: 'user-j', clearTimeMs: 5000, rank: 2 },
+    ]);
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+
+    errorSpy.mockRestore();
   });
 });

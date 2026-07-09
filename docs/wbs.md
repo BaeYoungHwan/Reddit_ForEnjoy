@@ -32,13 +32,14 @@
 | Redis 데이터 모델(발자국·함정·랭킹) | ✅ | PR #3 (7306bed) | |
 | tRPC/Hono 코어 API 6종 | ✅ | PR #3 | `map.getState`/`footprint.record`/`trap.install`/`trap.trigger`/`run.finish`/`leaderboard.get` |
 | 비동기 전달 로직(위치 앵커) | ✅ | PR #3, 후속 버그픽스 139d003 | |
-| 함정 4종 서버 연동 | ✅ | 2026-07-09 (`src/client/game.tsx`) | 이동 시 `trap.trigger` 호출로 발동 여부/종류를 서버에서 받아 이펙트 적용, `map.getState`로 내 함정만 마커 표시(타 유저 함정 좌표는 노출 안 함 — 오라클 방지). 슬라이드 함정 중간 칸에서도 위치 앵커 동기화만 별도 호출. `trap.install`(함정 설치 UI)은 클라이언트에 아직 진입점 없음 — 별도 작업 |
+| 함정 4종 서버 연동 | ✅ | 2026-07-09 (`src/client/game.tsx`) | 이동 시 `trap.trigger` 호출로 발동 여부/종류를 서버에서 받아 이펙트 적용, `map.getState`로 내 함정만 마커 표시(타 유저 함정 좌표는 노출 안 함 — 오라클 방지). 슬라이드 함정 중간 칸에서도 위치 앵커 동기화만 별도 호출. `trap.install`(함정 설치 UI)은 클라이언트에 아직 진입점 없음 — 별도 작업. 2026-07-09 코드리뷰로 연속 이동 중 `trap.trigger` 응답 순서 역전 경쟁 상태 발견 → `src/client/sequentialDispatcher.ts` 신규 추가해 요청을 dispatch 순서대로 직렬화하도록 수정(`game.tsx` 영역 침범 — 임소리 리뷰 포함) |
 | 자정 리셋 트리거 + 로직(코드) | ✅ | c0f78f8 | |
 | 자정 리셋 실제 발동 시각(playtest 검증) | ⏳ | - | UTC 15:00=KST 00:00 가정, `devvit playtest` 실측 필요 — 오늘 자정 확인 예정 |
 | CI 자동 배포 파이프라인 | ✅ | c0f78f8 (`.github/workflows/deploy.yml`) | |
 | 맵 시작 좌표 실데이터 연동 | ✅ | `src/server/core/maps.ts` → `getMazeMap()` (3️⃣ PR #15 반영분) | ⚠️ 배영환 개인 TODO엔 최근까지 미체크로 남아있었음 — 담당자 간 산출물 연동을 커밋 기준으로 재확인하지 않으면 이런 지연이 반복됨(오늘 WBS 도입 계기) |
 | 아이템 데이터 모델 + API | ⏳ | - | 2026-07-08: 임소리 아이템 리빌딩 PR 대기 중 — 착수 보류 |
 | 데일리 맵 전환 로직 | ⏳ | - | 맵 로테이션 정책 미확정 — 전체 블로커 참조 |
+| 리더보드 `userId`→`username` 매핑 | ✅ | 2026-07-09 커밋(`docs/design-docs/leaderboard-verification.md` 갭 분석 후속) | `leaderboard.get`이 `reddit.getUserById`로 표시용 username을 채워서 반환하도록 변경, `LeaderboardEntry`에 `username` 필드 추가. `src/client/splash.tsx` 표시도 함께 교체(송원호 영역 침범 — 이 PR에 리뷰어 포함). 2026-07-09 코드리뷰로 `Promise.all` 실패 전파 문제 발견 → `Promise.allSettled`로 교체, `src/server/trpc.test.ts`에 회귀 테스트 추가 |
 
 ## 3️⃣ 송원호 — UI·콘텐츠·통합 (`src/client` React 파트 + 콘텐츠 전반)
 
