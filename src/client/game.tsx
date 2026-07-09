@@ -68,20 +68,27 @@ const ITEM_MARK_BOB_MS = 600; // 물음표 한 방향 이동에 걸리는 시간
 
 // 골인 지점 깃발 이미지. 깃대+깃발 천이 한 장(public/sprites/GolaFlag.png, 512x512)으로
 // 합쳐져 있던 걸, 깃대는 파란색·천은 흑백 체크무늬라는 색 차이를 이용해 열(column) 82를
-// 경계로 잘라 GoalFlag-pole.png(깃대)/GoalFlag-cloth.png(천) 두 장으로 분리했다.
-// 깃대는 고정하고 천만 펄럭이게 하려면 회전 중심이 "깃대에 붙어있는 왼쪽 변"이어야 하는데,
-// Phaser 이미지는 기본 회전 중심이 이미지 중앙이라 원본에서의 위치 관계를 좌표 계산으로
-// 복원해야 한다 — 아래 두 상수(원본 512x512 캔버스 기준 바운딩 박스)가 그 계산에 쓰인다.
+// 경계로 잘라 GoalFlag-pole.png(깃대)로 분리했다. 천 부분은 통짜 한 장으로 회전시키면
+// 뻣뻣한 판자가 위아래로 기울기만 하는 것처럼 보여서("펄럭임"이 아니라 "흔들림"), 실제 천이
+// 나부끼는 느낌을 내려고 세로로 3등분(GoalFlag-cloth-1/2/3.png)한 뒤 체인처럼 중첩된
+// Container로 연결한다 — 각 조각을 부모 조각의 오른쪽 끝에 매달고, 위상을 살짝씩 늦춰
+// 회전시키면 파도가 깃대에서 끝자락으로 흘러가는 것처럼 보인다(로프/꼬리 시뮬레이션과 동일한 기법).
+// 깃대는 고정, 첫 조각은 깃대에 붙여야 하므로 회전 중심이 "왼쪽 변"이어야 하는데, Phaser
+// 이미지는 기본 회전 중심이 중앙이라 원본에서의 위치 관계를 좌표 계산으로 복원해야 한다 —
+// 아래 상수(원본 512x512 캔버스 기준 바운딩 박스)가 그 계산에 쓰인다.
 const GOAL_POLE_TEXTURE_KEY = 'goal-flag-pole';
-const GOAL_CLOTH_TEXTURE_KEY = 'goal-flag-cloth';
+const GOAL_CLOTH_TEXTURE_KEYS = ['goal-flag-cloth-1', 'goal-flag-cloth-2', 'goal-flag-cloth-3'];
 // 원본 캔버스(512x512)에서 각 조각이 차지하던 바운딩 박스 — 잘라낸 PNG의 크기/위치와 일치한다.
 const GOAL_FLAG_CANVAS = 512;
 const GOAL_POLE_BOUNDS = { minX: 27, maxX: 81, minY: 11, maxY: 511 };
 const GOAL_CLOTH_BOUNDS = { minX: 82, maxX: 484, minY: 0, maxY: 506 };
+// 천을 잘라낸 3조각의 원본 픽셀 폭(split-flag3.mjs 결과, 합이 GOAL_CLOTH_BOUNDS 전체 폭 403과 일치).
+const GOAL_CLOTH_SEG_PIXEL_WIDTHS = [134, 134, 135];
 const GOAL_FLAG_DISPLAY_SIZE = TILE_SIZE * 0.85; // 깃발 전체(원본 512 기준)를 이 크기로 축소해 표시
 const GOAL_FLAG_SCALE = GOAL_FLAG_DISPLAY_SIZE / GOAL_FLAG_CANVAS;
-const GOAL_FLAG_WAVE_DEG = 6; // 깃발 천이 좌우로 흔들리는 각도(도)
-const GOAL_FLAG_WAVE_MS = 500; // 천이 한쪽으로 기우는 데 걸리는 시간(ms, yoyo라 왕복은 2배)
+const GOAL_FLAG_WAVE_DEG = 6; // 조각 하나가 부모 기준으로 좌우로 흔들리는 각도(도) — 조각마다 회전이 누적되어 끝으로 갈수록 진폭이 커짐
+const GOAL_FLAG_WAVE_MS = 500; // 조각이 한쪽으로 기우는 데 걸리는 시간(ms, yoyo라 왕복은 2배)
+const GOAL_FLAG_WAVE_DELAY_MS = 120; // 다음 조각이 같은 애니메이션을 이만큼 늦게 시작 — 이 위상차가 "파도가 이동하는" 것처럼 보이게 함
 
 // vision-system.md 스펙: 기본 시야 반경 2칸.
 // 나중에 손전등(4칸)/시야차단 함정(0.5~1칸)을 만들 때 이 값을 상황에 맞게 바꿔주면 됨.
@@ -188,7 +195,9 @@ class MazeScene extends Phaser.Scene {
     this.load.image(ITEM_BOX_TEXTURE_KEY, '/sprites/ItemBox-box.png');
     this.load.image(ITEM_MARK_TEXTURE_KEY, '/sprites/ItemBox-mark.png');
     this.load.image(GOAL_POLE_TEXTURE_KEY, '/sprites/GoalFlag-pole.png');
-    this.load.image(GOAL_CLOTH_TEXTURE_KEY, '/sprites/GoalFlag-cloth.png');
+    GOAL_CLOTH_TEXTURE_KEYS.forEach((key, i) => {
+      this.load.image(key, `/sprites/GoalFlag-cloth-${i + 1}.png`);
+    });
   }
 
   // create(): 게임이 시작될 때 딱 한 번만 실행됨. 여기서 맵과 캐릭터를 화면에 배치합니다.
@@ -242,28 +251,50 @@ class MazeScene extends Phaser.Scene {
       )
       .setDisplaySize(poleWidth, poleHeight);
 
-    // 깃발 천: 회전 중심(origin)을 깃대에 붙는 왼쪽 변으로 옮겨야 "깃대에서 펄럭이는" 것처럼 보인다.
-    const clothWidth = (GOAL_CLOTH_BOUNDS.maxX - GOAL_CLOTH_BOUNDS.minX + 1) * GOAL_FLAG_SCALE;
+    // 깃발 천: 3조각을 체인처럼 중첩된 Container로 연결한다. 각 조각 Container는 자신의
+    // 로컬 (0,0)이 "이전 조각의 오른쪽 끝(=자신의 회전 축)"이 되도록 배치하고, 그 안의
+    // Image는 origin(0, 0.5)로 왼쪽 변 중앙을 (0,0)에 맞춰 오른쪽으로 펼쳐지게 그린다.
+    // Container 회전은 항상 자신의 (0,0) 기준이라 이 배치만으로 조각별 회전 축이 자동으로
+    // "이전 조각 끝"이 되고, 안쪽 Container의 회전은 부모 Container 회전에 얹혀 누적되므로
+    // 깃대에서 먼 조각일수록 실제 화면상 흔들림 폭이 커진다 — 로프/꼬리 시뮬레이션과 동일한 원리.
     const clothHeight = (GOAL_CLOTH_BOUNDS.maxY - GOAL_CLOTH_BOUNDS.minY + 1) * GOAL_FLAG_SCALE;
     const clothAttachX = goalOriginX + GOAL_CLOTH_BOUNDS.minX * GOAL_FLAG_SCALE;
     const clothAttachY = goalOriginY + ((GOAL_CLOTH_BOUNDS.minY + GOAL_CLOTH_BOUNDS.maxY) / 2) * GOAL_FLAG_SCALE;
-    const clothImg = this.add
-      .image(clothAttachX, clothAttachY, GOAL_CLOTH_TEXTURE_KEY)
-      .setDisplaySize(clothWidth, clothHeight)
-      .setOrigin(0, 0.5); // 왼쪽 변 중앙을 기준점으로 — 이 점을 축으로 회전시키면 깃대에 붙어 흔들림
+    const segWidths = GOAL_CLOTH_SEG_PIXEL_WIDTHS.map((w) => w * GOAL_FLAG_SCALE);
 
-    this.goalRect = this.add.container(0, 0, [poleImg, clothImg]);
+    let clothRoot: Phaser.GameObjects.Container | undefined;
+    let parent: Phaser.GameObjects.Container | undefined;
+    for (let i = 0; i < GOAL_CLOTH_TEXTURE_KEYS.length; i++) {
+      const segImg = this.add
+        .image(0, 0, GOAL_CLOTH_TEXTURE_KEYS[i]!)
+        .setDisplaySize(segWidths[i]!, clothHeight)
+        .setOrigin(0, 0.5); // 왼쪽 변 중앙 = 이 조각 Container의 회전 축(0,0)에 맞춤
+
+      const segContainer = this.add.container(0, 0, [segImg]);
+      this.tweens.add({
+        targets: segContainer,
+        angle: GOAL_FLAG_WAVE_DEG,
+        duration: GOAL_FLAG_WAVE_MS,
+        delay: i * GOAL_FLAG_WAVE_DELAY_MS,
+        yoyo: true,
+        repeat: -1,
+        ease: 'Sine.easeInOut',
+      });
+
+      if (!parent) {
+        // 첫 조각(깃대에 붙는 쪽)만 실제 화면 좌표(clothAttachX/Y)에 배치
+        segContainer.setPosition(clothAttachX, clothAttachY);
+        clothRoot = segContainer;
+      } else {
+        // 다음 조각은 이전 조각의 오른쪽 끝(로컬 x = segWidths[i-1])에 매달아 체인 연결
+        segContainer.setPosition(segWidths[i - 1]!, 0);
+        parent.add(segContainer);
+      }
+      parent = segContainer;
+    }
+
+    this.goalRect = this.add.container(0, 0, [poleImg, clothRoot!]);
     this.goalRect.setDepth(6);
-
-    // 깃발 천만 좌우로 살짝 기울며 펄럭이는 애니메이션 (깃대는 고정)
-    this.tweens.add({
-      targets: clothImg,
-      angle: GOAL_FLAG_WAVE_DEG,
-      duration: GOAL_FLAG_WAVE_MS,
-      yoyo: true,
-      repeat: -1,
-      ease: 'Sine.easeInOut',
-    });
 
     // 캐릭터를 맵 시작 칸(SPAWN_POSITION)에 배치.
     // 일단 노란 사각형으로 표현 (나중에 실제 캐릭터 이미지로 교체 예정)
