@@ -194,22 +194,22 @@ const LOADOUT_OPTIONS: {
 }[] = [
   {
     id: 'trapDetector',
-    label: '함정 탐지기',
-    description: '반경 안의 함정 위치를 잠깐 보여줘요',
+    label: 'Trap Detector',
+    description: 'Briefly reveals nearby traps',
     icon: <TrapDetectorIcon />,
     accent: 'text-emerald-300 border-emerald-500/60 bg-emerald-500/10',
   },
   {
     id: 'shield',
-    label: '함정 무효화',
-    description: '다음 함정 한 번을 완전히 막아줘요',
+    label: 'Trap Shield',
+    description: 'Blocks the next trap you hit',
     icon: <ShieldIcon />,
     accent: 'text-cyan-300 border-cyan-500/60 bg-cyan-500/10',
   },
   {
     id: 'flashlight',
-    label: '손전등',
-    description: '잠깐 동안 더 멀리까지 보여요',
+    label: 'Flashlight',
+    description: 'See farther for a short while',
     icon: <FlashlightIcon />,
     accent: 'text-amber-300 border-amber-500/60 bg-amber-500/10',
   },
