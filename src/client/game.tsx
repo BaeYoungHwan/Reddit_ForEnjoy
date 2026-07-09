@@ -9,7 +9,7 @@ import { buildMazeSvgDataUri } from './mazePattern';
 import { computeClothWaveX } from './goalFlagWave';
 import { trpc } from './trpcClient';
 import { SequentialDispatcher } from './sequentialDispatcher';
-import type { Position, TrapInstance, TrapTriggerOutput, TrapType } from '../shared/game-types';
+import type { Position, TrapInstallOutput, TrapInstance, TrapTriggerOutput, TrapType } from '../shared/game-types';
 
 // 실제 고정 맵 데이터(송원호 담당, src/shared/maps.ts). splash.tsx의 배경 미리보기와 같은 데이터.
 const MAIN_MAP = getMazeMap('map-1');
@@ -130,23 +130,45 @@ const TRAP_COLORS: Record<TrapType, number> = {
   reverse: 0xff8800, // 주황
 };
 
-// items.md 기준 아이템 4종 중 지금 구현하는 2종만 우선. 나머지(함정 탐지기/함정 설치)는
-// 각각 신규 서버 API·함정 설치 UI가 먼저 있어야 해서 이번엔 제외(docs/wbs.md 26행 참고).
-type ItemType = 'flashlight' | 'shield';
+const TRAP_TYPES: readonly TrapType[] = ['slow', 'respawn', 'blind', 'reverse'];
 
-// 아이템 좌표+종류. TrapInstance(shared/game-types.ts)와 같은 형태지만, 아이템은
-// 아직 서버 연동 전(클라이언트 로컬 전용)이라 공유 타입이 아니라 여기 로컬로 둔다.
+const TRAP_LABELS: Record<TrapType, string> = {
+  slow: '슬라이드',
+  respawn: '리스폰',
+  blind: '시야차단',
+  reverse: '역방향',
+};
+
+// trap.install 실패 사유 → 안내 문구. TrapInstallOutput.reason은 optional이라(성공 시엔
+// 항상 undefined) 값이 없을 때는 RETRY 문구로 대체.
+type InstallFailureReason = NonNullable<TrapInstallOutput['reason']>;
+const INSTALL_FAILURE_MESSAGES: Record<InstallFailureReason, string> = {
+  TOTAL_CAP_REACHED: '설치 가능 개수를 다 썼어요',
+  TYPE_CAP_REACHED: '이 함정은 더 설치할 수 없어요',
+  TILE_OCCUPIED: '이미 함정이 있는 칸이에요',
+  RETRY: '설치 실패, 다시 시도해주세요',
+};
+
+// items.md 기준 아이템 4종 중 지금 구현하는 3종. 나머지(함정 탐지기)는 타 유저 함정을
+// 반경 내 공개하는 신규 서버 API가 먼저 있어야 해서 이번엔 제외(docs/wbs.md 참고).
+type ItemType = 'flashlight' | 'shield' | 'trapInstall';
+
+// 아이템 좌표+종류. shared/game-types.ts에도 같은 이름/형태의 타입이 있지만(item.pickup
+// 응답 등에 쓰임), 여기선 구조적으로 호환되는 로컬 타입을 그대로 쓴다(2026-07-09: 아이템
+// 서버 연동 완료 — map.getState/item.pickup 실제 호출로 교체됨).
 type ItemInstance = { x: number; y: number; type: ItemType };
 
 const ITEM_COLORS: Record<ItemType, number> = {
   flashlight: 0xfff59d, // 옅은 노랑
   shield: 0x33ffee, // 청록
+  trapInstall: 0xff3355, // 빨강
 };
 
 // 픽업 라벨(말풍선 텍스트)에 쓸 한글 이름.
 const ITEM_LABELS: Record<ItemType, string> = {
   flashlight: '손전등',
   shield: '쉴드',
+  trapInstall: '함정 설치',
 };
 
 // items.md: 손전등은 시야 반경 2→4칸, 8초. 원래는 "주웠다가 원할 때 쓰는" 아이템이지만
@@ -155,13 +177,16 @@ const ITEM_LABELS: Record<ItemType, string> = {
 const FLASHLIGHT_VISION_RADIUS = 4;
 const FLASHLIGHT_DURATION_MS = 8000;
 
-// ── 임시 테스트용 아이템 스폰 좌표 ──────────────────────────
-// 함정처럼 실제 맵/랜덤 스폰 로직이 아직 없어서 손으로 두 지점만 박아둠.
+// ── 아이템 스폰 좌표 ──────────────────────────
+// 2026-07-09: 정상적으로는 loadServerState()가 map.getState 응답(state.items)으로
+// remainingItems를 채운다. 이 상수는 서버 호출이 실패했을 때(백엔드 없는 로컬 프리뷰 등)의
+// 폴백 전용 — src/server/core/items.ts의 실제 스폰 좌표(map-1)와 맞춰뒀다.
 // ⚠️ 이 좌표들은 MAIN_MAP(map-1)의 바닥 칸이어야 함 — 코드로 검증하지 않으므로, 맵 레이아웃이
 // 또 바뀌면 여기도 같이 확인할 것(벽 칸을 가리키면 마커가 벽 속에 파묻혀 주울 수 없게 됨).
 const TEMP_ITEMS: ItemInstance[] = [
-  { x: 5, y: 2, type: 'flashlight' },
-  { x: 9, y: 9, type: 'shield' },
+  { x: 3, y: 1, type: 'flashlight' },
+  { x: 7, y: 5, type: 'shield' },
+  { x: 13, y: 7, type: 'trapInstall' },
 ];
 
 // Phaser의 "씬(Scene)" = 게임 화면 한 장을 담당하는 클래스.
@@ -213,11 +238,22 @@ class MazeScene extends Phaser.Scene {
   // 동일하게 안개 상태에 맞춰 밝기 조정됨.
   private itemRects: (Phaser.GameObjects.Star | undefined)[][] = [];
 
-  // 아직 안 주운 아이템 목록. 주우면 여기서 제거됨(TEMP_ITEMS는 원본 그대로 유지).
-  private remainingItems: ItemInstance[] = [...TEMP_ITEMS];
+  // 아직 안 주운 아이템 목록. loadServerState()가 map.getState 응답으로 채운다(서버 실패 시
+  // TEMP_ITEMS로 폴백). 주우면 여기서 제거됨.
+  private remainingItems: ItemInstance[] = [];
 
   // 쉴드 보유 여부. true면 다음 함정 발동을 무효화하고 자동으로 false가 됨(1회성 소모).
   private hasShield = false;
+
+  // 보유 중인 "함정 설치" 아이템이 랜덤으로 정해준 함정 종류. null이면 아무것도 안 들고
+  // 있는 상태 — Z를 눌러도 아무 일 없음. 설치 성공하면 다시 null로 돌아감(1회성 소모,
+  // 실패하면 그대로 유지 — 다른 칸에서 재시도 가능).
+  private heldTrapType: TrapType | null = null;
+
+  // trap.install 요청이 응답 오기 전에 Z를 연타해서 중복 요청이 동시에 나가는 것을 막는
+  // 잠금 플래그. isMoving과 같은 목적이지만 "이동 애니메이션"이 아니라 "네트워크 요청 1건"을
+  // 잠근다는 점이 다름.
+  private isInstalling = false;
 
   // 지금 적용 중인 시야 반경. 평소엔 VISION_RADIUS와 같고, 시야차단 함정에 걸리면 잠깐 줄어듦.
   private currentVisionRadius = VISION_RADIUS;
@@ -291,20 +327,6 @@ class MazeScene extends Phaser.Scene {
 
     this.createGoalFlag();
 
-    // 아이템 마커 배치 (별 모양 — 함정 마커는 박스 모양이라 헷갈리지 않게 구분)
-    for (const item of this.remainingItems) {
-      const marker = this.add.star(
-        item.x * TILE_SIZE + TILE_SIZE / 2,
-        item.y * TILE_SIZE + TILE_SIZE / 2,
-        5,
-        TILE_SIZE * 0.12,
-        TILE_SIZE * 0.24,
-        ITEM_COLORS[item.type]
-      );
-      marker.setDepth(6);
-      this.itemRects[item.y]![item.x] = marker;
-    }
-
     // 캐릭터를 맵 시작 칸(SPAWN_POSITION)에 배치.
     // 일단 노란 사각형으로 표현 (나중에 실제 캐릭터 이미지로 교체 예정)
     this.playerGridX = SPAWN_POSITION.x;
@@ -321,6 +343,11 @@ class MazeScene extends Phaser.Scene {
     // 키보드의 방향키 입력을 받을 수 있도록 설정.
     // 이후 update()에서 this.cursors.left/right/up/down 으로 눌림 여부를 확인할 수 있음.
     this.cursors = this.input.keyboard!.createCursorKeys();
+
+    // 함정 설치 키(Z). 방향키(this.cursors)는 "누르는 동안 계속" 반응해야 하는 연속 입력이라
+    // update()에서 매 프레임 폴링하지만, 설치는 "딱 한 번만" 반응해야 하는 단발성 액션이라
+    // keydown 이벤트로 처리한다(이 파일에서 첫 이벤트 기반 키 입력).
+    this.input.keyboard!.on('keydown-Z', () => void this.attemptInstall());
 
     // 게임 시작하자마자 시작 지점 기준으로 시야(안개)부터 계산해서 보여줌
     this.updateFog();
@@ -393,6 +420,7 @@ class MazeScene extends Phaser.Scene {
       const state = await trpc.map.getState.query({ mapId: MAP_ID });
       this.myTraps = state.myTraps;
       footprints = state.footprints;
+      this.remainingItems = state.items;
     } catch (err) {
       // 정적 빌드만 단독으로 띄우는 로컬 프리뷰(백엔드 없음)에서도 마커를 눈으로 확인할 수
       // 있도록 하는 개발용 폴백. 실제 서버(devvit playtest/배포 환경)가 응답하면 위 try에서
@@ -411,9 +439,30 @@ class MazeScene extends Phaser.Scene {
         { x: 5, y: 3 },
         { x: 1, y: 7 },
       ];
+      // 아이템도 위와 동일한 이유(백엔드 없는 로컬 프리뷰)로 TEMP_ITEMS 좌표로 폴백한다.
+      this.remainingItems = TEMP_ITEMS;
     }
     this.renderTrapMarkers();
     this.renderFootprintMarkers(footprints);
+    this.renderItemMarkers();
+  }
+
+  // this.remainingItems를 화면에 별 모양 마커로 그린다(함정 마커는 박스 모양이라 구분됨).
+  // renderTrapMarkers()와 동일하게 loadServerState()에서 서버 응답을 받은 뒤 한 번 호출한다.
+  private renderItemMarkers() {
+    for (const item of this.remainingItems) {
+      const marker = this.add.star(
+        item.x * TILE_SIZE + TILE_SIZE / 2,
+        item.y * TILE_SIZE + TILE_SIZE / 2,
+        5,
+        TILE_SIZE * 0.12,
+        TILE_SIZE * 0.24,
+        ITEM_COLORS[item.type]
+      );
+      marker.setDepth(6);
+      this.itemRects[item.y]![item.x] = marker;
+    }
+    this.updateFog();
   }
 
   // this.myTraps를 화면에 마커(박스 + 위아래로 통통 뜨는 물음표)로 그린다.
@@ -491,6 +540,35 @@ class MazeScene extends Phaser.Scene {
     }
   }
 
+  // attemptInstall()에서 방금 설치에 성공한 함정 1개만 그릴 때 쓰는 함수. renderTrapMarkers()
+  // 전체를 재호출하면 이미 그려둔 마커가 dedup 없이 중복 생성되므로 새 함정 1개만 그린다.
+  // renderTrapMarkers()의 그리기 로직(박스+통통 뜨는 물음표, 2️⃣/3️⃣ 작성분)과 겹치는 부분이
+  // 있지만, 그쪽 함수를 리팩터링해서 공유하지 않고 별도 함수로 둔다 — 다른 팀원이 작성한
+  // 함수는 건드리지 않기 위함(2026-07-09 임소리 확인).
+  private renderInstalledTrapMarker(trap: TrapInstance) {
+    const cx = trap.x * TILE_SIZE + TILE_SIZE / 2;
+    const cy = trap.y * TILE_SIZE + TILE_SIZE / 2;
+
+    // 박스는 고정, 물음표만 따로 애니메이션을 걸어야 해서 두 이미지를 각각 만든 뒤
+    // 컨테이너로 묶는다 — 컨테이너에 setAlpha를 하면 두 이미지가 함께 밝기 조정된다.
+    const boxImg = this.add.image(0, 0, ITEM_BOX_TEXTURE_KEY).setDisplaySize(ITEM_MARKER_SIZE, ITEM_MARKER_SIZE);
+    const markImg = this.add.image(0, 0, ITEM_MARK_TEXTURE_KEY).setDisplaySize(ITEM_MARKER_SIZE, ITEM_MARKER_SIZE);
+
+    const marker = this.add.container(cx, cy, [boxImg, markImg]);
+    marker.setDepth(6); // 타일(기본 depth 0)보다 위, 캐릭터(depth 10)보다 아래
+    this.trapRects[trap.y]![trap.x] = marker;
+
+    // 물음표만 위아래로 살짝 통통 뜨는 애니메이션 (박스는 움직이지 않음)
+    this.tweens.add({
+      targets: markImg,
+      y: markImg.y - ITEM_MARK_BOB_PX,
+      duration: ITEM_MARK_BOB_MS,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.easeInOut',
+    });
+  }
+
   // update(): 매 프레임(1초에 수십 번)마다 반복 실행되는 함수.
   // "지금 방향키가 눌렸는가?"를 확인해서 캐릭터를 움직이는 역할을 함.
   override update(_time: number, delta: number) {
@@ -565,8 +643,8 @@ class MazeScene extends Phaser.Scene {
         // 판정이 다 끝난 뒤에 하도록 옮김(슬라이드 함정은 자기가 다시 잠그고 스스로 풂).
         if (this.checkGoalReached(targetX, targetY)) return; // 골인했으면 함정 확인 없이 종료
 
-        // 아이템은 서버 연동 전이라 클라이언트에서 바로 확인(동기 처리).
-        this.checkItemPickup(targetX, targetY);
+        // 아이템은 item.pickup 서버 호출로 확인(비동기) — 함정 확인과 독립적으로 진행.
+        void this.checkItemPickup(targetX, targetY);
 
         // 도착한 칸에 함정이 있는지 서버에 확인. dx, dy(눌렀던 방향)를 같이 넘겨서
         // 슬라이드 함정이 "어느 방향으로 미끄러질지" 알 수 있게 함.
@@ -634,26 +712,43 @@ class MazeScene extends Phaser.Scene {
     });
   }
 
-  // 방금 도착한 칸에 아직 안 주운 아이템이 있는지 확인하고, 있으면 습득 처리한다.
-  // 함정과 달리 서버 데이터가 아직 없어서 로컬 배열만 보고 동기적으로 처리.
-  private checkItemPickup(x: number, y: number) {
-    const index = this.remainingItems.findIndex((item) => item.x === x && item.y === y);
-    if (index === -1) return;
-
-    const [item] = this.remainingItems.splice(index, 1);
-    this.itemRects[item!.y]![item!.x]?.destroy();
-    this.itemRects[item!.y]![item!.x] = undefined;
-
-    this.showPickupLabel(item!.type);
-    if (item!.type === 'flashlight') this.applyFlashlightItem();
-    else this.applyShieldItem();
+  // item.pickup을 호출해 서버에 픽업을 기록하고 실제로 주웠는지 응답을 받는다(다른 유저가
+  // 먼저 주웠으면 picked:false). reportPosition과 동일한 이유로 실패 시 로컬 remainingItems
+  // 목록으로 직접 판정하는 폴백을 둔다.
+  // trapDispatcher로 직렬화하지 않는 이유: item.pickup도 trap.trigger와 동일하게 내부에서
+  // advancePosition(위치 앵커 검증)을 쓰지만, 같은 이동에 대해 둘 다 같은 좌표(x, y)를
+  // 타겟팅한다 — 어느 쪽이 먼저 응답해서 앵커를 그 좌표로 옮기든, 나머지 하나는 "직전
+  // 위치와의 거리 0"으로 검증을 통과한다(서버 advancePosition의 `거리 > 1`일 때만 거부하는
+  // 조건 참고). 그래서 이동마다 두 요청이 순서 상관없이 나가도 안전하다.
+  private async reportItemPickup(x: number, y: number) {
+    try {
+      return await trpc.item.pickup.mutate({ mapId: MAP_ID, x, y });
+    } catch (err) {
+      console.error('item.pickup 실패 — 로컬 아이템 목록으로 직접 판정', err);
+      const localItem = this.remainingItems.find((item) => item.x === x && item.y === y);
+      return localItem ? { picked: true, type: localItem.type } : { picked: false };
+    }
   }
 
-  // 아이템을 주웠을 때 캐릭터 머리 위에 "무엇을 주웠는지" 말풍선처럼 잠깐 띄우는 텍스트.
-  // 위로 떠오르면서 사라지는 트윈 하나로 구현(골인 텍스트처럼 this.add.text 재사용).
-  private showPickupLabel(type: ItemType) {
+  // 방금 도착한 칸에 아직 안 주운 아이템이 있는지 서버에 확인하고, 있으면 습득 처리한다.
+  private async checkItemPickup(x: number, y: number) {
+    const result = await this.reportItemPickup(x, y);
+    if (!result?.picked || !result.type) return;
+
+    this.remainingItems = this.remainingItems.filter((item) => !(item.x === x && item.y === y));
+    this.itemRects[y]![x]?.destroy();
+    this.itemRects[y]![x] = undefined;
+
+    if (result.type === 'flashlight') this.applyFlashlightItem();
+    else if (result.type === 'shield') this.applyShieldItem();
+    else this.applyTrapInstallItem();
+  }
+
+  // 캐릭터 머리 위에 짧은 안내 텍스트를 잠깐 띄우는 말풍선. 위로 떠오르면서 사라지는
+  // 트윈 하나로 구현. 아이템 획득/함정 설치 성공·실패 안내에 공용으로 재사용.
+  private showFloatingLabel(text: string) {
     const label = this.add
-      .text(this.playerRect.x, this.playerRect.y - TILE_SIZE * 0.6, `${ITEM_LABELS[type]} 획득!`, {
+      .text(this.playerRect.x, this.playerRect.y - TILE_SIZE * 0.6, text, {
         fontSize: '16px',
         color: '#ffffff',
         backgroundColor: '#00000099',
@@ -694,6 +789,7 @@ class MazeScene extends Phaser.Scene {
   // 효과가 끝난 뒤 손전등의 남은 지속시간이 복원되지 않고 기본값으로 돌아가는 것도 지금은
   // 의도한 단순화 — 팀 플레이테스트 피드백 있으면 재검토.
   private applyFlashlightItem() {
+    this.showFloatingLabel(`${ITEM_LABELS.flashlight} 획득!`);
     this.flashPlayer(ITEM_COLORS.flashlight);
     this.currentVisionRadius = FLASHLIGHT_VISION_RADIUS;
     this.updateFog();
@@ -707,8 +803,60 @@ class MazeScene extends Phaser.Scene {
   // 함정 무효화(쉴드) — items.md: 반응형. 주우면 바로 발동하는 게 아니라 보유 상태로만
   // 바뀌고, 실제 효과는 다음 함정을 밟는 순간(checkTrapTrigger)에 소모되며 적용됨.
   private applyShieldItem() {
+    this.showFloatingLabel(`${ITEM_LABELS.shield} 획득!`);
     this.hasShield = true;
     this.flashPlayer(ITEM_COLORS.shield);
+  }
+
+  // 함정 설치 — items.md: 즉시 소모(1회성). 어떤 함정을 설치하게 될지는 줍는 순간 랜덤으로
+  // 정해진다(뽑기형 — 플레이어가 종류를 고르지 않음, 2026-07-09 확인). 실제 서버 호출은
+  // Z키를 눌렀을 때 attemptInstall()에서 처리.
+  private applyTrapInstallItem() {
+    this.heldTrapType = TRAP_TYPES[Math.floor(Math.random() * TRAP_TYPES.length)]!;
+    this.flashPlayer(ITEM_COLORS.trapInstall);
+    this.showFloatingLabel(`${ITEM_LABELS.trapInstall} 획득! (${TRAP_LABELS[this.heldTrapType]})`);
+  }
+
+  // Z키를 눌렀을 때 호출됨. 보유 중인 함정 설치권(heldTrapType)이 있을 때만 지금 서 있는
+  // 칸에 설치를 시도한다 — 이 게임엔 "다른 칸을 조준"하는 입력 수단이 없어서 항상 현재
+  // 위치에 설치하는 게 유일하게 말이 되는 선택.
+  private async attemptInstall() {
+    if (!this.heldTrapType || this.hasFinished || this.isInstalling) return;
+
+    const type = this.heldTrapType;
+    this.isInstalling = true;
+    try {
+      // tRPC가 서버의 각 return문에서 리터럴 유니언(성공 케이스엔 reason 필드 자체가 없음)을
+      // 그대로 추론해버려서, result.success로 좁혀도 result.reason 접근이 막힌다. 공유 타입
+      // TrapInstallOutput으로 변수 타입을 명시해 구조적으로 맞춰준다(as 캐스팅 아님 — 실제
+      // 응답 모양이 TrapInstallOutput을 항상 만족하므로 대입 가능).
+      const result: TrapInstallOutput = await trpc.trap.install.mutate({
+        mapId: MAP_ID,
+        type,
+        x: this.playerGridX,
+        y: this.playerGridY,
+      });
+
+      this.myTraps = result.myTraps;
+
+      if (result.success) {
+        this.heldTrapType = null; // 성공해야 소모(1회성)
+        this.renderInstalledTrapMarker({ x: this.playerGridX, y: this.playerGridY, type });
+        this.updateFog();
+        this.showFloatingLabel(`함정 설치 완료! (${TRAP_LABELS[type]})`);
+        return;
+      }
+
+      // 실패(개수 제한/타일 점유 등)면 소모되지 않고 그대로 들고 있음 — 다른 칸에서 재시도 가능.
+      const message = result.reason
+        ? INSTALL_FAILURE_MESSAGES[result.reason]
+        : INSTALL_FAILURE_MESSAGES.RETRY;
+      this.showFloatingLabel(message);
+    } catch (err) {
+      console.error('trap.install 실패', err);
+    } finally {
+      this.isInstalling = false;
+    }
   }
 
   // 1. 슬라이드 함정.
