@@ -2,7 +2,7 @@
 
 > 마감: 2026-07-15 18:00 PT(2026-07-16 10:00 KST). 상세 일정은 `docs/schedule.md`, 역할/담당 경로는 `docs/team-roles.md` 참조.
 > 이 파일은 **git 추적 대상**(팀 공유)입니다. 각자의 `TODO.local.md`는 개인 참고용이고 gitignore 처리되어 팀원 간 공유되지 않습니다 — 팀 전체의 진행상황 판단은 이 파일 하나만 보면 되도록 유지하는 것이 목적입니다.
-> 마지막 정합성 확인: 2026-07-08 (git log/PR #1~#16 기준, 배영환 확인)
+> 마지막 정합성 확인: 2026-07-08 (git log/PR #1~#17 기준, 배영환 확인 + 송원호 3️⃣ 섹션 실환경 검증 반영). 2026-07-09 송원호 3️⃣ 섹션만 추가 갱신(전체 재검증 아님).
 
 ## 상태 범례
 
@@ -43,9 +43,9 @@
 
 | 작업 | 상태 | 근거 | 블로커/비고 |
 |------|------|------|------|
-| 스플래시/메인화면 UI | 🔄 | PR #15 (872386a), `splash.tsx` | 2026-07-08 사용자 확인: "게임 화면(Phaser)은 아직 업데이트 전" — 스플래시(Inline View)만 반영된 상태 |
-| 고정 맵 데이터 (map-1) | ✅ | PR #15, `src/shared/maps.ts` | map-2 이상 추가 맵은 미착수 |
-| 리더보드 UI 훅 | 🔄 | `src/client/hooks/useLeaderboard.ts`, PR #15 | 서버 `leaderboard.get`과 연동 코드는 존재 — 실제 화면 부착 여부는 미확인 |
+| 스플래시/메인화면 UI | 🔄 | PR #15 (872386a), f52a9a0, 19782b8, `splash.tsx` | 2026-07-08 실제 `r/maze_footprints_dev`에서 스플래시 화면 렌더링 확인(스크린샷). 발자국 애니메이션이 JS `setInterval` 리마운트 방식이라 Devvit iframe에서 반복 재생이 안 되던 버그, PLAY 버튼(128px)이 실제 inline 카드 대비 과대 크기이던 문제 발견 → f52a9a0에서 순수 CSS `animation-iteration-count: infinite`로 교체 + 버튼 96px로 축소해 수정. 2026-07-09 PR #18 리뷰 중 후속 버그 발견: CSS 전환 과정에서 `animation-fill-mode`가 빠져 최초 로드 시 전체 발자국이 한꺼번에 노출됐다 팝(pop)되는 회귀 가능성 확인 → `animationFillMode: 'backwards'` 추가로 수정, `npm run build` 정적 산출물을 Playwright 헤드리스로 렌더링해 순차 노출 정상 동작 확인(콘솔 에러 0건). 게임 화면(Phaser)은 아직 업데이트 전 |
+| 고정 맵 데이터 (map-1) | ✅ | PR #15, `src/shared/maps.ts` | map-2 이상 추가 맵은 미착수 — 전체 블로커의 "데일리 맵 로테이션 정책" 확정 전까지 보류 |
+| 리더보드 UI 훅 | 🔄 | `src/client/hooks/useLeaderboard.ts`, PR #15 | 서버 `leaderboard.get`과 연동 코드는 존재하고 메뉴 화면은 실제 Reddit에서 렌더링 확인됨 — 리더보드 뷰 자체(HUD 아이콘 클릭 후 화면)는 아직 실환경 스크린샷 미확인 |
 | 로드아웃 선택 화면 | ⏳ | - | `items.md` 미확정 — 전체 블로커 참조 |
 | 아트/사운드/모바일 대응/QA 총괄 | ⬜ | - | 일정상 Day4~7(7/11~7/14) 구간 예정 |
 
