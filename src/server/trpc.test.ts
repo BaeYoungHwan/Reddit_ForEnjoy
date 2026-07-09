@@ -327,8 +327,8 @@ describe('item.pickup 위치 앵커 검증', () => {
   });
 });
 
-describe('item.pickup 동시성', () => {
-  it('같은 아이템을 두 유저가 거의 동시에 주우면 한 명만 성공한다', async () => {
+describe('item.pickup 유저별 독립 보드', () => {
+  it('한 유저가 아이템을 주워도 다른 유저의 스폰에는 영향이 없다(각자 독립적으로 성공)', async () => {
     const callerA = createCaller({ userId: 'user-o' });
     const callerB = createCaller({ userId: 'user-p' });
 
@@ -349,10 +349,26 @@ describe('item.pickup 동시성', () => {
       callerB.item.pickup({ mapId: 'map-1', x: 3, y: 1 }),
     ]);
 
-    const results = [resultA, resultB];
+    // 유저별 독립 보드라 경쟁이 없다 — 두 유저 모두 같은 아이템을 각자 성공적으로 주울 수 있다.
+    expect(resultA).toEqual({ picked: true, type: 'flashlight' });
+    expect(resultB).toEqual({ picked: true, type: 'flashlight' });
+  });
+
+  it('같은 유저가 동일 요청을 중복 전송해도 한 번만 성공한다', async () => {
+    const caller = createCaller({ userId: 'user-dup' });
+    await caller.map.getState({ mapId: 'map-1' });
+    await caller.item.pickup({ mapId: 'map-1', x: 1, y: 0 });
+    await caller.item.pickup({ mapId: 'map-1', x: 2, y: 0 });
+    await caller.item.pickup({ mapId: 'map-1', x: 2, y: 1 });
+
+    const [first, second] = await Promise.all([
+      caller.item.pickup({ mapId: 'map-1', x: 3, y: 1 }),
+      caller.item.pickup({ mapId: 'map-1', x: 3, y: 1 }),
+    ]);
+
+    const results = [first, second];
     expect(results.filter((r) => r.picked)).toHaveLength(1);
     expect(results.filter((r) => !r.picked)).toHaveLength(1);
-    expect(results.find((r) => r.picked)?.type).toBe('flashlight');
   });
 });
 
