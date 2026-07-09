@@ -284,6 +284,20 @@ describe('map.getState 아이템 시딩', () => {
     );
     expect(second.items).toEqual(first.items);
   });
+
+  it('아이템을 주운 뒤 재호출해도 해당 아이템이 다시 채워지지 않는다(재생성 버그 회귀)', async () => {
+    const caller = createCaller({ userId: 'user-q' });
+    await caller.map.getState({ mapId: 'map-1' });
+    await caller.item.pickup({ mapId: 'map-1', x: 1, y: 0 });
+    await caller.item.pickup({ mapId: 'map-1', x: 2, y: 0 });
+    await caller.item.pickup({ mapId: 'map-1', x: 2, y: 1 });
+    const result = await caller.item.pickup({ mapId: 'map-1', x: 3, y: 1 });
+    expect(result).toEqual({ picked: true, type: 'flashlight' });
+
+    const state = await caller.map.getState({ mapId: 'map-1' });
+    expect(state.items).not.toContainEqual({ x: 3, y: 1, type: 'flashlight' });
+    expect(state.items).toContainEqual({ x: 7, y: 5, type: 'shield' });
+  });
 });
 
 describe('item.pickup 위치 앵커 검증', () => {

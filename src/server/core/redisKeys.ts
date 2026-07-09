@@ -25,6 +25,8 @@ export const trapInstallerKey = (mapId: string, date: string, userId: string): s
 
 export const itemBoardKey = (mapId: string, date: string): string => `item:${mapId}:${date}`;
 
+export const itemSeededKey = (mapId: string, date: string): string => `item:seeded:${mapId}:${date}`;
+
 export const leaderboardKey = (mapId: string, date: string): string => `leaderboard:${mapId}:${date}`;
 
 export const positionAnchorKey = (mapId: string, date: string, userId: string): string =>

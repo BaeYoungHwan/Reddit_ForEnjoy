@@ -6,6 +6,7 @@ import {
   footprintKey,
   getKstDateString,
   itemBoardKey,
+  itemSeededKey,
   leaderboardKey,
   parseTile,
   positionAnchorKey,
@@ -76,13 +77,23 @@ async function advancePosition(posKey: string, x: number, y: number): Promise<vo
   await redis.expire(posKey, POSITION_ANCHOR_TTL_SECONDS);
 }
 
-// 해당 맵/날짜의 아이템 보드가 비어있으면 고정 스폰 좌표로 채운다. hSetNX라 동시 호출돼도 안전.
+// 해당 맵/날짜의 아이템 보드를 하루 최초 1회만 고정 스폰 좌표로 채운다.
+// 시딩 여부를 "필드 존재"가 아니라 전용 마커 키(NX)로 판정해야 한다 — hSetNX만 쓰면
+// item.pickup의 hDel로 지워진 필드가 다음 map.getState 호출 때 다시 채워져 버려서
+// (재생성 버그) 픽업한 아이템이 무한정 재획득 가능해진다. 마커 키는 map.getState가 이미
+// 위치 앵커 초기화에 쓰는 SET NX 1회성 패턴(아래 posKey 초기화 참고)과 동일하다.
 async function ensureItemsSeeded(mapId: string, date: string): Promise<void> {
+  const seededKey = itemSeededKey(mapId, date);
+  const firstSeed = await redis.set(seededKey, '1', { nx: true });
+  if (!firstSeed) return;
+
   const boardKey = itemBoardKey(mapId, date);
-  await Promise.all(
-    getItemSpawns(mapId).map((item) => redis.hSetNX(boardKey, tileMember(item), item.type))
+  await redis.hSet(
+    boardKey,
+    Object.fromEntries(getItemSpawns(mapId).map((item) => [tileMember(item), item.type]))
   );
   await redis.expire(boardKey, DATA_SAFETY_TTL_SECONDS);
+  await redis.expire(seededKey, DATA_SAFETY_TTL_SECONDS);
 }
 
 export const appRouter = t.router({
