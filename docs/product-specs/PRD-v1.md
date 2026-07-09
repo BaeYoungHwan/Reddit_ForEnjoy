@@ -45,7 +45,7 @@ Reddit Devvit 플랫폼 (`devvit playtest` → `devvit upload` → `devvit publi
 - [ ] 안개(블라인드) 시야 시스템 — 상세: [`docs/design-docs/vision-system.md`](../design-docs/vision-system.md)
 - [ ] 발자국 기록 및 표시 — 지나간 타일 흔적을 Redis에 저장, 후속 유저에게 힌트로 표시 (안개 시스템과 별개: 발자국은 비동기 공유 데이터, 안개는 개인 화면 상태)
 - [ ] 함정 설치 기능 + 함정 4종 — 상세: [`docs/design-docs/traps.md`](../design-docs/traps.md)
-- [ ] 아이템 획득(랜덤 스폰 + 게임 시작 전 로드아웃 선택) + 아이템 종류 — 상세(⚠️ 미확정): [`docs/design-docs/items.md`](../design-docs/items.md)
+- [ ] 아이템 획득(랜덤 스폰 + 게임 시작 전 로드아웃 선택) + 아이템 종류 — 최종 4종 확정(2026-07-09), 수치는 일부 ⚠️ 플레이테스트 필요: [`docs/design-docs/items.md`](../design-docs/items.md)
 - [ ] 골인 시 클리어 시간 기록 + 리더보드
 - [ ] 매일 자정 기준 맵 리셋 (발자국·함정·아이템 스폰·랭킹 초기화, 데일리 맵)
 
@@ -85,6 +85,6 @@ Reddit Devvit 플랫폼 (`devvit playtest` → `devvit upload` → `devvit publi
 | 질문 | 결정권자 | 기한 |
 |------|----------|------|
 | 목표 서브챌린지 최종 확정 (본상만 vs Retention 포함) | 팀 | Day2 (7/9) 이전 |
-| 아이템 최종 4~5종 확정 (`docs/design-docs/items.md` 후보 풀 참조) | 팀 | Day1 (7/8) 이전 — P1 착수 전 |
+| ~~아이템 최종 4~5종 확정~~ (`docs/design-docs/items.md` 참조) | 팀 | ✅ 확정 완료(2026-07-09) |
 | 시야 반경/함정 지속시간 등 밸런스 수치 (`docs/design-docs/vision-system.md`, `traps.md`) | 임소리 + 플레이테스트 | Day3 (7/10)까지 초안 |
 | 발자국 표시 개수 상한 (성능 영향) | 배영환 | P1 착수 전 |
