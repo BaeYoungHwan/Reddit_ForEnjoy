@@ -43,7 +43,7 @@
 
 | 작업 | 상태 | 근거 | 블로커/비고 |
 |------|------|------|------|
-| 스플래시/메인화면 UI | 🔄 | PR #15 (872386a), f52a9a0, 9c35eca, `splash.tsx` | 2026-07-08 실제 `r/maze_footprints_dev`에서 스플래시 화면 렌더링 확인(스크린샷). 발자국 애니메이션이 JS `setInterval` 리마운트 방식이라 Devvit iframe에서 반복 재생이 안 되던 버그, PLAY 버튼(128px)이 실제 inline 카드 대비 과대 크기이던 문제 발견 → f52a9a0에서 순수 CSS `animation-iteration-count: infinite`로 교체 + 버튼 96px로 축소해 수정. 2026-07-09 PR #18 리뷰 중 후속 버그 발견: CSS 전환 과정에서 `animation-fill-mode`가 빠져 최초 로드 시 전체 발자국이 한꺼번에 노출됐다 팝(pop)되는 회귀 가능성 확인 → `animationFillMode: 'backwards'` 추가로 수정, `npm run build` 정적 산출물을 Playwright 헤드리스로 렌더링해 순차 노출 정상 동작 확인(콘솔 에러 0건). 게임 화면(Phaser)은 아직 업데이트 전 |
+| 스플래시/메인화면 UI | 🔄 | PR #15 (872386a), f52a9a0, 19782b8, `splash.tsx` | 2026-07-08 실제 `r/maze_footprints_dev`에서 스플래시 화면 렌더링 확인(스크린샷). 발자국 애니메이션이 JS `setInterval` 리마운트 방식이라 Devvit iframe에서 반복 재생이 안 되던 버그, PLAY 버튼(128px)이 실제 inline 카드 대비 과대 크기이던 문제 발견 → f52a9a0에서 순수 CSS `animation-iteration-count: infinite`로 교체 + 버튼 96px로 축소해 수정. 2026-07-09 PR #18 리뷰 중 후속 버그 발견: CSS 전환 과정에서 `animation-fill-mode`가 빠져 최초 로드 시 전체 발자국이 한꺼번에 노출됐다 팝(pop)되는 회귀 가능성 확인 → `animationFillMode: 'backwards'` 추가로 수정, `npm run build` 정적 산출물을 Playwright 헤드리스로 렌더링해 순차 노출 정상 동작 확인(콘솔 에러 0건). 게임 화면(Phaser)은 아직 업데이트 전 |
 | 고정 맵 데이터 (map-1) | ✅ | PR #15, `src/shared/maps.ts` | map-2 이상 추가 맵은 미착수 — 전체 블로커의 "데일리 맵 로테이션 정책" 확정 전까지 보류 |
 | 리더보드 UI 훅 | 🔄 | `src/client/hooks/useLeaderboard.ts`, PR #15 | 서버 `leaderboard.get`과 연동 코드는 존재하고 메뉴 화면은 실제 Reddit에서 렌더링 확인됨 — 리더보드 뷰 자체(HUD 아이콘 클릭 후 화면)는 아직 실환경 스크린샷 미확인 |
 | 로드아웃 선택 화면 | ⏳ | - | `items.md` 미확정 — 전체 블로커 참조 |
