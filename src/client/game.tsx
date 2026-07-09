@@ -715,6 +715,11 @@ class MazeScene extends Phaser.Scene {
   // item.pickup을 호출해 서버에 픽업을 기록하고 실제로 주웠는지 응답을 받는다(다른 유저가
   // 먼저 주웠으면 picked:false). reportPosition과 동일한 이유로 실패 시 로컬 remainingItems
   // 목록으로 직접 판정하는 폴백을 둔다.
+  // trapDispatcher로 직렬화하지 않는 이유: item.pickup도 trap.trigger와 동일하게 내부에서
+  // advancePosition(위치 앵커 검증)을 쓰지만, 같은 이동에 대해 둘 다 같은 좌표(x, y)를
+  // 타겟팅한다 — 어느 쪽이 먼저 응답해서 앵커를 그 좌표로 옮기든, 나머지 하나는 "직전
+  // 위치와의 거리 0"으로 검증을 통과한다(서버 advancePosition의 `거리 > 1`일 때만 거부하는
+  // 조건 참고). 그래서 이동마다 두 요청이 순서 상관없이 나가도 안전하다.
   private async reportItemPickup(x: number, y: number) {
     try {
       return await trpc.item.pickup.mutate({ mapId: MAP_ID, x, y });
@@ -731,8 +736,8 @@ class MazeScene extends Phaser.Scene {
     if (!result?.picked || !result.type) return;
 
     this.remainingItems = this.remainingItems.filter((item) => !(item.x === x && item.y === y));
-    this.itemRects[y]?.[x]?.destroy();
-    if (this.itemRects[y]) this.itemRects[y]![x] = undefined;
+    this.itemRects[y]![x]?.destroy();
+    this.itemRects[y]![x] = undefined;
 
     if (result.type === 'flashlight') this.applyFlashlightItem();
     else if (result.type === 'shield') this.applyShieldItem();
