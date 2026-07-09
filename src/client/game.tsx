@@ -68,33 +68,29 @@ const ITEM_MARK_BOB_MS = 600; // 물음표 한 방향 이동에 걸리는 시간
 
 // 골인 지점 깃발 이미지. 깃대+깃발 천이 한 장(public/sprites/GolaFlag.png, 512x512)으로
 // 합쳐져 있던 걸, 깃대는 파란색·천은 흑백 체크무늬라는 색 차이를 이용해 열(column) 82를
-// 경계로 잘라 GoalFlag-pole.png(깃대)로 분리했다.
-// 천은 세로로 3등분(GoalFlag-cloth-1/2/3.png)해서 조각마다 위상차를 두고 "가로 폭(scaleX)을
-// 접었다 펴는" 방식으로 움직인다 — 천이 카메라 쪽/반대쪽으로 뒤집히며 잠깐 옆모습처럼 가늘어
-// 보이는 것을 흉내내 "앞뒤로 펄럭이는" 느낌을 낸다(단순 상하 이동은 실제 천이 통째로 위아래로
-// 튀는 것처럼 보여 부자연스러웠다). 각 조각의 위치는 create()에서 한 번만 고정으로 배치하고
-// 이후 절대 다시 옮기지 않는다 — 예전엔 매 프레임 "이전 조각의 현재 오른쪽 끝"을 기준으로
-// 다음 조각을 다시 붙였는데, 그러면 조각들이 동시에 접힐 때 깃발 전체 길이가 늘었다 줄었다
-// 하면서 깃발이 통째로 밀렸다 당겨지는 것처럼(위치가 틀어지는 것처럼) 보이는 문제가 있었다.
-// 대신 각 조각을 자기 폭이 GOAL_FLAG_WAVE_SQUASH까지 접혔을 때의 오른쪽 끝 지점에 다음
-// 조각을 미리 겹쳐서 고정 배치해두면, 조각이 아무리 접혀도 오른쪽 이웃이 이미 그 지점을
-// 덮고 있어 이음매에 틈이 생기지 않는다 — 위치는 고정, 폭만 그 자리에서 숨쉬듯 움직이므로
-// 깃발 전체가 흔들리는 느낌 없이 제자리에서 펄럭인다.
+// 경계로 잘라 GoalFlag-pole.png(깃대)/GoalFlag-cloth.png(천) 두 장으로 분리했다.
+// 천을 여러 조각(Image)으로 쪼개 각자 흔드는 방식은 몇 차례 시도했지만(회전 → 찢어짐,
+// y이동 → 위아래로만 흔들림, scaleX 접기 → 이산적인 3칸이라 뻣뻣하고 기계적) 전부
+// "자연스럽지 않다"는 피드백을 받았다 — 근본 원인은 조각 수가 적어(3개) 사실상 계단식
+// 움직임이라는 점. 대신 Phaser 4의 Mesh2D(정점을 직접 다루는 2D 메쉬 GameObject, WebGL
+// 전용)로 천 하나를 가로 GOAL_FLAG_WAVE_COLS칸짜리 격자로 쪼개고, 매 프레임 각 칸 사이의
+// "간격"을 사인파로 늘렸다 줄였다 해서 체크무늬 자체가 연속적으로 접혔다 펴지는 것처럼
+// 보이게 한다(이음매가 아예 없는 연속 표면이라 찢어질 수 없음). 양 끝(깃대 부착점,
+// 천 끝자락)은 항상 원래 폭으로 재조정(rescale)해 고정하므로 깃발이 밀렸다 당겨지는
+// 느낌(예전 버그)도 생기지 않는다 — updateGoalFlagWave 참고.
 const GOAL_POLE_TEXTURE_KEY = 'goal-flag-pole';
-const GOAL_CLOTH_TEXTURE_KEYS = ['goal-flag-cloth-1', 'goal-flag-cloth-2', 'goal-flag-cloth-3'];
+const GOAL_CLOTH_TEXTURE_KEY = 'goal-flag-cloth';
 // 원본 캔버스(512x512)에서 각 조각이 차지하던 바운딩 박스 — 잘라낸 PNG의 크기/위치와 일치한다.
 const GOAL_FLAG_CANVAS = 512;
 const GOAL_POLE_BOUNDS = { minX: 27, maxX: 81, minY: 11, maxY: 511 };
 const GOAL_CLOTH_BOUNDS = { minX: 82, maxX: 484, minY: 0, maxY: 506 };
-// 천을 잘라낸 3조각의 원본 픽셀 폭(split-flag3.mjs 결과, 합이 GOAL_CLOTH_BOUNDS 전체 폭 403과 일치).
-const GOAL_CLOTH_SEG_PIXEL_WIDTHS = [134, 134, 135];
 const GOAL_FLAG_DISPLAY_SIZE = TILE_SIZE * 0.85; // 깃발 전체(원본 512 기준)를 이 크기로 축소해 표시
 const GOAL_FLAG_SCALE = GOAL_FLAG_DISPLAY_SIZE / GOAL_FLAG_CANVAS;
-// 조각이 가장 접혔을 때 원래 폭 대비 비율(1이면 안 접힘). 다음 조각은 이 조각의 폭에
-// 이 비율을 곱한 지점(=최대로 접혔을 때의 오른쪽 끝)부터 겹쳐서 고정 배치한다.
-const GOAL_FLAG_WAVE_SQUASH = 0.55;
-const GOAL_FLAG_WAVE_MS = 450; // 조각이 한쪽으로 접히는(또는 펴지는) 데 걸리는 시간(ms, yoyo라 왕복은 2배)
-const GOAL_FLAG_WAVE_DELAY_MS = 120; // 다음 조각이 같은 애니메이션을 이만큼 늦게 시작 — 이 위상차가 "물결이 이동하는" 것처럼 보이게 함
+// 천 메쉬를 가로로 나누는 칸 수(정점 열은 이보다 1개 많음) — 많을수록 파동이 부드럽다.
+const GOAL_FLAG_WAVE_COLS = 12;
+const GOAL_FLAG_WAVE_CYCLES = 2; // 천 전체 폭 안에 들어가는 파동 주기 수
+const GOAL_FLAG_WAVE_SPEED = 4.5; // 파동이 진행하는 속도(rad/sec)
+const GOAL_FLAG_WAVE_AMPLITUDE = 0.7; // 칸 사이 간격이 흔들리는 비율(0~1)
 
 // vision-system.md 스펙: 기본 시야 반경 2칸.
 // 나중에 손전등(4칸)/시야차단 함정(0.5~1칸)을 만들 때 이 값을 상황에 맞게 바꿔주면 됨.
@@ -222,9 +218,15 @@ class MazeScene extends Phaser.Scene {
   // 역방향 함정에 걸린 상태인지 여부. true면 방향키 입력을 반대로 뒤집어서 처리함.
   private isReversed = false;
 
-  // 골인 지점 깃발 마커(깃대+천 컨테이너). 안개 상태에 맞춰 밝기가 같이 조정됨
+  // 골인 지점 깃발 마커(깃대+천 메쉬 컨테이너). 안개 상태에 맞춰 밝기가 같이 조정됨
   // (다른 타일들과 동일하게 탐색해야 보임).
   private goalRect!: Phaser.GameObjects.Container;
+
+  // 깃발 천 메쉬(연속 표면, 정점을 매 프레임 직접 움직여서 펄럭임을 구현). goalClothWidth는
+  // 천의 원래(안 접힌) 전체 폭 — 파동 계산 후 양 끝을 이 값으로 재조정(rescale)하는 데 쓰인다.
+  private goalClothMesh!: Phaser.GameObjects.Mesh2D;
+  private goalClothWidth = 0;
+  private goalClothElapsed = 0; // 파동 애니메이션용 경과 시간(초)
 
 
   // 골인했는지 여부. true가 되면 더 이상 방향키 입력을 받지 않음(테스트용 종료 처리).
@@ -244,9 +246,7 @@ class MazeScene extends Phaser.Scene {
     this.load.image(ITEM_BOX_TEXTURE_KEY, '/sprites/ItemBox-box.png');
     this.load.image(ITEM_MARK_TEXTURE_KEY, '/sprites/ItemBox-mark.png');
     this.load.image(GOAL_POLE_TEXTURE_KEY, '/sprites/GoalFlag-pole.png');
-    GOAL_CLOTH_TEXTURE_KEYS.forEach((key, i) => {
-      this.load.image(key, `/sprites/GoalFlag-cloth-${i + 1}.png`);
-    });
+    this.load.image(GOAL_CLOTH_TEXTURE_KEY, '/sprites/GoalFlag-cloth.png');
   }
 
   // create(): 게임이 시작될 때 딱 한 번만 실행됨. 여기서 맵과 캐릭터를 화면에 배치합니다.
@@ -301,41 +301,37 @@ class MazeScene extends Phaser.Scene {
       )
       .setDisplaySize(poleWidth, poleHeight);
 
-    // 깃발 천: 3조각을 가로로 나란히 배치하고, 조각마다 위상차를 두고 가로 폭(scaleX)을
-    // 접었다 편다. 위치는 여기서 한 번만 고정하고 이후 절대 옮기지 않는다 — 대신 다음 조각을
-    // 이 조각이 GOAL_FLAG_WAVE_SQUASH까지 접혔을 때의 오른쪽 끝 지점에 미리 겹쳐서 배치해두면,
-    // 조각이 최대로 접혀도 이웃이 이미 그 자리를 덮고 있어 이음매에 틈이 생기지 않는다.
+    // 깃발 천: 하나의 연속된 Mesh2D로 만든다. 가로로 GOAL_FLAG_WAVE_COLS칸 격자(정점 열
+    // GOAL_FLAG_WAVE_COLS+1개, 위/아래 두 줄)를 만들어두고, 매 프레임 칸 사이 간격을
+    // 사인파로 흔드는 건 updateGoalFlagWave에서 한다(정점 좌표를 직접 수정하는 연속 표면이라
+    // 조각 이음매 자체가 없어 절대 벌어지거나 찢어지지 않는다).
+    this.goalClothWidth = (GOAL_CLOTH_BOUNDS.maxX - GOAL_CLOTH_BOUNDS.minX + 1) * GOAL_FLAG_SCALE;
     const clothHeight = (GOAL_CLOTH_BOUNDS.maxY - GOAL_CLOTH_BOUNDS.minY + 1) * GOAL_FLAG_SCALE;
     const clothAttachX = goalOriginX + GOAL_CLOTH_BOUNDS.minX * GOAL_FLAG_SCALE;
-    const clothAttachY = goalOriginY + ((GOAL_CLOTH_BOUNDS.minY + GOAL_CLOTH_BOUNDS.maxY) / 2) * GOAL_FLAG_SCALE;
-    const segWidths = GOAL_CLOTH_SEG_PIXEL_WIDTHS.map((w) => w * GOAL_FLAG_SCALE);
+    const clothAttachY = goalOriginY + GOAL_CLOTH_BOUNDS.minY * GOAL_FLAG_SCALE; // 윗변 기준(origin 0,0)
 
-    const clothImages: Phaser.GameObjects.Image[] = [];
-    let segX = clothAttachX;
-    for (let i = 0; i < GOAL_CLOTH_TEXTURE_KEYS.length; i++) {
-      const segImg = this.add
-        .image(segX, clothAttachY, GOAL_CLOTH_TEXTURE_KEYS[i]!)
-        .setDisplaySize(segWidths[i]!, clothHeight)
-        .setOrigin(0, 0.5);
-      clothImages.push(segImg);
-
-      const baseScaleX = segImg.scaleX;
-      this.tweens.add({
-        targets: segImg,
-        scaleX: baseScaleX * GOAL_FLAG_WAVE_SQUASH,
-        duration: GOAL_FLAG_WAVE_MS,
-        delay: i * GOAL_FLAG_WAVE_DELAY_MS,
-        yoyo: true,
-        repeat: -1,
-        ease: 'Sine.easeInOut',
-      });
-
-      // 다음 조각은 이 조각의 "최대로 접혔을 때" 오른쪽 끝 지점부터 미리 겹쳐서 시작 —
-      // 그래야 이 조각이 아무리 접혀도 다음 조각이 그 지점을 이미 덮고 있다.
-      segX += segWidths[i]! * GOAL_FLAG_WAVE_SQUASH;
+    const vertices: number[] = [];
+    const indices: number[] = [];
+    for (let col = 0; col <= GOAL_FLAG_WAVE_COLS; col++) {
+      const u = col / GOAL_FLAG_WAVE_COLS;
+      const x = u * this.goalClothWidth;
+      vertices.push(x, 0, u, 0); // 윗줄 정점
+      vertices.push(x, clothHeight, u, 1); // 아랫줄 정점
+    }
+    for (let col = 0; col < GOAL_FLAG_WAVE_COLS; col++) {
+      const topLeft = col * 2;
+      const botLeft = col * 2 + 1;
+      const topRight = (col + 1) * 2;
+      const botRight = (col + 1) * 2 + 1;
+      indices.push(topLeft, botLeft, topRight, 0);
+      indices.push(botLeft, botRight, topRight, 0);
     }
 
-    this.goalRect = this.add.container(0, 0, [poleImg, ...clothImages]);
+    this.goalClothMesh = this.add.mesh2d(clothAttachX, clothAttachY, GOAL_CLOTH_TEXTURE_KEY, vertices, indices);
+    this.goalClothMesh.setOrigin(0, 0);
+    this.goalClothElapsed = 0;
+
+    this.goalRect = this.add.container(0, 0, [poleImg, this.goalClothMesh]);
     this.goalRect.setDepth(6);
 
     // 아이템 마커 배치 (별 모양 — 함정 마커는 박스 모양이라 헷갈리지 않게 구분)
@@ -451,9 +447,39 @@ class MazeScene extends Phaser.Scene {
     this.updateFog();
   }
 
+  // 천 메쉬의 정점 x좌표를 매 프레임 사인파로 흔들어 파동이 깃대에서 끝자락으로 흐르는
+  // 것처럼 보이게 한다. "간격"에 파동을 곱하는 방식이라 항상 양수라 정점 순서가 절대
+  // 꼬이지 않고(뒤집히거나 자기 자신을 통과하지 않음), 마지막에 양 끝(0, goalClothWidth)을
+  // 원래 폭으로 재조정(rescale)하므로 깃대 부착점과 천 전체 길이가 파동 중에도 절대
+  // 드리프트하지 않는다(예전에 겪었던 "깃발 위치가 틀어져 보인다" 버그 재발 방지).
+  private updateGoalFlagWave(delta: number) {
+    this.goalClothElapsed += delta / 1000;
+    const t = this.goalClothElapsed;
+    const cols = GOAL_FLAG_WAVE_COLS;
+    const baseSpacing = this.goalClothWidth / cols;
+
+    const rawX: number[] = [0];
+    for (let col = 1; col <= cols; col++) {
+      const phase = (col / cols) * Math.PI * 2 * GOAL_FLAG_WAVE_CYCLES - t * GOAL_FLAG_WAVE_SPEED;
+      const factor = 1 + GOAL_FLAG_WAVE_AMPLITUDE * Math.sin(phase);
+      rawX.push(rawX[col - 1]! + baseSpacing * factor);
+    }
+    const rescale = this.goalClothWidth / rawX[cols]!;
+
+    const vertices = this.goalClothMesh.vertices;
+    for (let col = 0; col <= cols; col++) {
+      const x = rawX[col]! * rescale;
+      vertices[col * 8 + 0] = x; // 윗줄 정점의 x
+      vertices[col * 8 + 4] = x; // 아랫줄 정점의 x
+    }
+  }
+
   // update(): 매 프레임(1초에 수십 번)마다 반복 실행되는 함수.
   // "지금 방향키가 눌렸는가?"를 확인해서 캐릭터를 움직이는 역할을 함.
-  override update() {
+  override update(_time: number, delta: number) {
+    // 깃발 펄럭임은 골인 여부/이동 여부와 무관하게 항상 갱신
+    this.updateGoalFlagWave(delta);
+
     // 골인했으면 더 이상 입력을 받지 않음 (테스트용 종료 처리)
     if (this.hasFinished) return;
 
