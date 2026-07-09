@@ -8,6 +8,13 @@ export type TrapInstance = Position & {
   type: TrapType;
 };
 
+// items.md 확정 4종 중 서버 API가 필요한 손전등/쉴드 2종만 우선 (함정 탐지기/함정 설치는 후속).
+export type ItemType = 'flashlight' | 'shield';
+
+export type ItemInstance = Position & {
+  type: ItemType;
+};
+
 export type LeaderboardEntry = {
   userId: string;
   username: string;
@@ -20,6 +27,7 @@ export type MapStateOutput = {
   date: string;
   footprints: Position[];
   myTraps: TrapInstance[];
+  items: ItemInstance[];
 };
 
 export type FootprintRecordInput = { mapId: string; tiles: Position[] };
@@ -34,6 +42,9 @@ export type TrapInstallOutput = {
 
 export type TrapTriggerInput = Position & { mapId: string };
 export type TrapTriggerOutput = { hit: boolean; type?: TrapType };
+
+export type ItemPickupInput = Position & { mapId: string };
+export type ItemPickupOutput = { picked: boolean; type?: ItemType };
 
 export type RunFinishInput = { mapId: string; clearTimeMs: number };
 export type RunFinishOutput = { rank: number; isNewRecord: boolean };

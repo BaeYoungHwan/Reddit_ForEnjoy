@@ -45,7 +45,8 @@
 | 자정 리셋 실제 발동 시각(playtest 검증) | ⏳ | - | UTC 15:00=KST 00:00 가정, `devvit playtest` 실측 필요 — 오늘 자정 확인 예정 |
 | CI 자동 배포 파이프라인 | ✅ | c0f78f8 (`.github/workflows/deploy.yml`) | |
 | 맵 시작 좌표 실데이터 연동 | ✅ | `src/server/core/maps.ts` → `getMazeMap()` (3️⃣ PR #15 반영분) | ⚠️ 배영환 개인 TODO엔 최근까지 미체크로 남아있었음 — 담당자 간 산출물 연동을 커밋 기준으로 재확인하지 않으면 이런 지연이 반복됨(오늘 WBS 도입 계기) |
-| 아이템 데이터 모델 + API | ⏳ | - | 2026-07-09: PR #22로 아이템 4종 확정됨(`design-docs/items.md`) — 착수 가능. 함정 탐지기 아이템은 "타 유저 함정 위치를 반경 내에서만 공개"하는 신규 API가 필요(현재 `trap.trigger`의 오라클 방지 설계와 상충 — 1️⃣ 임소리와 조율 필요) |
+| 아이템 데이터 모델 + API (손전등/쉴드) | ✅ | 2026-07-09 (`src/server/trpc.ts`, `src/server/core/items.ts`) | 함정(`trap.install`/`trap.trigger`)과 동일 패턴으로 `item.pickup` mutation 추가 + `map.getState`가 `items` 목록을 반환하도록 확장. 아이템은 함정과 달리 비공개 대상이 아니라(오라클 방지 불필요) 전체 유저에게 노출. 스폰 좌표는 맵마다 고정 2곳(`core/items.ts`)이고 실제 랜덤 스폰은 후속(1️⃣ "그리드 맵 실데이터 교체" 완료 후 좌표 체계 맞춰서 진행). `trap.trigger`와 중복되던 위치 앵커 검증 로직은 `advancePosition` 헬퍼로 추출해 공유. `src/server/trpc.test.ts`에 회귀 테스트 5종 추가(총 41개 통과). ⚠️ 클라이언트 연동(1️⃣, `game.tsx`의 `TEMP_ITEMS`를 이 API 호출로 교체)은 아직 — 1️⃣ 임소리 소관. 2026-07-09 PR #26 코드리뷰로 치명적 재생성 버그 발견(`ensureItemsSeeded`가 필드 존재 여부로 시딩을 판정해, `item.pickup`으로 지운 필드가 다음 `map.getState` 호출 때 다시 채워짐 — 픽업이 무한정 재획득 가능해지는 문제) → 전용 마커 키(`itemSeededKey`, SET NX 1회성 패턴)로 판정 방식 교체, 재발 방지 회귀 테스트 추가(총 42개 통과) |
+| 아이템 데이터 모델 + API (함정 탐지기/함정 설치) | ⏳ | - | 함정 탐지기는 "타 유저 함정 위치를 반경 내에서만 공개"하는 신규 API가 필요(현재 `trap.trigger`의 오라클 방지 설계와 상충 — 1️⃣ 임소리와 조율 필요). 함정 설치는 기존 `trap.install` 재사용 가능해 보이나 "로드아웃 소지 아이템으로 획득" 흐름 설계 필요 |
 | 데일리 맵 전환 로직 | ⏳ | - | 맵 로테이션 정책 미확정 — 전체 블로커 참조 |
 | 리더보드 `userId`→`username` 매핑 | ✅ | 2026-07-09 커밋(`docs/design-docs/leaderboard-verification.md` 갭 분석 후속) | `leaderboard.get`이 `reddit.getUserById`로 표시용 username을 채워서 반환하도록 변경, `LeaderboardEntry`에 `username` 필드 추가. `src/client/splash.tsx` 표시도 함께 교체(송원호 영역 침범 — 이 PR에 리뷰어 포함). 2026-07-09 코드리뷰로 `Promise.all` 실패 전파 문제 발견 → `Promise.allSettled`로 교체, `src/server/trpc.test.ts`에 회귀 테스트 추가 |
 
