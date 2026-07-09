@@ -57,6 +57,7 @@ return {
 | PRD 세부 스펙 부재 | `docs/product-specs/PRD-v1.md`에는 "클리어 시간 기록 + 리더보드"만 명시되고, 표시 항목(닉네임 포함 여부)·정렬 기준(오름차순)·갱신 시점 등 세부 스펙이 문서화되어 있지 않음 — 현재는 코드에만 기준이 존재 | 향후 사양 변경 시 기준 문서 부재로 논의 비용 발생 가능 | 미해결 |
 | 실환경 렌더링 미검증 | `docs/wbs.md`: "서버 `leaderboard.get`과 연동 코드는 존재하고 메뉴 화면은 실제 Reddit에서 렌더링 확인됨 — 리더보드 뷰 자체(HUD 아이콘 클릭 후 화면)는 아직 실환경 스크린샷 미확인" | 코드는 맞지만 실제 Reddit iframe 환경에서 레이아웃/깨짐 여부 미확인 | 미해결 (송원호 담당) |
 | `userId` 표시 형태 미정 | 서버가 Reddit `userId`(`t2_xxx`)를 그대로 반환하고, 클라이언트(`splash.tsx`)도 이를 그대로 표시하고 있었음 | 리더보드에 사람이 읽을 수 없는 ID가 그대로 노출 | **해결(2026-07-09)** — 아래 참조 |
+| `Promise.all` 실패 전파 | `reddit.getUserById` 개별 호출이 reject하면(SDK가 reject 가능성을 문서화하지 않음) `Promise.all`이 전체를 실패시켜 리더보드 조회 자체가 깨짐 | 한 유저 조회 실패로 리더보드 전체가 안 보일 수 있음 | **해결(2026-07-09)** — 아래 참조 |
 
 ### 4.1 `userId` → username 매핑 조치 완료
 
@@ -64,11 +65,16 @@ return {
 
 **클라이언트 영역(`src/client`) 침범**: `splash.tsx` 수정은 송원호 담당 영역이므로, 이 변경을 포함한 PR에는 송원호를 리뷰어로 포함해야 한다(`docs/team-roles.md` 규칙 5).
 
+### 4.2 `Promise.all` 실패 전파 조치 완료
+
+`leaderboard.get`에서 `reddit.getUserById` 호출을 `Promise.all` → `Promise.allSettled`로 교체했다(`src/server/trpc.ts`). devvit SDK의 `getUserById` 타입은 `Promise<User | undefined>`뿐이고 reject 가능성이 문서화되어 있지 않아, 개별 호출이 reject해도 리더보드 전체 조회가 깨지지 않도록 격리했다. 실패한 엔트리는 `console.error`로 로깅 후 `userId`로 폴백하며(기존 탈퇴/정지 계정 폴백과 동일한 경로로 합쳐짐), 나머지 엔트리는 영향받지 않는다. `src/server/trpc.test.ts`에 reject 케이스 회귀 테스트를 추가했다(mock `reddit.getUserById`에 `rejectIds` 확장).
+
 ## 5. 액션 아이템
 
 | 항목 | 우선순위 | 담당(제안) | 선행조건 | 상태 |
 |---|---|---|---|---|
 | `userId` → 표시용 username 매핑 | High | 배영환+송원호(리뷰) | 없음 | ✅ 완료 (`src/server/trpc.ts`, `src/client/splash.tsx`) |
+| `getUserById` 개별 실패 격리 (`Promise.allSettled`) | High | 배영환 | 없음 | ✅ 완료 (`src/server/trpc.ts`, `src/server/trpc.test.ts`) |
 | PRD에 리더보드 표시 항목·정렬 기준 명문화 | Medium | 배영환 (문서화) | 없음 | 미착수 |
 | 실제 Reddit 환경에서 리더보드 뷰(HUD 진입) 스크린샷 검증 | High | 송원호 | 리더보드 훅 완료 후 | 미착수 |
 | `leaderboard.get` 응답 대량(엔트리 다수) 시 클라이언트 렌더링 성능 확인 | Low | 송원호 | 실데이터 축적 후 | 미착수 |
@@ -78,4 +84,5 @@ return {
 - 서버 스키마는 `src/server/trpc.ts:195-224`, 공유 타입은 `src/shared/game-types.ts`와 대조 완료.
 - 클라이언트 소비 코드는 `src/client/hooks/useLeaderboard.ts`, `src/client/splash.tsx`의 `Leaderboard` 컴포넌트로 확인 완료.
 - username 매핑 조치: `npx vitest run`(전체 33개 통과, `leaderboard.get username 매핑` 2건 포함) + `npx tsc --build`(server/shared/client 전체) 타입 체크 통과 확인(2026-07-09).
+- `Promise.allSettled` 실패 격리 조치: `npx vitest run`(전체 36개 통과, reject 회귀 테스트 1건 포함) + `npx tsc --build` + `npx eslint 'src/**/*.{ts,tsx}'` 통과 확인(2026-07-09).
 - 위 액션 아이템 중 "실제 Reddit 환경 스크린샷 검증"은 송원호의 리더보드 훅 작업 완료 후 별도로 수행.
