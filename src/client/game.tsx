@@ -4,6 +4,7 @@ import Phaser from 'phaser';
 import { StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { getMazeMap } from '../shared/maps';
+import type { MazeMap } from '../shared/maps';
 import { buildMazeSvgDataUri } from './mazePattern';
 import { trpc } from './trpcClient';
 import type { TrapInstance, TrapType } from '../shared/game-types';
@@ -33,15 +34,21 @@ const BEVEL_THICKNESS = 9;
 
 // 벽 영역을 단색 도형이 아니라 splash.tsx 배경과 같은 방식(각진 석벽 블록 + 모르타르 줄눈 +
 // 모서리 하이라이트)의 SVG 텍스처로 채운다 — "Phaser 단색 사각형" 느낌에서 벗어나기 위함.
-// 안개(탐험 여부)와 무관하게 항상 보이는 정적 배경으로 깐다 — splash.tsx의 배경 미로도 안개
-// 없이 항상 노출되는 장식이라 같은 취급.
-const WALL_TEXTURE_KEY = 'maze-wall-texture';
-const WALL_TEXTURE_URI = buildMazeSvgDataUri(MAIN_MAP, {
+// 칸 하나짜리 가짜 맵(1x1 wall)을 buildMazeSvgDataUri에 넘겨서 타일 하나 크기의 석벽
+// 이미지를 만들고, 통로와 맞닿은 벽 칸에만 이 타일을 개별 도형으로 배치한다(전체 배경
+// 이미지 한 장으로 깔면 안개와 무관하게 맵 전체가 항상 보여버려서 "탐험해야 벽도 보인다"는
+// 안개 시스템의 핵심을 깨버림 — 반드시 인접 바닥 칸의 안개 상태에 종속시켜야 함).
+const WALL_TILE_TEXTURE_KEY = 'maze-wall-tile';
+const WALL_TILE_MAP: MazeMap = { id: 'wall-tile', name: 'wall-tile', grid: [['wall']], start: { x: 0, y: 0 }, exit: { x: 0, y: 0 } };
+const WALL_TILE_TEXTURE_URI = buildMazeSvgDataUri(WALL_TILE_MAP, {
   cellSize: TILE_SIZE,
   wallFill: '#2b1d13',
   mortarStroke: '#000000',
   highlightStroke: '#5a4030',
 });
+
+// 발자국 마커 색(진짜 아트 나오기 전 임시 색) — 통로 채움색보다 진한 갈색으로 "지나간 자국" 느낌을 냄.
+const FOOTPRINT_COLOR = 0x8a5a2f;
 
 // vision-system.md 스펙: 기본 시야 반경 2칸.
 // 나중에 손전등(4칸)/시야차단 함정(0.5~1칸)을 만들 때 이 값을 상황에 맞게 바꿔주면 됨.
@@ -115,6 +122,18 @@ class MazeScene extends Phaser.Scene {
   // 각 타일의 현재 상태(hidden/explored/visible)를 기억해두는 표
   private tileStates: TileState[][] = [];
 
+  // 통로와 맞닿은 벽 칸에 배치한 석벽 텍스처 도형들. 벽 칸 자체는 fog 상태가 없으므로
+  // (통로만 hidden/explored/visible을 가짐), 인접한 바닥 칸들의 밝기 중 가장 밝은 값을
+  // 따르도록 updateFog에서 매번 다시 계산한다 — 안개가 걷혀야 벽도 보이게 하기 위함.
+  private wallTiles: { x: number; y: number; image: Phaser.GameObjects.Image }[] = [];
+
+  // 실제로 밟아본 적 있는 칸인지 표시(발자국 마커를 한 번만 만들기 위함). 시야 반경 안에
+  // 들어와서 "보이기만" 한 칸과 구분하기 위해 tileStates와는 별도로 관리한다.
+  private visited: boolean[][] = [];
+
+  // 발자국 마커 도형. 안개 상태에 맞춰 같이 밝기 조정됨(다시 안개가 덮이면 같이 흐려짐).
+  private footprintRects: (Phaser.GameObjects.Arc | undefined)[][] = [];
+
   // 함정 마커 도형. 안개 상태에 맞춰 같이 밝기 조정됨
   // (함정 탐지기 아이템 없이는 안개에 덮인 함정이 안 보이게 하기 위함).
   private trapRects: (Phaser.GameObjects.Arc | undefined)[][] = [];
@@ -142,31 +161,41 @@ class MazeScene extends Phaser.Scene {
   }
 
   // preload(): 게임 시작 전에 이미지 등 리소스를 미리 불러오는 함수.
-  // 벽 석벽 텍스처(SVG data URI)를 로드해둔다 — create()에서 배경으로 깐다.
+  // 벽 석벽 텍스처(SVG data URI, 타일 한 칸 크기)를 로드해둔다.
   preload() {
-    this.load.image(WALL_TEXTURE_KEY, WALL_TEXTURE_URI);
+    this.load.image(WALL_TILE_TEXTURE_KEY, WALL_TILE_TEXTURE_URI);
   }
 
   // create(): 게임이 시작될 때 딱 한 번만 실행됨. 여기서 맵과 캐릭터를 화면에 배치합니다.
   create() {
-    // 벽 텍스처를 가장 먼저(맨 아래) 깐다. 통로(바닥) 도형들은 이 위에 그려진다.
-    // splash.tsx의 배경 미로와 마찬가지로 안개와 무관하게 항상 노출되는 정적 배경 — 맵의
-    // "모양" 자체는 첫 화면부터 보여도 되고(고정 맵이라 다시 플레이해도 같음), 안개는
-    // 발자국/함정처럼 "그 순간에 알면 안 되는 정보"에만 적용하면 된다는 판단.
-    this.add.image(0, 0, WALL_TEXTURE_KEY).setOrigin(0, 0).setDepth(-1);
-
-    // 맵 크기만큼 타일 상태/도형 배열을 준비하고, 바닥 칸 중앙에 좁은 통로 사각형만 그림
-    // (벽 칸, 그리고 통로 사각형 바깥의 나머지 칸 공간은 그리지 않고 위에 깔린 석벽
-    // 텍스처가 그대로 보이도록 남겨둠).
+    // 맵 크기만큼 타일 상태/도형 배열을 준비하고, 바닥 칸 중앙에 좁은 통로 사각형만 그림.
+    // 통로와 맞닿은 벽 칸에는 석벽 텍스처 도형을 하나씩 배치(깊은 안쪽 벽 칸은 어차피
+    // 안 보일 곳이라 만들지 않음). 벽 텍스처도 통로처럼 안개 상태에 따라 밝기가 바뀐다
+    // (updateFog 참고) — 그래야 "탐험해야 벽도 보인다"는 안개 시스템 취지가 유지된다.
     for (let y = 0; y < MAP_HEIGHT; y++) {
       this.tileRects[y] = [];
       this.tileStates[y] = [];
       this.trapRects[y] = [];
+      this.visited[y] = [];
+      this.footprintRects[y] = [];
 
       for (let x = 0; x < MAP_WIDTH; x++) {
         this.tileStates[y]![x] = 'hidden'; // 시작할 땐 전부 안개로 덮인 상태
+        this.visited[y]![x] = false;
 
-        if (MAIN_MAP.grid[y]![x] === 'wall') continue; // 벽 칸은 도형을 만들지 않고 건너뜀
+        if (MAIN_MAP.grid[y]![x] === 'wall') {
+          // 통로와 한 번이라도 맞닿아 있어야(=언젠가 보일 가능성이 있어야) 텍스처를 만든다.
+          const touchesFloor =
+            this.isWalkable(x, y - 1) || this.isWalkable(x, y + 1) || this.isWalkable(x - 1, y) || this.isWalkable(x + 1, y);
+          if (touchesFloor) {
+            const image = this.add
+              .image(x * TILE_SIZE + TILE_SIZE / 2, y * TILE_SIZE + TILE_SIZE / 2, WALL_TILE_TEXTURE_KEY)
+              .setDepth(-1)
+              .setAlpha(0);
+            this.wallTiles.push({ x, y, image });
+          }
+          continue; // 벽 칸은 통로 도형을 만들지 않고 건너뜀
+        }
 
         // 칸 중앙에 좁은 통로 사각형을 그리되, 실제 벽과 맞닿은 변에만 그림자/하이라이트
         // 베벨을 둘러서 "패인 홈" 같은 입체감을 준다 (통로끼리 이어지는 변에는 베벨을
@@ -225,6 +254,9 @@ class MazeScene extends Phaser.Scene {
       0xffd400
     );
     this.playerRect.setDepth(10); // depth(그리기 순서)를 높여서 타일 위에 캐릭터가 보이게 함
+
+    // 시작 칸도 밟은 것으로 쳐서 발자국을 남긴다.
+    this.markVisited(SPAWN_POSITION.x, SPAWN_POSITION.y);
 
     // 키보드의 방향키 입력을 받을 수 있도록 설정.
     // 이후 update()에서 this.cursors.left/right/up/down 으로 눌림 여부를 확인할 수 있음.
@@ -331,6 +363,18 @@ class MazeScene extends Phaser.Scene {
     return shapes;
   }
 
+  // 그 칸을 실제로 밟았음을 기록하고, 처음 밟는 칸이면 발자국 마커를 하나 남긴다.
+  // (시야 반경 안에 "보이기만" 한 칸까지 발자국이 찍히면 안 되므로 tileStates가 아니라
+  // 실제 이동 완료 시점에만 호출해야 함 — tryMove/slideStep 참고).
+  private markVisited(x: number, y: number) {
+    if (this.visited[y]?.[x]) return;
+    this.visited[y]![x] = true;
+
+    const marker = this.add.circle(x * TILE_SIZE + TILE_SIZE / 2, y * TILE_SIZE + TILE_SIZE / 2, PATH_WIDTH * 0.18, FOOTPRINT_COLOR);
+    marker.setDepth(2); // 통로(depth 0)보다 위, 함정/캐릭터(depth 6/10)보다 아래
+    this.footprintRects[y]![x] = marker;
+  }
+
   // 그리드 좌표(x, y)로 이동/통과 가능한지 확인하는 함수 (맵 범위 안 + 벽 아님).
   // 일반 이동(tryMove)과 슬라이드(slideStep) 둘 다 같은 기준으로 판정해야 해서 하나로 뽑아둠.
   private isWalkable(x: number, y: number): boolean {
@@ -352,6 +396,7 @@ class MazeScene extends Phaser.Scene {
     this.isMoving = true;
     this.playerGridX = targetX;
     this.playerGridY = targetY;
+    this.markVisited(targetX, targetY);
 
     // tween(트윈) = 값을 순간이동이 아니라 "서서히" 바꿔주는 Phaser 기능.
     // 여기서는 캐릭터의 실제 화면 좌표(x, y)를 목표 지점까지 BASE_MOVE_DURATION(ms) 동안 부드럽게 이동시킴.
@@ -439,6 +484,7 @@ class MazeScene extends Phaser.Scene {
 
     this.playerGridX = targetX;
     this.playerGridY = targetY;
+    this.markVisited(targetX, targetY);
     this.updateFog();
 
     // 슬라이딩 도중 지나가는 칸에 다른 함정이 있어도 이번 구현에서는 이펙트를 재발동시키지 않음
@@ -580,6 +626,24 @@ class MazeScene extends Phaser.Scene {
         shape.setAlpha(alpha);
       }
     }
+
+    // 벽 텍스처는 그 벽과 맞닿은 바닥 칸들 중 가장 밝은(가장 많이 탐험된) 쪽을 따른다 —
+    // 반대로 통로처럼 "가장 어두운 쪽"을 따르면, 한쪽 통로를 이미 밝혔는데도 아직 안 가본
+    // 반대쪽 통로 사정 때문에 벽이 계속 안 보이는 문제가 생기기 때문(벽은 한쪽에서만
+    // 봐도 보여야 자연스러움 — 통로는 "그 사이 길 자체"를 미리 보여주면 안 되는 것과 다름).
+    for (const wallTile of this.wallTiles) {
+      let maxAlpha = 0;
+      for (const [nx, ny] of [
+        [wallTile.x, wallTile.y - 1],
+        [wallTile.x, wallTile.y + 1],
+        [wallTile.x - 1, wallTile.y],
+        [wallTile.x + 1, wallTile.y],
+      ] as const) {
+        if (!this.isWalkable(nx, ny)) continue;
+        maxAlpha = Math.max(maxAlpha, this.alphaForState(this.tileStates[ny]![nx]!));
+      }
+      wallTile.image.setAlpha(maxAlpha);
+    }
   }
 
   // 타일 상태(hidden/explored/visible)를 실제 화면 밝기(alpha)로 변환하는 함수.
@@ -598,11 +662,13 @@ class MazeScene extends Phaser.Scene {
 
     const alpha = this.alphaForState(this.tileStates[y]![x]!);
     const trap = this.trapRects[y]?.[x];
+    const footprint = this.footprintRects[y]?.[x];
 
     for (const shape of shapes) {
       shape.setAlpha(alpha);
     }
     trap?.setAlpha(alpha);
+    footprint?.setAlpha(alpha);
 
     if (x === GOAL_POSITION.x && y === GOAL_POSITION.y) {
       this.goalRect.setAlpha(alpha);
