@@ -8,7 +8,7 @@ import type { MazeMap } from '../shared/maps';
 import { buildMazeSvgDataUri } from './mazePattern';
 import { trpc } from './trpcClient';
 import { SequentialDispatcher } from './sequentialDispatcher';
-import type { TrapInstance, TrapTriggerOutput, TrapType } from '../shared/game-types';
+import type { Position, TrapInstance, TrapTriggerOutput, TrapType } from '../shared/game-types';
 
 // 실제 고정 맵 데이터(송원호 담당, src/shared/maps.ts). splash.tsx의 배경 미리보기와 같은 데이터.
 const MAIN_MAP = getMazeMap('map-1');
@@ -40,8 +40,9 @@ const WALL_TILE_TEXTURE_URI = buildMazeSvgDataUri(WALL_TILE_MAP, {
   highlightStroke: '#5a4030',
 });
 
-// 발자국 마커: splash.tsx의 FootprintIcon과 같은 발바닥 모양 SVG(타원 조합)를 재사용 —
-// 색깔 원이 아니라 실제 "발자국처럼 생긴" 아이콘으로 지나온 길을 표시하기 위함.
+// 발자국 마커: splash.tsx의 FootprintIcon과 같은 발바닥 모양 SVG(타원 조합)를 재사용.
+// 내 발자국은 안 그린다(안개가 걷혀서 "지나간 길"이 보이는 것만으로 충분) — 다른 유저가
+// 남긴 발자국(map.getState의 footprints)만 이 아이콘으로 표시한다.
 const FOOTPRINT_TEXTURE_KEY = 'footprint-icon';
 const FOOTPRINT_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="#c9915a">
   <ellipse cx="12" cy="8" rx="5" ry="4.2" />
@@ -113,11 +114,8 @@ class MazeScene extends Phaser.Scene {
   // 따르도록 updateFog에서 매번 다시 계산한다 — 안개가 걷혀야 벽도 보이게 하기 위함.
   private wallTiles: { x: number; y: number; image: Phaser.GameObjects.Image }[] = [];
 
-  // 실제로 밟아본 적 있는 칸인지 표시(발자국 마커를 한 번만 만들기 위함). 시야 반경 안에
-  // 들어와서 "보이기만" 한 칸과 구분하기 위해 tileStates와는 별도로 관리한다.
-  private visited: boolean[][] = [];
-
-  // 발자국 마커 도형. 안개 상태에 맞춰 같이 밝기 조정됨(다시 안개가 덮이면 같이 흐려짐).
+  // 다른 유저가 남긴 발자국 마커 도형(map.getState의 footprints). 안개 상태에 맞춰 같이
+  // 밝기 조정됨(다시 안개가 덮이면 같이 흐려짐) — 내 발자국은 그리지 않는다.
   private footprintRects: (Phaser.GameObjects.Image | undefined)[][] = [];
 
   // 함정 마커 도형. 안개 상태에 맞춰 같이 밝기 조정됨
@@ -168,12 +166,10 @@ class MazeScene extends Phaser.Scene {
     for (let y = 0; y < MAP_HEIGHT; y++) {
       this.tileStates[y] = [];
       this.trapRects[y] = [];
-      this.visited[y] = [];
       this.footprintRects[y] = [];
 
       for (let x = 0; x < MAP_WIDTH; x++) {
         this.tileStates[y]![x] = 'hidden'; // 시작할 땐 전부 안개로 덮인 상태
-        this.visited[y]![x] = false;
 
         if (MAIN_MAP.grid[y]![x] === 'wall') {
           // 통로와 한 번이라도 맞닿아 있어야(=언젠가 보일 가능성이 있어야) 텍스처를 만든다.
@@ -217,9 +213,6 @@ class MazeScene extends Phaser.Scene {
     );
     this.playerRect.setDepth(10); // depth(그리기 순서)를 높여서 타일 위에 캐릭터가 보이게 함
 
-    // 시작 칸도 밟은 것으로 쳐서 발자국을 남긴다.
-    this.markVisited(SPAWN_POSITION.x, SPAWN_POSITION.y);
-
     // 키보드의 방향키 입력을 받을 수 있도록 설정.
     // 이후 update()에서 this.cursors.left/right/up/down 으로 눌림 여부를 확인할 수 있음.
     this.cursors = this.input.keyboard!.createCursorKeys();
@@ -231,25 +224,33 @@ class MazeScene extends Phaser.Scene {
     void this.loadServerState();
   }
 
-  // map.getState를 호출해 서버 쪽 위치 앵커를 시작 지점으로 초기화하고,
-  // 내가 설치한 함정 목록을 받아와 마커로 표시한다.
+  // map.getState를 호출해 서버 쪽 위치 앵커를 시작 지점으로 초기화하고, 내가 설치한
+  // 함정 목록 + 다른 유저들이 남긴 발자국 좌표를 받아와 마커로 표시한다.
   private async loadServerState() {
+    let footprints: Position[];
     try {
       const state = await trpc.map.getState.query({ mapId: MAP_ID });
       this.myTraps = state.myTraps;
+      footprints = state.footprints;
     } catch (err) {
-      // 정적 빌드만 단독으로 띄우는 로컬 프리뷰(백엔드 없음)에서도 함정 마커를 눈으로
-      // 확인할 수 있도록 하는 개발용 폴백. 실제 서버(devvit playtest/배포 환경)가
-      // 응답하면 위 try에서 이미 성공해 여기까지 오지 않는다.
-      console.error('map.getState 실패 — 로컬 프리뷰용 임시 함정 데이터로 대체', err);
+      // 정적 빌드만 단독으로 띄우는 로컬 프리뷰(백엔드 없음)에서도 마커를 눈으로 확인할 수
+      // 있도록 하는 개발용 폴백. 실제 서버(devvit playtest/배포 환경)가 응답하면 위 try에서
+      // 이미 성공해 여기까지 오지 않는다.
+      console.error('map.getState 실패 — 로컬 프리뷰용 임시 데이터로 대체', err);
       this.myTraps = [
         { x: 5, y: 7, type: 'slow' },
         { x: 9, y: 3, type: 'respawn' },
         { x: 3, y: 5, type: 'blind' },
         { x: 7, y: 3, type: 'reverse' },
       ];
+      footprints = [
+        { x: 4, y: 1 },
+        { x: 5, y: 3 },
+        { x: 1, y: 7 },
+      ];
     }
     this.renderTrapMarkers();
+    this.renderFootprintMarkers(footprints);
   }
 
   // this.myTraps를 화면에 마커로 그린다. 안개 상태를 바로 반영하기 위해 마지막에 updateFog도 호출.
@@ -263,6 +264,23 @@ class MazeScene extends Phaser.Scene {
       );
       marker.setDepth(6); // 타일(기본 depth 0)보다 위, 캐릭터(depth 10)보다 아래
       this.trapRects[trap.y]![trap.x] = marker;
+    }
+    this.updateFog();
+  }
+
+  // 다른 유저들이 남긴 발자국(footprints)을 화면에 아이콘으로 그린다. 내 발자국은 그리지
+  // 않음 — 지나온 길은 안개(explored 상태)가 걷혀 보이는 것만으로 표시한다.
+  private renderFootprintMarkers(footprints: Position[]) {
+    for (const tile of footprints) {
+      if (this.footprintRects[tile.y]?.[tile.x]) continue; // 같은 칸에 중복 표시 방지
+      const marker = this.add.image(
+        tile.x * TILE_SIZE + TILE_SIZE / 2,
+        tile.y * TILE_SIZE + TILE_SIZE / 2,
+        FOOTPRINT_TEXTURE_KEY
+      );
+      marker.setDisplaySize(PATH_WIDTH * 0.7, PATH_WIDTH * 0.7);
+      marker.setDepth(2); // 통로(depth 0)보다 위, 함정/캐릭터(depth 6/10)보다 아래
+      this.footprintRects[tile.y]![tile.x] = marker;
     }
     this.updateFog();
   }
@@ -300,26 +318,6 @@ class MazeScene extends Phaser.Scene {
     return null;
   }
 
-  // 그 칸을 실제로 밟았음을 기록하고, 처음 밟는 칸이면 발자국 마커를 하나 남긴다.
-  // (시야 반경 안에 "보이기만" 한 칸까지 발자국이 찍히면 안 되므로 tileStates가 아니라
-  // 실제 이동 완료 시점에만 호출해야 함 — tryMove/slideStep 참고).
-  // dx, dy는 그 칸으로 들어온 이동 방향 — 발자국 아이콘을 이동 방향으로 회전시키는 데 쓴다
-  // (모든 발자국이 똑같은 방향으로 찍히면 부자연스러우므로). 시작 칸처럼 이동 없이 찍는
-  // 경우는 생략 가능 — 기본 방향(위쪽)으로 찍힌다.
-  private markVisited(x: number, y: number, dx = 0, dy = 0) {
-    if (this.visited[y]?.[x]) return;
-    this.visited[y]![x] = true;
-
-    const marker = this.add.image(x * TILE_SIZE + TILE_SIZE / 2, y * TILE_SIZE + TILE_SIZE / 2, FOOTPRINT_TEXTURE_KEY);
-    marker.setDisplaySize(PATH_WIDTH * 0.7, PATH_WIDTH * 0.7);
-    marker.setDepth(2); // 통로(depth 0)보다 위, 함정/캐릭터(depth 6/10)보다 아래
-    if (dx !== 0 || dy !== 0) {
-      // splash.tsx의 angleBetween과 같은 공식 — 아이콘이 기본으로 "위쪽"을 향한다고 보고 +90 보정.
-      marker.setAngle((Math.atan2(dy, dx) * 180) / Math.PI + 90);
-    }
-    this.footprintRects[y]![x] = marker;
-  }
-
   // 그리드 좌표(x, y)로 이동/통과 가능한지 확인하는 함수 (맵 범위 안 + 벽 아님).
   // 일반 이동(tryMove)과 슬라이드(slideStep) 둘 다 같은 기준으로 판정해야 해서 하나로 뽑아둠.
   private isWalkable(x: number, y: number): boolean {
@@ -341,7 +339,6 @@ class MazeScene extends Phaser.Scene {
     this.isMoving = true;
     this.playerGridX = targetX;
     this.playerGridY = targetY;
-    this.markVisited(targetX, targetY, dx, dy);
 
     // tween(트윈) = 값을 순간이동이 아니라 "서서히" 바꿔주는 Phaser 기능.
     // 여기서는 캐릭터의 실제 화면 좌표(x, y)를 목표 지점까지 BASE_MOVE_DURATION(ms) 동안 부드럽게 이동시킴.
@@ -351,8 +348,12 @@ class MazeScene extends Phaser.Scene {
       y: targetY * TILE_SIZE + TILE_SIZE / 2,
       duration: BASE_MOVE_DURATION,
       onComplete: () => {
-        this.isMoving = false; // 이동이 끝나야 다음 입력을 다시 받을 수 있게 풀어줌
-
+        // 주의: 여기서 isMoving을 바로 false로 풀면 안 됨 — checkTrapTrigger가 서버 응답을
+        // 기다리는 동안(비동기) 방향키 입력이 다시 받아들여져서, 리스폰 함정처럼 위치를
+        // 강제로 되돌리는 효과와 그 사이에 시작된 새 이동 트윈이 서로 충돌해 캐릭터가
+        // 엉뚱한 위치(리스폰 목적지도 원래 위치도 아닌 중간 지점)에 멈춰 있다가 다음 키
+        // 입력에야 제자리로 튀는 버그가 있었음. isMoving 해제는 checkTrapTrigger 쪽에서
+        // 판정이 다 끝난 뒤에 하도록 옮김(슬라이드 함정은 자기가 다시 잠그고 스스로 풂).
         if (this.checkGoalReached(targetX, targetY)) return; // 골인했으면 함정 확인 없이 종료
 
         // 도착한 칸에 함정이 있는지 서버에 확인. dx, dy(눌렀던 방향)를 같이 넘겨서
@@ -383,14 +384,24 @@ class MazeScene extends Phaser.Scene {
 
   // 방금 도착한 칸에 함정이 있는지 서버에 확인하고, 있으면 종류에 맞는 효과를 적용하는 함수.
   // dx, dy는 지금 막 이동해온 방향 (슬라이드 함정이 미끄러질 방향을 정하는 데 사용).
+  // isMoving 잠금 해제는 여기서 판정이 다 끝난 뒤에 한다 — tryMove의 tween onComplete에서
+  // 미리 풀어버리면, 이 함수가 서버 응답을 기다리는(await) 사이에 다음 이동이 시작돼버려서
+  // 리스폰 등 위치를 강제로 바꾸는 효과와 충돌하는 버그가 있었음.
   private async checkTrapTrigger(x: number, y: number, dx: number, dy: number) {
     const result = await this.reportPosition(x, y);
-    if (!result?.hit || !result.type) return;
+    if (!result?.hit || !result.type) {
+      this.isMoving = false;
+      return;
+    }
 
-    if (result.type === 'slow') this.applySlideTrap(dx, dy);
-    else if (result.type === 'respawn') this.applyRespawnTrap();
+    if (result.type === 'slow') {
+      this.applySlideTrap(dx, dy); // 슬라이드는 자기가 다시 isMoving = true로 잠그고 끝날 때 스스로 풂
+      return;
+    }
+    if (result.type === 'respawn') this.applyRespawnTrap();
     else if (result.type === 'blind') this.applyBlindTrap();
     else this.applyReverseTrap();
+    this.isMoving = false;
   }
 
   // 함정을 밟았을 때 캐릭터 색을 잠깐 바꿔서 "뭔가 발동했다"는 걸 보여주는 간단한 이펙트.
@@ -433,7 +444,6 @@ class MazeScene extends Phaser.Scene {
 
     this.playerGridX = targetX;
     this.playerGridY = targetY;
-    this.markVisited(targetX, targetY, dx, dy);
     this.updateFog();
 
     // 슬라이딩 도중 지나가는 칸에 다른 함정이 있어도 이번 구현에서는 이펙트를 재발동시키지 않음
