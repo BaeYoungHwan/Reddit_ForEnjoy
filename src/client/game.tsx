@@ -12,9 +12,10 @@ const MAP_HEIGHT = MAIN_MAP.grid.length;
 
 const TILE_SIZE = 64; // 타일 한 칸의 픽셀 크기 (정사각형 한 변의 길이)
 
-// 벽을 통로 폭 전체를 채우는 블록이 아니라 얇은 선으로 그릴 때의 두께(px).
-// 통로(TILE_SIZE) 대비 얇게 둬서 "타일 격자"가 아니라 실제 미로 통로처럼 보이게 함.
-const WALL_LINE_THICKNESS = 6;
+// 통로 폭(px). 칸 전체(TILE_SIZE)를 통로로 채우면 사방이 넓게 뚫린 팩맨 게임판처럼
+// 보인다는 피드백 반영 — 칸보다 훨씬 좁은 길만 밝혀서, 어둠(칸의 나머지 공간 = 벽)
+// 속에 좁은 길이 나 있는 실제 미로에 가깝게 만듦.
+const PATH_WIDTH = 26;
 
 // vision-system.md 스펙: 기본 시야 반경 2칸.
 // 나중에 손전등(4칸)/시야차단 함정(0.5~1칸)을 만들 때 이 값을 상황에 맞게 바꿔주면 됨.
@@ -82,14 +83,18 @@ class MazeScene extends Phaser.Scene {
   // 나중에 아트가 나오면 이 부분만 스프라이트 이미지로 교체하면 됨.
   private playerRect!: Phaser.GameObjects.Rectangle;
 
-  // 바닥 타일마다 그려둔 사각형들을 [y][x] 좌표로 저장해둠 (벽 칸은 따로 그리지 않아 undefined).
-  // 안개 상태가 바뀔 때마다 "다시 그리기"가 아니라 "이미 그려둔 도형의 밝기만 조정"하는 방식으로 처리.
+  // 각 바닥 칸 중심에 그려둔 좁은 통로 사각형(PATH_WIDTH 크기)들을 [y][x] 좌표로 저장해둠
+  // (벽 칸은 따로 그리지 않아 undefined). 안개 상태가 바뀔 때마다 "다시 그리기"가 아니라
+  // "이미 그려둔 도형의 밝기만 조정"하는 방식으로 처리.
   private tileRects: (Phaser.GameObjects.Rectangle | undefined)[][] = [];
 
-  // 각 바닥 타일이 벽과 맞닿은 변에 그려둔 얇은 "벽 선" 도형들. [y][x] 좌표(그 선이 속한 바닥 타일 기준)로
-  // 저장해서, 그 바닥 타일의 안개 상태가 바뀔 때 같이 밝기를 맞춘다. 벽을 꽉 찬 블록으로 칠하는 대신
-  // 통로 경계에만 얇은 선을 그려서 "타일 격자"가 아니라 "미로 통로"처럼 보이게 하기 위함.
-  private wallLineRects: Phaser.GameObjects.Rectangle[][][] = [];
+  // 인접한 두 바닥 칸(중심 통로 사각형) 사이를 이어주는 좁은 연결 통로 도형들.
+  // 통로가 칸 중앙의 좁은 사각형뿐이면 옆 칸과 뚝뚝 끊어져 보이므로, 서로 통행 가능한
+  // 두 칸 사이 빈틈을 이 연결 통로로 메워 하나로 이어진 길처럼 보이게 함.
+  // 두 칸 중 하나라도 안개에 덮여 있으면 그 구간은 아직 안 보여야 하므로, 안개 계산 시
+  // 두 칸의 밝기 중 더 어두운 쪽을 따른다(양쪽 다 밝혀졌을 때만 완전히 보임).
+  private pathConnectors: { ax: number; ay: number; bx: number; by: number; rect: Phaser.GameObjects.Rectangle }[] =
+    [];
 
   // 각 타일의 현재 상태(hidden/explored/visible)를 기억해두는 표
   private tileStates: TileState[][] = [];
@@ -121,52 +126,54 @@ class MazeScene extends Phaser.Scene {
 
   // create(): 게임이 시작될 때 딱 한 번만 실행됨. 여기서 맵과 캐릭터를 화면에 배치합니다.
   create() {
-    // 맵 크기만큼 타일 상태/도형 배열을 준비하고, 바닥 타일만 그림(벽 칸은 그리지 않고
-    // 검은 배경 그대로 남겨둠 — 안개로 덮인 곳과 벽이 시각적으로 자연스럽게 이어지도록 함).
+    // 맵 크기만큼 타일 상태/도형 배열을 준비하고, 바닥 칸 중앙에 좁은 통로 사각형만 그림
+    // (벽 칸, 그리고 통로 사각형 바깥의 나머지 칸 공간은 그리지 않고 검은 배경 그대로 남겨둠
+    // — 안개로 덮인 곳과 벽이 시각적으로 자연스럽게 이어지도록 함).
     for (let y = 0; y < MAP_HEIGHT; y++) {
       this.tileRects[y] = [];
-      this.wallLineRects[y] = [];
       this.tileStates[y] = [];
       this.trapRects[y] = [];
 
       for (let x = 0; x < MAP_WIDTH; x++) {
         this.tileStates[y]![x] = 'hidden'; // 시작할 땐 전부 안개로 덮인 상태
-        this.wallLineRects[y]![x] = [];
 
         if (MAIN_MAP.grid[y]![x] === 'wall') continue; // 벽 칸은 도형을 만들지 않고 건너뜀
 
-        // this.add.rectangle(중심x, 중심y, 너비, 높이, 색상) → 통로(바닥) 사각형 하나를 화면에 그려줌.
-        // 칸 사이에 여백을 두지 않고 TILE_SIZE 그대로 채워서, 이웃한 바닥 칸끼리 이음매 없이
-        // 하나로 이어진 통로처럼 보이게 함(여백을 두면 사각 타일이 나열된 격자처럼 보임).
+        // this.add.rectangle(중심x, 중심y, 너비, 높이, 색상) → 칸 중앙에 좁은 통로 사각형을 그려줌.
+        // PATH_WIDTH < TILE_SIZE라 칸 가장자리는 그리지 않은 채 남아있고(=벽처럼 어둡게 보임),
+        // 중앙의 좁은 사각형만 길처럼 밝게 보인다.
         const rect = this.add.rectangle(
           x * TILE_SIZE + TILE_SIZE / 2,
           y * TILE_SIZE + TILE_SIZE / 2,
-          TILE_SIZE,
-          TILE_SIZE,
+          PATH_WIDTH,
+          PATH_WIDTH,
           0x555555 // 통로 색(진짜 아트 나오기 전 임시 색)
         );
         this.tileRects[y]![x] = rect;
 
-        // 벽과 맞닿은 변에만 얇은 "벽 선"을 그림 (통로 폭 전체를 채우는 두꺼운 블록 대신
-        // 경계선만 그려서 타일 격자가 아니라 실제 미로 통로처럼 보이게 함)
-        const wallEdges: { cx: number; cy: number; w: number; h: number }[] = [];
-        if (!this.isWalkable(x, y - 1)) {
-          wallEdges.push({ cx: x * TILE_SIZE + TILE_SIZE / 2, cy: y * TILE_SIZE, w: TILE_SIZE, h: WALL_LINE_THICKNESS });
+        // 오른쪽/아래쪽 이웃이 통행 가능한 바닥이면, 이 칸과 이웃 칸의 중앙 통로 사각형
+        // 사이 빈틈을 좁은 연결 통로로 메워서 두 칸이 하나로 이어진 길처럼 보이게 함.
+        // (왼쪽/위쪽 이웃과의 연결은 그 이웃 칸을 처리할 때 오른쪽/아래쪽 방향으로 이미 그려짐
+        //  — 양방향에서 각각 그리면 같은 연결이 중복되므로 한쪽 방향만 처리)
+        if (this.isWalkable(x + 1, y)) {
+          const connector = this.add.rectangle(
+            (x + 1) * TILE_SIZE,
+            y * TILE_SIZE + TILE_SIZE / 2,
+            TILE_SIZE,
+            PATH_WIDTH,
+            0x555555
+          );
+          this.pathConnectors.push({ ax: x, ay: y, bx: x + 1, by: y, rect: connector });
         }
-        if (!this.isWalkable(x, y + 1)) {
-          wallEdges.push({ cx: x * TILE_SIZE + TILE_SIZE / 2, cy: (y + 1) * TILE_SIZE, w: TILE_SIZE, h: WALL_LINE_THICKNESS });
-        }
-        if (!this.isWalkable(x - 1, y)) {
-          wallEdges.push({ cx: x * TILE_SIZE, cy: y * TILE_SIZE + TILE_SIZE / 2, w: WALL_LINE_THICKNESS, h: TILE_SIZE });
-        }
-        if (!this.isWalkable(x + 1, y)) {
-          wallEdges.push({ cx: (x + 1) * TILE_SIZE, cy: y * TILE_SIZE + TILE_SIZE / 2, w: WALL_LINE_THICKNESS, h: TILE_SIZE });
-        }
-
-        for (const edge of wallEdges) {
-          const line = this.add.rectangle(edge.cx, edge.cy, edge.w, edge.h, 0x3a2a1a); // 벽 색(진짜 아트 나오기 전 임시 색)
-          line.setDepth(1); // 통로(기본 depth 0)보다 위, 함정 마커(depth 6)보다 아래
-          this.wallLineRects[y]![x]!.push(line);
+        if (this.isWalkable(x, y + 1)) {
+          const connector = this.add.rectangle(
+            x * TILE_SIZE + TILE_SIZE / 2,
+            (y + 1) * TILE_SIZE,
+            PATH_WIDTH,
+            TILE_SIZE,
+            0x555555
+          );
+          this.pathConnectors.push({ ax: x, ay: y, bx: x, by: y + 1, rect: connector });
         }
       }
     }
@@ -176,7 +183,7 @@ class MazeScene extends Phaser.Scene {
       const marker = this.add.circle(
         trap.x * TILE_SIZE + TILE_SIZE / 2,
         trap.y * TILE_SIZE + TILE_SIZE / 2,
-        TILE_SIZE * 0.22,
+        PATH_WIDTH * 0.35,
         TRAP_COLORS[trap.type]
       );
       marker.setDepth(6); // 타일(기본 depth 0)보다 위, 캐릭터(depth 10)보다 아래
@@ -187,8 +194,8 @@ class MazeScene extends Phaser.Scene {
     this.goalRect = this.add.rectangle(
       GOAL_POSITION.x * TILE_SIZE + TILE_SIZE / 2,
       GOAL_POSITION.y * TILE_SIZE + TILE_SIZE / 2,
-      TILE_SIZE * 0.8,
-      TILE_SIZE * 0.8,
+      PATH_WIDTH * 0.9,
+      PATH_WIDTH * 0.9,
       0x33ff66
     );
     this.goalRect.setDepth(6);
@@ -200,8 +207,8 @@ class MazeScene extends Phaser.Scene {
     this.playerRect = this.add.rectangle(
       this.playerGridX * TILE_SIZE + TILE_SIZE / 2,
       this.playerGridY * TILE_SIZE + TILE_SIZE / 2,
-      TILE_SIZE * 0.6,
-      TILE_SIZE * 0.6,
+      PATH_WIDTH * 0.7,
+      PATH_WIDTH * 0.7,
       0xffd400
     );
     this.playerRect.setDepth(10); // depth(그리기 순서)를 높여서 타일 위에 캐릭터가 보이게 함
@@ -442,6 +449,10 @@ class MazeScene extends Phaser.Scene {
   // 안개(시야) 상태를 다시 계산하는 함수.
   // vision-system.md 규칙: 기본 시야 2칸 안쪽은 밝게, 지나간 타일은 안개가 다시 덮이지 않고 유지.
   private updateFog() {
+    // 1단계: 모든 칸의 상태(hidden/explored/visible)를 먼저 다 계산해둔다.
+    // 연결 통로(pathConnectors)는 두 칸의 상태를 동시에 참조해야 하는데, 상태 계산과
+    // 화면 반영(paintTile)을 한 루프에서 같이 하면 아직 계산 안 된 이웃 칸을 참조할 수
+    // 있어서, 상태 계산을 먼저 전부 끝낸 뒤 화면 반영은 따로 2단계에서 처리한다.
     for (let y = 0; y < MAP_HEIGHT; y++) {
       for (let x = 0; x < MAP_WIDTH; x++) {
         // 체비셰프 거리(Chebyshev distance): 가로/세로/대각선 이동을 동일하게 1칸으로 치는 거리 계산 방식.
@@ -459,36 +470,44 @@ class MazeScene extends Phaser.Scene {
           this.tileStates[y]![x] = 'explored';
         }
         // 그 외의 경우(distance도 밖이고 한 번도 안 가봄)는 계속 'hidden' 그대로 둠
+      }
+    }
 
+    // 2단계: 계산이 끝난 상태를 바탕으로 실제 도형 밝기를 반영한다.
+    for (let y = 0; y < MAP_HEIGHT; y++) {
+      for (let x = 0; x < MAP_WIDTH; x++) {
         this.paintTile(x, y);
       }
     }
+
+    // 연결 통로는 두 칸 중 더 어두운(덜 밝혀진) 쪽 밝기를 따른다 — 한쪽만 밝혀졌다고
+    // 그 사이 길까지 다 보이면 안 가본 칸의 존재가 미리 드러나 버리기 때문.
+    for (const connector of this.pathConnectors) {
+      const alphaA = this.alphaForState(this.tileStates[connector.ay]![connector.ax]!);
+      const alphaB = this.alphaForState(this.tileStates[connector.by]![connector.bx]!);
+      connector.rect.setAlpha(Math.min(alphaA, alphaB));
+    }
   }
 
-  // 타일 상태(hidden/explored/visible)에 맞춰 실제 화면에 보이는 밝기를 반영하는 함수.
+  // 타일 상태(hidden/explored/visible)를 실제 화면 밝기(alpha)로 변환하는 함수.
+  private alphaForState(state: TileState): number {
+    if (state === 'hidden') return 0; // 완전 투명 → 검은 배경만 보여서 "안개로 덮인 것"처럼 보임
+    if (state === 'explored') return 0.35; // 지나간 적 있지만 지금 시야 밖 → 어둡게
+    return 1; // 지금 시야 안 → 원래 밝기 그대로
+  }
+
+  // 타일 상태에 맞춰 실제 화면에 보이는 밝기를 반영하는 함수.
   // 그 타일에 함정이 있으면 함정 마커도 같은 밝기로 함께 맞춰줌
   // (함정도 안개에 덮인 곳에서는 안 보여야 자연스러움 — 함정 탐지기 아이템이 있어야 볼 수 있는 구조).
   private paintTile(x: number, y: number) {
     const rect = this.tileRects[y]![x];
     if (!rect) return; // 벽 칸은 그려둔 도형이 없으니 안개 계산에서 제외
 
-    const state = this.tileStates[y]![x]!;
+    const alpha = this.alphaForState(this.tileStates[y]![x]!);
     const trap = this.trapRects[y]?.[x];
-
-    let alpha: number;
-    if (state === 'hidden') {
-      alpha = 0; // 완전 투명 → 검은 배경만 보여서 "안개로 덮인 것"처럼 보임
-    } else if (state === 'explored') {
-      alpha = 0.35; // 지나간 적 있지만 지금 시야 밖 → 어둡게
-    } else {
-      alpha = 1; // 지금 시야 안 → 원래 밝기 그대로
-    }
 
     rect.setAlpha(alpha);
     trap?.setAlpha(alpha);
-    for (const line of this.wallLineRects[y]![x]!) {
-      line.setAlpha(alpha);
-    }
 
     if (x === GOAL_POSITION.x && y === GOAL_POSITION.y) {
       this.goalRect.setAlpha(alpha);
