@@ -24,6 +24,8 @@ docs/ref/session-state.md
 스샷*.png
 screenshot*.png
 *.local.png
+# 임소리 개인 전용 폴더 (팀과 공유 안 함)
+personal-sori/
 
 # OS
 .DS_Store

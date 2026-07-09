@@ -19,10 +19,10 @@
 
 | 작업 | 상태 | 근거 | 블로커/비고 |
 |------|------|------|------|
-| 방향키 그리드 이동 + 이동 애니메이션 | ⬜ | git 커밋 없음 | |
-| 안개(블라인드) 시야 시스템 | ⬜ | git 커밋 없음 | 스펙: `design-docs/vision-system.md` |
-| 함정 4종 이펙트 | ⬜ | git 커밋 없음 | 스펙: `design-docs/traps.md`. 서버 API(`trap.install`/`trap.trigger`)는 완료(2️⃣ PR #3)라 연동 준비는 되어 있음 |
-| 발자국 렌더링 | ⬜ | git 커밋 없음 | 서버 API(`map.getState`/`footprint.record`)는 완료(2️⃣ PR #3) |
+| 방향키 그리드 이동 + 이동 애니메이션 | ✅ | 07.08 커밋(`src/client/game.tsx`) | 트윈 기반 한 칸 이동 + 방향키 홀드 시 연속 이동 |
+| 안개(블라인드) 시야 시스템 | ✅ | 07.08 커밋(`src/client/game.tsx`) | 스펙: `design-docs/vision-system.md`. hidden/explored/visible 3단계 + 시야 반경 가변(시야차단 함정 연동) |
+| 함정 4종 이펙트 | 🔄 | 07.08 커밋(`src/client/game.tsx`) | 스펙: `design-docs/traps.md`(슬라이드 함정은 팀 협의로 스펙 변경 — traps.md 문서는 아직 미갱신). 4종 전부 시각 이펙트 구현했으나 임시 좌표(`TEMP_TRAPS`)로 로컬 테스트 중 — 서버 API(`trap.install`/`trap.trigger`, 2️⃣ PR #3 완료)와의 실연동은 미착수 |
+| 발자국 렌더링 | ⬜ | - | 서버 API(`map.getState`/`footprint.record`)는 완료(2️⃣ PR #3). 자기 발자국은 안개 시스템으로 이미 경로가 보이므로 렌더링 불필요 판단 — 다른 유저 발자국 표시만 남음(서버 연동 후 착수) |
 | 아이템 이펙트 | ⏳ | - | `items.md` 미확정 — 전체 블로커 참조 |
 
 ## 2️⃣ 배영환 — 백엔드 / 비동기 데이터 (`src/server`)
