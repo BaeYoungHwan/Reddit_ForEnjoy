@@ -164,6 +164,7 @@ const MazeBackdrop = () => (
             animationTimingFunction: 'ease-in-out',
             animationIterationCount: 'infinite',
             animationDelay: step.delay,
+            animationFillMode: 'backwards',
             '--step-rotate': step.rotate,
           }}
         />
