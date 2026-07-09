@@ -72,12 +72,14 @@ const ITEM_MARK_BOB_MS = 600; // 물음표 한 방향 이동에 걸리는 시간
 // 천은 세로로 3등분(GoalFlag-cloth-1/2/3.png)해서 조각마다 위상차를 두고 "가로 폭(scaleX)을
 // 접었다 펴는" 방식으로 움직인다 — 천이 카메라 쪽/반대쪽으로 뒤집히며 잠깐 옆모습처럼 가늘어
 // 보이는 것을 흉내내 "앞뒤로 펄럭이는" 느낌을 낸다(단순 상하 이동은 실제 천이 통째로 위아래로
-// 튀는 것처럼 보여 부자연스러웠다). 조각들의 왼쪽 변(origin 0,0.5)을 기준으로 폭이 줄었다 늘었다
-// 하므로, 오른쪽 조각이 항상 왼쪽 조각의 "그 순간의" 오른쪽 끝에 붙어 있어야 이음매가 안
-// 벌어진다 — 매 프레임(update)마다 현재 폭을 기준으로 다음 조각 위치를 다시 계산한다
-// (updateGoalFlagWave 참고). (이전에는 조각을 "회전"으로 이었는데, 각도가 다르면 이음매의
-// x좌표가 어긋나 찢어지는 것처럼 보였다 — 그 다음엔 순수 y축 이동으로 바꿨지만 이번엔
-// "위아래로 흔들린다"는 피드백을 받아 최종적으로 폭 변화 방식으로 교체.)
+// 튀는 것처럼 보여 부자연스러웠다). 각 조각의 위치는 create()에서 한 번만 고정으로 배치하고
+// 이후 절대 다시 옮기지 않는다 — 예전엔 매 프레임 "이전 조각의 현재 오른쪽 끝"을 기준으로
+// 다음 조각을 다시 붙였는데, 그러면 조각들이 동시에 접힐 때 깃발 전체 길이가 늘었다 줄었다
+// 하면서 깃발이 통째로 밀렸다 당겨지는 것처럼(위치가 틀어지는 것처럼) 보이는 문제가 있었다.
+// 대신 각 조각을 자기 폭이 GOAL_FLAG_WAVE_SQUASH까지 접혔을 때의 오른쪽 끝 지점에 다음
+// 조각을 미리 겹쳐서 고정 배치해두면, 조각이 아무리 접혀도 오른쪽 이웃이 이미 그 지점을
+// 덮고 있어 이음매에 틈이 생기지 않는다 — 위치는 고정, 폭만 그 자리에서 숨쉬듯 움직이므로
+// 깃발 전체가 흔들리는 느낌 없이 제자리에서 펄럭인다.
 const GOAL_POLE_TEXTURE_KEY = 'goal-flag-pole';
 const GOAL_CLOTH_TEXTURE_KEYS = ['goal-flag-cloth-1', 'goal-flag-cloth-2', 'goal-flag-cloth-3'];
 // 원본 캔버스(512x512)에서 각 조각이 차지하던 바운딩 박스 — 잘라낸 PNG의 크기/위치와 일치한다.
@@ -88,7 +90,9 @@ const GOAL_CLOTH_BOUNDS = { minX: 82, maxX: 484, minY: 0, maxY: 506 };
 const GOAL_CLOTH_SEG_PIXEL_WIDTHS = [134, 134, 135];
 const GOAL_FLAG_DISPLAY_SIZE = TILE_SIZE * 0.85; // 깃발 전체(원본 512 기준)를 이 크기로 축소해 표시
 const GOAL_FLAG_SCALE = GOAL_FLAG_DISPLAY_SIZE / GOAL_FLAG_CANVAS;
-const GOAL_FLAG_WAVE_SQUASH = 0.55; // 조각이 가장 접혔을 때 원래 폭 대비 비율(1이면 안 접힘)
+// 조각이 가장 접혔을 때 원래 폭 대비 비율(1이면 안 접힘). 다음 조각은 이 조각의 폭에
+// 이 비율을 곱한 지점(=최대로 접혔을 때의 오른쪽 끝)부터 겹쳐서 고정 배치한다.
+const GOAL_FLAG_WAVE_SQUASH = 0.55;
 const GOAL_FLAG_WAVE_MS = 450; // 조각이 한쪽으로 접히는(또는 펴지는) 데 걸리는 시간(ms, yoyo라 왕복은 2배)
 const GOAL_FLAG_WAVE_DELAY_MS = 120; // 다음 조각이 같은 애니메이션을 이만큼 늦게 시작 — 이 위상차가 "물결이 이동하는" 것처럼 보이게 함
 
@@ -180,12 +184,6 @@ class MazeScene extends Phaser.Scene {
   // (다른 타일들과 동일하게 탐색해야 보임).
   private goalRect!: Phaser.GameObjects.Container;
 
-  // 깃발 천 조각 이미지들(왼쪽=깃대 쪽 → 오른쪽=끝자락 순서). 각 조각의 scaleX가 매 프레임
-  // 바뀌므로(펄럭임), updateGoalFlagWave에서 매 프레임 현재 폭 기준으로 다음 조각 위치를
-  // 다시 계산해 이음매가 벌어지지 않게 한다.
-  private goalClothImages: Phaser.GameObjects.Image[] = [];
-  private goalClothAttachX = 0; // 첫 조각(깃대 쪽)이 항상 붙어있어야 할 고정 x좌표
-  private goalClothAttachY = 0; // 모든 조각이 공유하는 고정 y좌표(세로 중앙)
 
   // 골인했는지 여부. true가 되면 더 이상 방향키 입력을 받지 않음(테스트용 종료 처리).
   private hasFinished = false;
@@ -261,22 +259,22 @@ class MazeScene extends Phaser.Scene {
       .setDisplaySize(poleWidth, poleHeight);
 
     // 깃발 천: 3조각을 가로로 나란히 배치하고, 조각마다 위상차를 두고 가로 폭(scaleX)을
-    // 접었다 편다. 왼쪽 변(origin 0,0.5)을 기준으로 폭이 바뀌므로 오른쪽 조각의 위치는
-    // updateGoalFlagWave에서 매 프레임 다시 계산한다(고정 좌표로 두면 폭이 줄어들 때
-    // 이음매에 틈이 생김).
+    // 접었다 편다. 위치는 여기서 한 번만 고정하고 이후 절대 옮기지 않는다 — 대신 다음 조각을
+    // 이 조각이 GOAL_FLAG_WAVE_SQUASH까지 접혔을 때의 오른쪽 끝 지점에 미리 겹쳐서 배치해두면,
+    // 조각이 최대로 접혀도 이웃이 이미 그 자리를 덮고 있어 이음매에 틈이 생기지 않는다.
     const clothHeight = (GOAL_CLOTH_BOUNDS.maxY - GOAL_CLOTH_BOUNDS.minY + 1) * GOAL_FLAG_SCALE;
-    this.goalClothAttachX = goalOriginX + GOAL_CLOTH_BOUNDS.minX * GOAL_FLAG_SCALE;
-    this.goalClothAttachY = goalOriginY + ((GOAL_CLOTH_BOUNDS.minY + GOAL_CLOTH_BOUNDS.maxY) / 2) * GOAL_FLAG_SCALE;
+    const clothAttachX = goalOriginX + GOAL_CLOTH_BOUNDS.minX * GOAL_FLAG_SCALE;
+    const clothAttachY = goalOriginY + ((GOAL_CLOTH_BOUNDS.minY + GOAL_CLOTH_BOUNDS.maxY) / 2) * GOAL_FLAG_SCALE;
     const segWidths = GOAL_CLOTH_SEG_PIXEL_WIDTHS.map((w) => w * GOAL_FLAG_SCALE);
 
-    this.goalClothImages = [];
-    let segX = this.goalClothAttachX;
+    const clothImages: Phaser.GameObjects.Image[] = [];
+    let segX = clothAttachX;
     for (let i = 0; i < GOAL_CLOTH_TEXTURE_KEYS.length; i++) {
       const segImg = this.add
-        .image(segX, this.goalClothAttachY, GOAL_CLOTH_TEXTURE_KEYS[i]!)
+        .image(segX, clothAttachY, GOAL_CLOTH_TEXTURE_KEYS[i]!)
         .setDisplaySize(segWidths[i]!, clothHeight)
         .setOrigin(0, 0.5);
-      this.goalClothImages.push(segImg);
+      clothImages.push(segImg);
 
       const baseScaleX = segImg.scaleX;
       this.tweens.add({
@@ -289,10 +287,12 @@ class MazeScene extends Phaser.Scene {
         ease: 'Sine.easeInOut',
       });
 
-      segX += segWidths[i]!;
+      // 다음 조각은 이 조각의 "최대로 접혔을 때" 오른쪽 끝 지점부터 미리 겹쳐서 시작 —
+      // 그래야 이 조각이 아무리 접혀도 다음 조각이 그 지점을 이미 덮고 있다.
+      segX += segWidths[i]! * GOAL_FLAG_WAVE_SQUASH;
     }
 
-    this.goalRect = this.add.container(0, 0, [poleImg, ...this.goalClothImages]);
+    this.goalRect = this.add.container(0, 0, [poleImg, ...clothImages]);
     this.goalRect.setDepth(6);
 
     // 캐릭터를 맵 시작 칸(SPAWN_POSITION)에 배치.
@@ -394,23 +394,9 @@ class MazeScene extends Phaser.Scene {
     this.updateFog();
   }
 
-  // 깃발 천 조각들의 scaleX가 매 프레임 바뀌므로(펄럭임 트윈), 왼쪽부터 순서대로
-  // "이전 조각의 현재 오른쪽 끝"에 다음 조각을 다시 붙여준다 — 그래야 조각이 접혀서
-  // 폭이 줄어드는 순간에도 이음매에 틈이 생기지 않는다.
-  private updateGoalFlagWave() {
-    let x = this.goalClothAttachX;
-    for (const seg of this.goalClothImages) {
-      seg.setPosition(x, this.goalClothAttachY);
-      x += seg.displayWidth;
-    }
-  }
-
   // update(): 매 프레임(1초에 수십 번)마다 반복 실행되는 함수.
   // "지금 방향키가 눌렸는가?"를 확인해서 캐릭터를 움직이는 역할을 함.
   override update() {
-    // 깃발 펄럭임은 골인 여부/이동 여부와 무관하게 항상 갱신
-    this.updateGoalFlagWave();
-
     // 골인했으면 더 이상 입력을 받지 않음 (테스트용 종료 처리)
     if (this.hasFinished) return;
 
@@ -745,12 +731,19 @@ class MazeScene extends Phaser.Scene {
 
 // Phaser 게임 전체 설정.
 // parent는 아래 App 컴포넌트에서 만든 div의 id와 반드시 이름이 같아야 함.
+// 맵(1216x960, map-1 기준)이 실제 화면(특히 모바일 devvit 웹뷰)보다 훨씬 크기 때문에,
+// width/height는 "게임 내부 논리 해상도"로만 쓰고 Scale.FIT으로 화면(부모 요소) 크기에 맞게
+// 비율을 유지한 채 축소해서 보여준다 — 그래야 화면 크기와 무관하게 맵 전체가 한 화면에 들어온다.
 const phaserConfig: Phaser.Types.Core.GameConfig = {
   type: Phaser.AUTO, // 브라우저가 WebGL을 지원하면 WebGL로, 아니면 자동으로 Canvas 방식으로 그림
   parent: 'phaser-container',
   width: MAP_WIDTH * TILE_SIZE,
   height: MAP_HEIGHT * TILE_SIZE,
   backgroundColor: '#000000', // hidden 타일은 투명해서 이 검은 배경이 그대로 "안개"처럼 보임
+  scale: {
+    mode: Phaser.Scale.FIT,
+    autoCenter: Phaser.Scale.CENTER_BOTH,
+  },
   scene: [MazeScene],
 };
 
@@ -767,8 +760,10 @@ export const App = () => {
   }, []);
 
   return (
-    <div className="flex justify-center items-center min-h-screen bg-black">
-      <div id="phaser-container" />
+    // Scale.FIT은 부모 요소의 실제 크기를 기준으로 축소 비율을 계산하므로, 부모가 뷰포트
+    // 전체를 채우고 있어야(w-screen h-screen) 화면 크기에 맞는 비율이 정확히 나온다.
+    <div className="flex justify-center items-center w-screen h-screen bg-black">
+      <div id="phaser-container" className="w-full h-full" />
     </div>
   );
 };
