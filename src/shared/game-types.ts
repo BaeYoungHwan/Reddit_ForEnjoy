@@ -10,6 +10,7 @@ export type TrapInstance = Position & {
 
 export type LeaderboardEntry = {
   userId: string;
+  username: string;
   clearTimeMs: number;
   rank: number;
 };

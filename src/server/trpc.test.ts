@@ -170,11 +170,20 @@ const mocks = vi.hoisted(() => {
     }
   }
 
-  return { redis: new FakeRedis() };
+  const users = new Map<string, { username: string }>();
+
+  return {
+    redis: new FakeRedis(),
+    reddit: {
+      getUserById: async (id: string) => users.get(id),
+    },
+    users,
+  };
 });
 
 vi.mock('@devvit/web/server', () => ({
   redis: mocks.redis,
+  reddit: mocks.reddit,
   context: { userId: undefined },
 }));
 
@@ -182,6 +191,7 @@ const { createCaller } = await import('./trpc');
 
 beforeEach(() => {
   mocks.redis.reset();
+  mocks.users.clear();
 });
 
 describe('trap.install 동시성 (8.4 회귀 테스트)', () => {
@@ -251,5 +261,24 @@ describe('map.getState 위치 앵커 (8.1 회귀 테스트)', () => {
     await expect(caller.trap.trigger({ mapId: 'map-1', x: 2, y: 0 })).rejects.toMatchObject({
       message: 'INVALID_MOVE',
     });
+  });
+});
+
+describe('leaderboard.get username 매핑', () => {
+  it('reddit.getUserById로 조회된 username을 entry에 채운다', async () => {
+    mocks.users.set('user-g', { username: 'maze-runner' });
+    const caller = createCaller({ userId: 'user-g' });
+    await caller.run.finish({ mapId: 'map-1', clearTimeMs: 5000 });
+
+    const { entries } = await caller.leaderboard.get({ mapId: 'map-1' });
+    expect(entries).toEqual([{ userId: 'user-g', username: 'maze-runner', clearTimeMs: 5000, rank: 1 }]);
+  });
+
+  it('탈퇴/정지 등으로 조회가 안 되는 유저는 userId로 폴백한다', async () => {
+    const caller = createCaller({ userId: 'user-h' });
+    await caller.run.finish({ mapId: 'map-1', clearTimeMs: 6000 });
+
+    const { entries } = await caller.leaderboard.get({ mapId: 'map-1' });
+    expect(entries[0]?.username).toBe('user-h');
   });
 });

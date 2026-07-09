@@ -225,7 +225,7 @@ const PODIUM_ORDER = [2, 1, 3];
 const PodiumSlot = ({ place, entry }: { place: number; entry: LeaderboardEntry | undefined }) => (
   <div className="flex flex-col items-center gap-1 w-20">
     <span className="text-xl">{PODIUM_MEDAL[place]}</span>
-    <span className="text-xs text-slate-300 truncate w-full text-center">{entry?.userId ?? '-'}</span>
+    <span className="text-xs text-slate-300 truncate w-full text-center">{entry?.username ?? '-'}</span>
     <span className="font-mono text-[10px] text-amber-300 [text-shadow:0_0_6px_rgba(252,211,77,0.5)]">
       {entry ? formatClearTime(entry.clearTimeMs) : '--:--'}
     </span>
@@ -288,7 +288,7 @@ const Leaderboard = ({ onBack }: { onBack: () => void }) => {
             {restEntries.map((entry) => (
               <div key={entry.userId} className="flex items-center gap-3 bg-slate-800/50 rounded-xl px-3 py-2">
                 <RankBadge rank={entry.rank} />
-                <span className="text-slate-200 text-sm font-medium truncate flex-1">{entry.userId}</span>
+                <span className="text-slate-200 text-sm font-medium truncate flex-1">{entry.username}</span>
                 <span className="font-mono text-xs text-amber-300 bg-black/40 border border-slate-700 rounded-md px-2 py-1 [text-shadow:0_0_6px_rgba(252,211,77,0.5)]">
                   {formatClearTime(entry.clearTimeMs)}
                 </span>

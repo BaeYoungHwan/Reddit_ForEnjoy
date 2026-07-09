@@ -1,6 +1,7 @@
 import { initTRPC, TRPCError } from '@trpc/server';
 import { z } from 'zod';
-import { context, redis } from '@devvit/web/server';
+import { context, reddit, redis } from '@devvit/web/server';
+import type { T2 } from '@devvit/shared-types/tid.js';
 import {
   footprintKey,
   getKstDateString,
@@ -217,9 +218,13 @@ export const appRouter = t.router({
     get: t.procedure.input(mapIdSchema).query(async ({ input }) => {
       const date = getKstDateString();
       const entries = await redis.zRange(leaderboardKey(input.mapId, date), 0, -1, { by: 'rank' });
+      // 리더보드에 Reddit userId를 그대로 노출하지 않도록 표시용 username을 조회한다.
+      // 탈퇴/정지 계정은 조회가 undefined를 반환하므로 userId로 폴백한다.
+      const users = await Promise.all(entries.map((entry) => reddit.getUserById(entry.member as T2)));
       return {
         entries: entries.map((entry, index) => ({
           userId: entry.member,
+          username: users[index]?.username ?? entry.member,
           clearTimeMs: entry.score,
           rank: index + 1,
         })),

@@ -39,6 +39,7 @@
 | 맵 시작 좌표 실데이터 연동 | ✅ | `src/server/core/maps.ts` → `getMazeMap()` (3️⃣ PR #15 반영분) | ⚠️ 배영환 개인 TODO엔 최근까지 미체크로 남아있었음 — 담당자 간 산출물 연동을 커밋 기준으로 재확인하지 않으면 이런 지연이 반복됨(오늘 WBS 도입 계기) |
 | 아이템 데이터 모델 + API | ⏳ | - | 2026-07-08: 임소리 아이템 리빌딩 PR 대기 중 — 착수 보류 |
 | 데일리 맵 전환 로직 | ⏳ | - | 맵 로테이션 정책 미확정 — 전체 블로커 참조 |
+| 리더보드 `userId`→`username` 매핑 | ✅ | 2026-07-09 커밋(`docs/design-docs/leaderboard-verification.md` 갭 분석 후속) | `leaderboard.get`이 `reddit.getUserById`로 표시용 username을 채워서 반환하도록 변경, `LeaderboardEntry`에 `username` 필드 추가. `src/client/splash.tsx` 표시도 함께 교체(송원호 영역 침범 — 이 PR에 리뷰어 포함) |
 
 ## 3️⃣ 송원호 — UI·콘텐츠·통합 (`src/client` React 파트 + 콘텐츠 전반)
 
