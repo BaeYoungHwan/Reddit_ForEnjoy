@@ -185,12 +185,15 @@ const CheckIcon = () => (
 
 // 3종 로드아웃 정의 — 색은 게임 화면(game.tsx ITEM_COLORS)의 손전등/쉴드 색과 맞추고,
 // 함정 탐지기는 기존 함정 4색(파랑/보라/회색/주황)과 안 겹치는 에메랄드로 새로 지정.
+// iconAccent는 선택 여부와 무관하게 항상 적용 — 처음부터 아이콘이 각자 색을 띠어야
+// 글자를 안 읽어도 세 옵션이 한눈에 구분된다(accent는 카드가 "선택됐을 때"만 적용).
 const LOADOUT_OPTIONS: {
   id: LoadoutId;
   label: string;
   description: string;
   icon: ReactNode;
   accent: string;
+  iconAccent: string;
 }[] = [
   {
     id: 'trapDetector',
@@ -198,6 +201,7 @@ const LOADOUT_OPTIONS: {
     description: 'Briefly reveals nearby traps',
     icon: <TrapDetectorIcon />,
     accent: 'text-emerald-300 border-emerald-500/60 bg-emerald-500/10',
+    iconAccent: 'text-emerald-400 bg-emerald-500/15',
   },
   {
     id: 'shield',
@@ -205,6 +209,7 @@ const LOADOUT_OPTIONS: {
     description: 'Blocks the next trap you hit',
     icon: <ShieldIcon />,
     accent: 'text-cyan-300 border-cyan-500/60 bg-cyan-500/10',
+    iconAccent: 'text-cyan-400 bg-cyan-500/15',
   },
   {
     id: 'flashlight',
@@ -212,6 +217,7 @@ const LOADOUT_OPTIONS: {
     description: 'See farther for a short while',
     icon: <FlashlightIcon />,
     accent: 'text-amber-300 border-amber-500/60 bg-amber-500/10',
+    iconAccent: 'text-amber-400 bg-amber-500/15',
   },
 ];
 
@@ -329,6 +335,7 @@ const Loadout = ({ onBack }: { onBack: () => void }) => {
         </button>
         <h1 className="font-display text-lg tracking-wide text-white">Choose Your Item</h1>
       </div>
+      <p className="text-xs text-slate-400 -mt-3">Pick one item to carry into today&apos;s maze.</p>
 
       <div className="flex flex-col gap-2.5" role="radiogroup" aria-label="Choose your item">
         {LOADOUT_OPTIONS.map((opt) => {
@@ -345,11 +352,7 @@ const Loadout = ({ onBack }: { onBack: () => void }) => {
                   : 'border-slate-700 bg-slate-800/50 text-slate-300 hover:border-slate-500'
               }`}
             >
-              <span
-                className={`flex items-center justify-center w-10 h-10 rounded-full shrink-0 transition ${
-                  isSelected ? 'bg-black/25' : 'bg-slate-900/60 text-slate-400'
-                }`}
-              >
+              <span className={`flex items-center justify-center w-10 h-10 rounded-full shrink-0 ${opt.iconAccent}`}>
                 {opt.icon}
               </span>
               <span className="flex flex-col flex-1">
