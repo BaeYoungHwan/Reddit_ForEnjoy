@@ -6,6 +6,7 @@ import { createRoot } from 'react-dom/client';
 import { getMazeMap } from '../shared/maps';
 import type { MazeMap } from '../shared/maps';
 import { buildMazeSvgDataUri } from './mazePattern';
+import { computeClothWaveX } from './goalFlagWave';
 import { trpc } from './trpcClient';
 import { SequentialDispatcher } from './sequentialDispatcher';
 import type { Position, TrapInstance, TrapTriggerOutput, TrapType } from '../shared/game-types';
@@ -78,6 +79,10 @@ const ITEM_MARK_BOB_MS = 600; // 물음표 한 방향 이동에 걸리는 시간
 // 보이게 한다(이음매가 아예 없는 연속 표면이라 찢어질 수 없음). 양 끝(깃대 부착점,
 // 천 끝자락)은 항상 원래 폭으로 재조정(rescale)해 고정하므로 깃발이 밀렸다 당겨지는
 // 느낌(예전 버그)도 생기지 않는다 — updateGoalFlagWave 참고.
+// ⚠️ Mesh2D는 WebGL 전용 GameObject다. phaserConfig가 Phaser.AUTO라 WebGL이 없는 환경에서는
+// Canvas 렌더러로 자동 폴백되는데, 그 경우 이 천 메쉬는 그려지지 않는다(깃대는 일반 Image라
+// 정상 표시됨). Devvit 웹뷰는 최신 Chromium 기반이라 실질적으로 문제되지 않을 것으로 보지만,
+// 다른 환경(구형 기기 등)에서 깃발 천만 안 보인다는 리포트가 오면 여기부터 의심할 것.
 const GOAL_POLE_TEXTURE_KEY = 'goal-flag-pole';
 const GOAL_CLOTH_TEXTURE_KEY = 'goal-flag-cloth';
 // 원본 캔버스(512x512)에서 각 조각이 차지하던 바운딩 박스 — 잘라낸 PNG의 크기/위치와 일치한다.
@@ -152,6 +157,8 @@ const FLASHLIGHT_DURATION_MS = 8000;
 
 // ── 임시 테스트용 아이템 스폰 좌표 ──────────────────────────
 // 함정처럼 실제 맵/랜덤 스폰 로직이 아직 없어서 손으로 두 지점만 박아둠.
+// ⚠️ 이 좌표들은 MAIN_MAP(map-1)의 바닥 칸이어야 함 — 코드로 검증하지 않으므로, 맵 레이아웃이
+// 또 바뀌면 여기도 같이 확인할 것(벽 칸을 가리키면 마커가 벽 속에 파묻혀 주울 수 없게 됨).
 const TEMP_ITEMS: ItemInstance[] = [
   { x: 5, y: 2, type: 'flashlight' },
   { x: 9, y: 9, type: 'shield' },
@@ -228,7 +235,6 @@ class MazeScene extends Phaser.Scene {
   private goalClothWidth = 0;
   private goalClothElapsed = 0; // 파동 애니메이션용 경과 시간(초)
 
-
   // 골인했는지 여부. true가 되면 더 이상 방향키 입력을 받지 않음(테스트용 종료 처리).
   private hasFinished = false;
 
@@ -283,8 +289,50 @@ class MazeScene extends Phaser.Scene {
       }
     }
 
-    // 골인 지점 깃발 배치. 깃대 밑동이 타일 중심에 오도록 기준점을 잡고, 깃대/천을 각각
-    // 원본 캔버스에서의 위치(GOAL_*_BOUNDS)만큼 오프셋해서 원래 그림과 같은 배치로 복원한다.
+    this.createGoalFlag();
+
+    // 아이템 마커 배치 (별 모양 — 함정 마커는 박스 모양이라 헷갈리지 않게 구분)
+    for (const item of this.remainingItems) {
+      const marker = this.add.star(
+        item.x * TILE_SIZE + TILE_SIZE / 2,
+        item.y * TILE_SIZE + TILE_SIZE / 2,
+        5,
+        TILE_SIZE * 0.12,
+        TILE_SIZE * 0.24,
+        ITEM_COLORS[item.type]
+      );
+      marker.setDepth(6);
+      this.itemRects[item.y]![item.x] = marker;
+    }
+
+    // 캐릭터를 맵 시작 칸(SPAWN_POSITION)에 배치.
+    // 일단 노란 사각형으로 표현 (나중에 실제 캐릭터 이미지로 교체 예정)
+    this.playerGridX = SPAWN_POSITION.x;
+    this.playerGridY = SPAWN_POSITION.y;
+    this.playerRect = this.add.rectangle(
+      this.playerGridX * TILE_SIZE + TILE_SIZE / 2,
+      this.playerGridY * TILE_SIZE + TILE_SIZE / 2,
+      PATH_WIDTH * 0.7,
+      PATH_WIDTH * 0.7,
+      0xffd400
+    );
+    this.playerRect.setDepth(10); // depth(그리기 순서)를 높여서 타일 위에 캐릭터가 보이게 함
+
+    // 키보드의 방향키 입력을 받을 수 있도록 설정.
+    // 이후 update()에서 this.cursors.left/right/up/down 으로 눌림 여부를 확인할 수 있음.
+    this.cursors = this.input.keyboard!.createCursorKeys();
+
+    // 게임 시작하자마자 시작 지점 기준으로 시야(안개)부터 계산해서 보여줌
+    this.updateFog();
+
+    // 서버에 위치 앵커를 초기화하고 내가 설치한 함정 목록을 받아온다 (fire-and-forget).
+    void this.loadServerState();
+  }
+
+  // 골인 지점 깃발(깃대+천 메쉬)을 만들어 this.goalRect에 담는다. 깃대 밑동이 타일 중심에
+  // 오도록 기준점을 잡고, 깃대/천을 각각 원본 캔버스에서의 위치(GOAL_*_BOUNDS)만큼
+  // 오프셋해서 원래 그림과 같은 배치로 복원한다.
+  private createGoalFlag() {
     const goalTileX = GOAL_POSITION.x * TILE_SIZE + TILE_SIZE / 2;
     const goalTileY = GOAL_POSITION.y * TILE_SIZE + TILE_SIZE / 2;
     const goalOriginX = goalTileX - (GOAL_FLAG_CANVAS / 2) * GOAL_FLAG_SCALE; // 원본 캔버스 (0,0)의 화면 위치
@@ -335,43 +383,6 @@ class MazeScene extends Phaser.Scene {
 
     this.goalRect = this.add.container(0, 0, [poleImg, this.goalClothMesh]);
     this.goalRect.setDepth(6);
-
-    // 아이템 마커 배치 (별 모양 — 함정 마커는 박스 모양이라 헷갈리지 않게 구분)
-    for (const item of this.remainingItems) {
-      const marker = this.add.star(
-        item.x * TILE_SIZE + TILE_SIZE / 2,
-        item.y * TILE_SIZE + TILE_SIZE / 2,
-        5,
-        TILE_SIZE * 0.12,
-        TILE_SIZE * 0.24,
-        ITEM_COLORS[item.type]
-      );
-      marker.setDepth(6);
-      this.itemRects[item.y]![item.x] = marker;
-    }
-
-    // 캐릭터를 맵 시작 칸(SPAWN_POSITION)에 배치.
-    // 일단 노란 사각형으로 표현 (나중에 실제 캐릭터 이미지로 교체 예정)
-    this.playerGridX = SPAWN_POSITION.x;
-    this.playerGridY = SPAWN_POSITION.y;
-    this.playerRect = this.add.rectangle(
-      this.playerGridX * TILE_SIZE + TILE_SIZE / 2,
-      this.playerGridY * TILE_SIZE + TILE_SIZE / 2,
-      PATH_WIDTH * 0.7,
-      PATH_WIDTH * 0.7,
-      0xffd400
-    );
-    this.playerRect.setDepth(10); // depth(그리기 순서)를 높여서 타일 위에 캐릭터가 보이게 함
-
-    // 키보드의 방향키 입력을 받을 수 있도록 설정.
-    // 이후 update()에서 this.cursors.left/right/up/down 으로 눌림 여부를 확인할 수 있음.
-    this.cursors = this.input.keyboard!.createCursorKeys();
-
-    // 게임 시작하자마자 시작 지점 기준으로 시야(안개)부터 계산해서 보여줌
-    this.updateFog();
-
-    // 서버에 위치 앵커를 초기화하고 내가 설치한 함정 목록을 받아온다 (fire-and-forget).
-    void this.loadServerState();
   }
 
   // map.getState를 호출해 서버 쪽 위치 앵커를 시작 지점으로 초기화하고, 내가 설치한
@@ -386,6 +397,8 @@ class MazeScene extends Phaser.Scene {
       // 정적 빌드만 단독으로 띄우는 로컬 프리뷰(백엔드 없음)에서도 마커를 눈으로 확인할 수
       // 있도록 하는 개발용 폴백. 실제 서버(devvit playtest/배포 환경)가 응답하면 위 try에서
       // 이미 성공해 여기까지 오지 않는다.
+      // ⚠️ 아래 좌표들도 TEMP_ITEMS와 마찬가지로 MAIN_MAP(map-1)의 바닥 칸이어야 하며
+      // 코드로 검증하지 않는다 — 맵이 바뀌면 같이 확인할 것.
       console.error('map.getState 실패 — 로컬 프리뷰용 임시 데이터로 대체', err);
       this.myTraps = [
         { x: 5, y: 7, type: 'slow' },
@@ -450,29 +463,31 @@ class MazeScene extends Phaser.Scene {
   }
 
   // 천 메쉬의 정점 x좌표를 매 프레임 사인파로 흔들어 파동이 깃대에서 끝자락으로 흐르는
-  // 것처럼 보이게 한다. "간격"에 파동을 곱하는 방식이라 항상 양수라 정점 순서가 절대
-  // 꼬이지 않고(뒤집히거나 자기 자신을 통과하지 않음), 마지막에 양 끝(0, goalClothWidth)을
-  // 원래 폭으로 재조정(rescale)하므로 깃대 부착점과 천 전체 길이가 파동 중에도 절대
-  // 드리프트하지 않는다(예전에 겪었던 "깃발 위치가 틀어져 보인다" 버그 재발 방지).
+  // 것처럼 보이게 한다. 실제 수식(순증가 보장, 양 끝 고정)은 goalFlagWave.ts의
+  // computeClothWaveX로 분리해뒀다(Phaser 없이도 단위 테스트 가능하도록).
   private updateGoalFlagWave(delta: number) {
     this.goalClothElapsed += delta / 1000;
-    const t = this.goalClothElapsed;
-    const cols = GOAL_FLAG_WAVE_COLS;
-    const baseSpacing = this.goalClothWidth / cols;
 
-    const rawX: number[] = [0];
-    for (let col = 1; col <= cols; col++) {
-      const phase = (col / cols) * Math.PI * 2 * GOAL_FLAG_WAVE_CYCLES - t * GOAL_FLAG_WAVE_SPEED;
-      const factor = 1 + GOAL_FLAG_WAVE_AMPLITUDE * Math.sin(phase);
-      rawX.push(rawX[col - 1]! + baseSpacing * factor);
-    }
-    const rescale = this.goalClothWidth / rawX[cols]!;
+    // 파동은 경과 시간(t)에 대해 주기적이다(주기 = 2π/SPEED, phase에 t*SPEED가 선형으로
+    // 들어가고 sin의 주기가 2π이므로). 매 프레임 이 주기로 감아두면(wrap) 시각적으로는
+    // 완전히 이어지면서도(주기 경계에서 sin 값이 정확히 같음) t가 무한정 커지며 부동소수점
+    // 정밀도가 떨어지는 일(아주 오래 켜둔 세션에서)을 막을 수 있다.
+    const wavePeriod = (2 * Math.PI) / GOAL_FLAG_WAVE_SPEED;
+    this.goalClothElapsed %= wavePeriod;
+
+    const xs = computeClothWaveX(
+      GOAL_FLAG_WAVE_COLS,
+      GOAL_FLAG_WAVE_CYCLES,
+      GOAL_FLAG_WAVE_AMPLITUDE,
+      GOAL_FLAG_WAVE_SPEED,
+      this.goalClothElapsed,
+      this.goalClothWidth
+    );
 
     const vertices = this.goalClothMesh.vertices;
-    for (let col = 0; col <= cols; col++) {
-      const x = rawX[col]! * rescale;
-      vertices[col * 8 + 0] = x; // 윗줄 정점의 x
-      vertices[col * 8 + 4] = x; // 아랫줄 정점의 x
+    for (let col = 0; col <= GOAL_FLAG_WAVE_COLS; col++) {
+      vertices[col * 8 + 0] = xs[col]!; // 윗줄 정점의 x
+      vertices[col * 8 + 4] = xs[col]!; // 아랫줄 정점의 x
     }
   }
 
