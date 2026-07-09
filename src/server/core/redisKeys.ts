@@ -23,9 +23,14 @@ export const trapBoardKey = (mapId: string, date: string): string => `trap:${map
 export const trapInstallerKey = (mapId: string, date: string, userId: string): string =>
   `trap:installer:${mapId}:${date}:${userId}`;
 
-export const itemBoardKey = (mapId: string, date: string): string => `item:${mapId}:${date}`;
+// 유저별 독립 보드 — 고정 스폰 좌표가 소수(현재 맵당 2곳)라 전역 공유로 두면 가장 먼저
+// 도착한 유저가 그날 하루 치를 전부 가져가 버려 후속 유저는 리셋 전까지 아이템을 볼 수 없다.
+// 함정(trapBoardKey)처럼 전원 공유가 아니라, 유저마다 자기만의 픽업 상태를 갖게 한다.
+export const itemBoardKey = (mapId: string, date: string, userId: string): string =>
+  `item:${mapId}:${date}:${userId}`;
 
-export const itemSeededKey = (mapId: string, date: string): string => `item:seeded:${mapId}:${date}`;
+export const itemSeededKey = (mapId: string, date: string, userId: string): string =>
+  `item:seeded:${mapId}:${date}:${userId}`;
 
 export const leaderboardKey = (mapId: string, date: string): string => `leaderboard:${mapId}:${date}`;
 
