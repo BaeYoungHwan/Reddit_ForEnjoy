@@ -58,6 +58,28 @@ const SPAWN_POSITION = { x: 1, y: 1 };
 // 골인 지점. 테스트용으로 시작점에서 먼 반대쪽 구석에 둠.
 const GOAL_POSITION = { x: 13, y: 13 };
 
+// items.md 기준 아이템 4종 중 지금 구현하는 2종만 우선. 나머지(함정 탐지기/함정 설치)는
+// 각각 신규 서버 API·함정 설치 UI가 먼저 있어야 해서 이번엔 제외(docs/wbs.md 26행 참고).
+type ItemType = 'flashlight' | 'shield';
+
+const ITEM_COLORS: Record<ItemType, number> = {
+  flashlight: 0xfff59d, // 옅은 노랑
+  shield: 0x33ffee, // 청록
+};
+
+// items.md: 손전등은 시야 반경 2→4칸, 8초. 원래는 "주웠다가 원할 때 쓰는" 아이템이지만
+// 인벤토리/사용 버튼 UI가 아직 없어서, 이번엔 임시로 줍는 즉시 자동 발동시킨다
+// (2026-07-09 임소리 확인 — UI 나오면 "보유 후 수동 발동"으로 바꿀 것).
+const FLASHLIGHT_VISION_RADIUS = 4;
+const FLASHLIGHT_DURATION_MS = 8000;
+
+// ── 임시 테스트용 아이템 스폰 좌표 ──────────────────────────
+// 함정처럼 실제 맵/랜덤 스폰 로직이 아직 없어서 손으로 두 지점만 박아둠.
+const TEMP_ITEMS: { x: number; y: number; type: ItemType }[] = [
+  { x: 5, y: 2, type: 'flashlight' },
+  { x: 9, y: 9, type: 'shield' },
+];
+
 // 타일 하나가 지금 어떤 상태인지 3가지로 구분합니다.
 // hidden   → 한 번도 안 가본 곳 (완전히 안 보임)
 // explored → 예전에 가봤지만 지금은 시야 밖 (안개는 안 덮이지만 어둡게 표시 — "지나간 길" 기억)
@@ -114,6 +136,15 @@ class MazeScene extends Phaser.Scene {
   //  INVALID_MOVE로 오판정될 수 있다 — 이를 막기 위한 요청 직렬화.)
   private trapDispatcher = new SequentialDispatcher<TrapTriggerOutput>();
 
+  // 아이템 마커 도형. 함정 마커(trapRects)와 동일하게 안개 상태에 맞춰 밝기 조정됨.
+  private itemRects: (Phaser.GameObjects.Star | undefined)[][] = [];
+
+  // 아직 안 주운 아이템 목록. 주우면 여기서 제거됨(TEMP_ITEMS는 원본 그대로 유지).
+  private remainingItems: { x: number; y: number; type: ItemType }[] = [...TEMP_ITEMS];
+
+  // 쉴드 보유 여부. true면 다음 함정 발동을 무효화하고 자동으로 false가 됨(1회성 소모).
+  private hasShield = false;
+
   // 지금 적용 중인 시야 반경. 평소엔 VISION_RADIUS와 같고, 시야차단 함정에 걸리면 잠깐 줄어듦.
   private currentVisionRadius = VISION_RADIUS;
 
@@ -142,6 +173,7 @@ class MazeScene extends Phaser.Scene {
       this.tileRects[y] = [];
       this.tileStates[y] = [];
       this.trapRects[y] = [];
+      this.itemRects[y] = [];
 
       for (let x = 0; x < TEMP_MAP[y]!.length; x++) {
         const isWall = TEMP_MAP[y]![x] === 1;
@@ -170,6 +202,20 @@ class MazeScene extends Phaser.Scene {
       0x33ff66
     );
     this.goalRect.setDepth(6);
+
+    // 아이템 마커 배치 (별 모양 — 함정 마커는 원이라 헷갈리지 않게 구분)
+    for (const item of this.remainingItems) {
+      const marker = this.add.star(
+        item.x * TILE_SIZE + TILE_SIZE / 2,
+        item.y * TILE_SIZE + TILE_SIZE / 2,
+        5,
+        TILE_SIZE * 0.12,
+        TILE_SIZE * 0.24,
+        ITEM_COLORS[item.type]
+      );
+      marker.setDepth(6);
+      this.itemRects[item.y]![item.x] = marker;
+    }
 
     // 캐릭터를 맵 (1,1) 칸(SPAWN_POSITION)에 배치 (테두리는 벽이라 그 안쪽 첫 바닥 칸부터 시작).
     // 일단 노란 사각형으로 표현 (나중에 실제 캐릭터 이미지로 교체 예정)
@@ -290,6 +336,9 @@ class MazeScene extends Phaser.Scene {
 
         if (this.checkGoalReached(targetX, targetY)) return; // 골인했으면 함정 확인 없이 종료
 
+        // 아이템은 서버 연동 전이라 클라이언트에서 바로 확인(동기 처리).
+        this.checkItemPickup(targetX, targetY);
+
         // 도착한 칸에 함정이 있는지 서버에 확인. dx, dy(눌렀던 방향)를 같이 넘겨서
         // 슬라이드 함정이 "어느 방향으로 미끄러질지" 알 수 있게 함.
         void this.checkTrapTrigger(targetX, targetY, dx, dy);
@@ -320,10 +369,55 @@ class MazeScene extends Phaser.Scene {
     const result = await this.reportPosition(x, y);
     if (!result?.hit || !result.type) return;
 
+    // items.md: 쉴드는 반응형 1회 소모 — 보유 중이면 이번 함정 효과를 무효화하고 그 자리에서 소모됨.
+    // 서버 쪽 함정 자체는 trap.trigger 시점에 이미 지워졌으므로(회피와 무관하게 소모), 여기서는
+    // 클라이언트 이펙트 적용만 막으면 된다.
+    if (this.hasShield) {
+      this.hasShield = false;
+      this.flashPlayer(ITEM_COLORS.shield);
+      return;
+    }
+
     if (result.type === 'slow') this.applySlideTrap(dx, dy);
     else if (result.type === 'respawn') this.applyRespawnTrap();
     else if (result.type === 'blind') this.applyBlindTrap();
     else this.applyReverseTrap();
+  }
+
+  // 방금 도착한 칸에 아직 안 주운 아이템이 있는지 확인하고, 있으면 습득 처리한다.
+  // 함정과 달리 서버 데이터가 아직 없어서 로컬 배열만 보고 동기적으로 처리.
+  private checkItemPickup(x: number, y: number) {
+    const index = this.remainingItems.findIndex((item) => item.x === x && item.y === y);
+    if (index === -1) return;
+
+    const [item] = this.remainingItems.splice(index, 1);
+    this.itemRects[item!.y]![item!.x]?.destroy();
+    this.itemRects[item!.y]![item!.x] = undefined;
+
+    if (item!.type === 'flashlight') this.applyFlashlightItem();
+    else this.applyShieldItem();
+  }
+
+  // 손전등 — items.md: 시야 반경 2→4칸, 8초 후 원래대로 복귀.
+  // 시야차단 함정(applyBlindTrap)과 반경을 같이 조작하므로, 둘이 동시에 겹치면(예: 손전등
+  // 유지 중 시야차단 함정을 밟는 경우) 나중에 끝나는 타이머가 반경을 덮어써버리는 문제가
+  // 있다 — traps.md의 "함정 중첩 처리 미정"과 같은 종류의 미해결 사항으로 남겨둔다.
+  private applyFlashlightItem() {
+    this.flashPlayer(ITEM_COLORS.flashlight);
+    this.currentVisionRadius = FLASHLIGHT_VISION_RADIUS;
+    this.updateFog();
+
+    this.time.delayedCall(FLASHLIGHT_DURATION_MS, () => {
+      this.currentVisionRadius = VISION_RADIUS;
+      this.updateFog();
+    });
+  }
+
+  // 함정 무효화(쉴드) — items.md: 반응형. 주우면 바로 발동하는 게 아니라 보유 상태로만
+  // 바뀌고, 실제 효과는 다음 함정을 밟는 순간(checkTrapTrigger)에 소모되며 적용됨.
+  private applyShieldItem() {
+    this.hasShield = true;
+    this.flashPlayer(ITEM_COLORS.shield);
   }
 
   // 함정을 밟았을 때 캐릭터 색을 잠깐 바꿔서 "뭔가 발동했다"는 걸 보여주는 간단한 이펙트.
@@ -499,6 +593,7 @@ class MazeScene extends Phaser.Scene {
     const rect = this.tileRects[y]![x]!;
     const state = this.tileStates[y]![x]!;
     const trap = this.trapRects[y]?.[x];
+    const item = this.itemRects[y]?.[x];
 
     let alpha: number;
     if (state === 'hidden') {
@@ -511,6 +606,7 @@ class MazeScene extends Phaser.Scene {
 
     rect.setAlpha(alpha);
     trap?.setAlpha(alpha);
+    item?.setAlpha(alpha);
 
     if (x === GOAL_POSITION.x && y === GOAL_POSITION.y) {
       this.goalRect.setAlpha(alpha);
