@@ -3,7 +3,6 @@ import './index.css';
 import { context, requestExpandedMode } from '@devvit/web/client';
 import {
   StrictMode,
-  useEffect,
   useState,
   type CSSProperties,
   type MouseEvent,
@@ -22,13 +21,16 @@ const MAIN_MAP_BACKGROUND = buildMazeBackground(MAIN_MAP);
 
 const WALK_STRIDE = 2;
 const STEP_INTERVAL_SEC = 0.45;
-const WALK_CYCLE_PAUSE_SEC = 1.2;
 const WALK_ICON_SIZES = ['w-9 h-9', 'w-10 h-10'];
 
 const FULL_WALK_PATH = findPath(MAIN_MAP);
 const WALK_TILES = FULL_WALK_PATH.filter(
   (_, i) => i % WALK_STRIDE === 0 || i === FULL_WALK_PATH.length - 1
 );
+
+// 전체 발자국이 한 바퀴 도는 데 걸리는 시간 — 이 값을 모든 발자국이 animation-duration으로 공유하고,
+// 각자 delay만 다르게 줘서 순서대로 나타나는 것처럼 보이게 한다(무한 반복, JS 타이머 없이 CSS만으로 동작).
+const WALK_CYCLE_SEC = Math.max(FULL_WALK_PATH.length * (STEP_INTERVAL_SEC / WALK_STRIDE), 3);
 
 const FOOTPRINTS = WALK_TILES.map((tile, i) => {
   const next = WALK_TILES[i + 1];
@@ -42,8 +44,6 @@ const FOOTPRINTS = WALK_TILES.map((tile, i) => {
     size: WALK_ICON_SIZES[i % WALK_ICON_SIZES.length]!,
   };
 });
-
-const WALK_CYCLE_MS = (FOOTPRINTS.length * STEP_INTERVAL_SEC + WALK_CYCLE_PAUSE_SEC) * 1000;
 
 type View = 'menu' | 'leaderboard';
 
@@ -102,15 +102,15 @@ const HudButton = ({ onClick, label, icon }: { onClick: () => void; label: strin
 
 const PlayButton = ({ onClick }: { onClick: (e: MouseEvent<HTMLButtonElement>) => void }) => (
   <button
-    className="relative flex flex-col items-center justify-center gap-0.5 w-32 h-32 rounded-full bg-gradient-to-b from-[#ff7a4d] to-[#d93900] border-b-[7px] border-[#7a2400] text-white animate-glow-pulse cursor-pointer select-none transition active:translate-y-[4px] active:border-b-[2px] hover:brightness-110 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-400"
+    className="relative flex flex-col items-center justify-center gap-0.5 w-24 h-24 rounded-full bg-gradient-to-b from-[#ff7a4d] to-[#d93900] border-b-[5px] border-[#7a2400] text-white animate-glow-pulse cursor-pointer select-none transition active:translate-y-[3px] active:border-b-[2px] hover:brightness-110 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-400"
     onClick={onClick}
   >
     <span
       aria-hidden
-      className="absolute inset-x-4 top-3 h-1/4 rounded-full bg-white/25 blur-[3px] pointer-events-none"
+      className="absolute inset-x-3 top-2.5 h-1/4 rounded-full bg-white/25 blur-[3px] pointer-events-none"
     />
-    <span className="relative text-4xl drop-shadow-[1px_1px_0_rgba(0,0,0,0.25)]">▶</span>
-    <span className="relative font-display text-sm tracking-wide drop-shadow-[1px_1px_0_rgba(0,0,0,0.25)]">
+    <span className="relative text-2xl drop-shadow-[1px_1px_0_rgba(0,0,0,0.25)]">▶</span>
+    <span className="relative font-display text-xs tracking-wide drop-shadow-[1px_1px_0_rgba(0,0,0,0.25)]">
       Play
     </span>
   </button>
@@ -138,7 +138,7 @@ const FootprintIcon = ({
   </svg>
 );
 
-const MazeBackdrop = ({ cycleKey }: { cycleKey: number }) => (
+const MazeBackdrop = () => (
   <div aria-hidden className="absolute inset-0 overflow-hidden pointer-events-none">
     <div
       className="absolute inset-0 opacity-[0.22]"
@@ -150,20 +150,26 @@ const MazeBackdrop = ({ cycleKey }: { cycleKey: number }) => (
     />
     <div className="absolute inset-0 bg-gradient-to-b from-slate-950/40 via-transparent to-slate-950/80" />
     <div className="absolute left-1/2 top-1/3 -translate-x-1/2 -translate-y-1/2 w-80 h-80 rounded-full bg-orange-600/25 blur-3xl" />
-    <div key={cycleKey}>
-      {FOOTPRINTS.map((step, i) => (
-        <span
-          key={i}
-          className="absolute -translate-x-1/2 -translate-y-1/2"
-          style={{ left: step.left, top: step.top }}
-        >
-          <FootprintIcon
-            className={`${step.size} text-orange-300 animate-step-in`}
-            style={{ animationDelay: step.delay, '--step-rotate': step.rotate }}
-          />
-        </span>
-      ))}
-    </div>
+    {FOOTPRINTS.map((step, i) => (
+      <span
+        key={i}
+        className="absolute -translate-x-1/2 -translate-y-1/2"
+        style={{ left: step.left, top: step.top }}
+      >
+        <FootprintIcon
+          className={`${step.size} text-orange-300`}
+          style={{
+            animationName: 'step-in',
+            animationDuration: `${WALK_CYCLE_SEC}s`,
+            animationTimingFunction: 'ease-in-out',
+            animationIterationCount: 'infinite',
+            animationDelay: step.delay,
+            animationFillMode: 'backwards',
+            '--step-rotate': step.rotate,
+          }}
+        />
+      </span>
+    ))}
     <div
       className="absolute inset-0 opacity-[0.05]"
       style={{ backgroundImage: 'repeating-linear-gradient(0deg, #fff 0, #fff 1px, transparent 1px, transparent 3px)' }}
@@ -297,16 +303,10 @@ const Leaderboard = ({ onBack }: { onBack: () => void }) => {
 
 export const Splash = () => {
   const [view, setView] = useState<View>('menu');
-  const [walkCycle, setWalkCycle] = useState(0);
-
-  useEffect(() => {
-    const id = setInterval(() => setWalkCycle((cycle) => cycle + 1), WALK_CYCLE_MS);
-    return () => clearInterval(id);
-  }, []);
 
   return (
     <div className="relative flex flex-col justify-center items-center min-h-screen bg-slate-950 text-white px-4 overflow-hidden">
-      <MazeBackdrop cycleKey={walkCycle} />
+      <MazeBackdrop />
       <div className="relative z-10 w-full max-w-sm">
         <RivetPanel>
           {view === 'menu' ? (
