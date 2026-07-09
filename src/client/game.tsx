@@ -4,6 +4,7 @@ import Phaser from 'phaser';
 import { StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { getMazeMap } from '../shared/maps';
+import { buildMazeSvgDataUri } from './mazePattern';
 import { trpc } from './trpcClient';
 import type { TrapInstance, TrapType } from '../shared/game-types';
 
@@ -29,6 +30,18 @@ const PATH_BASE_COLOR = 0x6b6b6b;
 const PATH_SHADOW_COLOR = 0x141414;
 const PATH_HIGHLIGHT_COLOR = 0xc4c4c4;
 const BEVEL_THICKNESS = 9;
+
+// 벽 영역을 단색 도형이 아니라 splash.tsx 배경과 같은 방식(각진 석벽 블록 + 모르타르 줄눈 +
+// 모서리 하이라이트)의 SVG 텍스처로 채운다 — "Phaser 단색 사각형" 느낌에서 벗어나기 위함.
+// 안개(탐험 여부)와 무관하게 항상 보이는 정적 배경으로 깐다 — splash.tsx의 배경 미로도 안개
+// 없이 항상 노출되는 장식이라 같은 취급.
+const WALL_TEXTURE_KEY = 'maze-wall-texture';
+const WALL_TEXTURE_URI = buildMazeSvgDataUri(MAIN_MAP, {
+  cellSize: TILE_SIZE,
+  wallFill: '#2b1d13',
+  mortarStroke: '#000000',
+  highlightStroke: '#5a4030',
+});
 
 // vision-system.md 스펙: 기본 시야 반경 2칸.
 // 나중에 손전등(4칸)/시야차단 함정(0.5~1칸)을 만들 때 이 값을 상황에 맞게 바꿔주면 됨.
@@ -129,14 +142,22 @@ class MazeScene extends Phaser.Scene {
   }
 
   // preload(): 게임 시작 전에 이미지 등 리소스를 미리 불러오는 함수.
-  // 지금은 이미지 없이 색깔 사각형만 쓰기 때문에 비워둡니다.
-  preload() {}
+  // 벽 석벽 텍스처(SVG data URI)를 로드해둔다 — create()에서 배경으로 깐다.
+  preload() {
+    this.load.image(WALL_TEXTURE_KEY, WALL_TEXTURE_URI);
+  }
 
   // create(): 게임이 시작될 때 딱 한 번만 실행됨. 여기서 맵과 캐릭터를 화면에 배치합니다.
   create() {
+    // 벽 텍스처를 가장 먼저(맨 아래) 깐다. 통로(바닥) 도형들은 이 위에 그려진다.
+    // splash.tsx의 배경 미로와 마찬가지로 안개와 무관하게 항상 노출되는 정적 배경 — 맵의
+    // "모양" 자체는 첫 화면부터 보여도 되고(고정 맵이라 다시 플레이해도 같음), 안개는
+    // 발자국/함정처럼 "그 순간에 알면 안 되는 정보"에만 적용하면 된다는 판단.
+    this.add.image(0, 0, WALL_TEXTURE_KEY).setOrigin(0, 0).setDepth(-1);
+
     // 맵 크기만큼 타일 상태/도형 배열을 준비하고, 바닥 칸 중앙에 좁은 통로 사각형만 그림
-    // (벽 칸, 그리고 통로 사각형 바깥의 나머지 칸 공간은 그리지 않고 검은 배경 그대로 남겨둠
-    // — 안개로 덮인 곳과 벽이 시각적으로 자연스럽게 이어지도록 함).
+    // (벽 칸, 그리고 통로 사각형 바깥의 나머지 칸 공간은 그리지 않고 위에 깔린 석벽
+    // 텍스처가 그대로 보이도록 남겨둠).
     for (let y = 0; y < MAP_HEIGHT; y++) {
       this.tileRects[y] = [];
       this.tileStates[y] = [];
