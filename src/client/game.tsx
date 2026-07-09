@@ -135,13 +135,14 @@ class MazeScene extends Phaser.Scene {
 
         if (MAIN_MAP.grid[y]![x] === 'wall') continue; // 벽 칸은 도형을 만들지 않고 건너뜀
 
-        // this.add.rectangle(중심x, 중심y, 너비, 높이, 색상) → 통로(바닥) 사각형 하나를 화면에 그려줌
-        // TILE_SIZE - 2로 살짝 여백을 둬서 타일 사이에 격자 선처럼 보이게 함
+        // this.add.rectangle(중심x, 중심y, 너비, 높이, 색상) → 통로(바닥) 사각형 하나를 화면에 그려줌.
+        // 칸 사이에 여백을 두지 않고 TILE_SIZE 그대로 채워서, 이웃한 바닥 칸끼리 이음매 없이
+        // 하나로 이어진 통로처럼 보이게 함(여백을 두면 사각 타일이 나열된 격자처럼 보임).
         const rect = this.add.rectangle(
           x * TILE_SIZE + TILE_SIZE / 2,
           y * TILE_SIZE + TILE_SIZE / 2,
-          TILE_SIZE - 2,
-          TILE_SIZE - 2,
+          TILE_SIZE,
+          TILE_SIZE,
           0x555555 // 통로 색(진짜 아트 나오기 전 임시 색)
         );
         this.tileRects[y]![x] = rect;
