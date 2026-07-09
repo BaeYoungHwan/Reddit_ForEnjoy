@@ -62,9 +62,19 @@ const GOAL_POSITION = { x: 13, y: 13 };
 // 각각 신규 서버 API·함정 설치 UI가 먼저 있어야 해서 이번엔 제외(docs/wbs.md 26행 참고).
 type ItemType = 'flashlight' | 'shield';
 
+// 아이템 좌표+종류. TrapInstance(shared/game-types.ts)와 같은 형태지만, 아이템은
+// 아직 서버 연동 전(클라이언트 로컬 전용)이라 공유 타입이 아니라 여기 로컬로 둔다.
+type ItemInstance = { x: number; y: number; type: ItemType };
+
 const ITEM_COLORS: Record<ItemType, number> = {
   flashlight: 0xfff59d, // 옅은 노랑
   shield: 0x33ffee, // 청록
+};
+
+// 픽업 라벨(말풍선 텍스트)에 쓸 한글 이름.
+const ITEM_LABELS: Record<ItemType, string> = {
+  flashlight: '손전등',
+  shield: '쉴드',
 };
 
 // items.md: 손전등은 시야 반경 2→4칸, 8초. 원래는 "주웠다가 원할 때 쓰는" 아이템이지만
@@ -75,7 +85,7 @@ const FLASHLIGHT_DURATION_MS = 8000;
 
 // ── 임시 테스트용 아이템 스폰 좌표 ──────────────────────────
 // 함정처럼 실제 맵/랜덤 스폰 로직이 아직 없어서 손으로 두 지점만 박아둠.
-const TEMP_ITEMS: { x: number; y: number; type: ItemType }[] = [
+const TEMP_ITEMS: ItemInstance[] = [
   { x: 5, y: 2, type: 'flashlight' },
   { x: 9, y: 9, type: 'shield' },
 ];
@@ -140,7 +150,7 @@ class MazeScene extends Phaser.Scene {
   private itemRects: (Phaser.GameObjects.Star | undefined)[][] = [];
 
   // 아직 안 주운 아이템 목록. 주우면 여기서 제거됨(TEMP_ITEMS는 원본 그대로 유지).
-  private remainingItems: { x: number; y: number; type: ItemType }[] = [...TEMP_ITEMS];
+  private remainingItems: ItemInstance[] = [...TEMP_ITEMS];
 
   // 쉴드 보유 여부. true면 다음 함정 발동을 무효화하고 자동으로 false가 됨(1회성 소모).
   private hasShield = false;
@@ -374,7 +384,7 @@ class MazeScene extends Phaser.Scene {
     // 클라이언트 이펙트 적용만 막으면 된다.
     if (this.hasShield) {
       this.hasShield = false;
-      this.flashPlayer(ITEM_COLORS.shield);
+      this.showShieldBlockEffect();
       return;
     }
 
@@ -394,14 +404,55 @@ class MazeScene extends Phaser.Scene {
     this.itemRects[item!.y]![item!.x]?.destroy();
     this.itemRects[item!.y]![item!.x] = undefined;
 
+    this.showPickupLabel(item!.type);
     if (item!.type === 'flashlight') this.applyFlashlightItem();
     else this.applyShieldItem();
   }
 
+  // 아이템을 주웠을 때 캐릭터 머리 위에 "무엇을 주웠는지" 말풍선처럼 잠깐 띄우는 텍스트.
+  // 위로 떠오르면서 사라지는 트윈 하나로 구현(골인 텍스트처럼 this.add.text 재사용).
+  private showPickupLabel(type: ItemType) {
+    const label = this.add
+      .text(this.playerRect.x, this.playerRect.y - TILE_SIZE * 0.6, `${ITEM_LABELS[type]} 획득!`, {
+        fontSize: '16px',
+        color: '#ffffff',
+        backgroundColor: '#00000099',
+        padding: { x: 6, y: 3 },
+      })
+      .setOrigin(0.5)
+      .setDepth(20);
+
+    this.tweens.add({
+      targets: label,
+      y: label.y - TILE_SIZE * 0.5,
+      alpha: 0,
+      duration: 900,
+      onComplete: () => label.destroy(),
+    });
+  }
+
+  // 쉴드가 함정을 막아줬을 때 캐릭터를 감싸는 원형 이펙트 — 하얀 테두리 + 옅은 하늘색
+  // 원이 커지면서 투명해지는 트윈으로 "보호막이 퍼졌다 사라지는" 느낌을 냄.
+  private showShieldBlockEffect() {
+    const ring = this.add.circle(this.playerRect.x, this.playerRect.y, TILE_SIZE * 0.35, 0xbfffff, 0.5);
+    ring.setStrokeStyle(3, 0xffffff, 0.9);
+    ring.setDepth(15);
+
+    this.tweens.add({
+      targets: ring,
+      scale: 2,
+      alpha: 0,
+      duration: 500,
+      onComplete: () => ring.destroy(),
+    });
+  }
+
   // 손전등 — items.md: 시야 반경 2→4칸, 8초 후 원래대로 복귀.
-  // 시야차단 함정(applyBlindTrap)과 반경을 같이 조작하므로, 둘이 동시에 겹치면(예: 손전등
-  // 유지 중 시야차단 함정을 밟는 경우) 나중에 끝나는 타이머가 반경을 덮어써버리는 문제가
-  // 있다 — traps.md의 "함정 중첩 처리 미정"과 같은 종류의 미해결 사항으로 남겨둔다.
+  // 시야차단 함정(applyBlindTrap)과 반경을 같이 조작한다. 둘이 겹치면(예: 손전등 유지 중
+  // 시야차단 함정을 밟는 경우) 시야차단 함정 쪽이 즉시 우선 적용되도록 함 — 손전등 덕분에
+  // 함정 페널티가 무력화되면 안 되므로 이게 의도한 동작(2026-07-09 임소리 확인). 다만 시야차단
+  // 효과가 끝난 뒤 손전등의 남은 지속시간이 복원되지 않고 기본값으로 돌아가는 것도 지금은
+  // 의도한 단순화 — 팀 플레이테스트 피드백 있으면 재검토.
   private applyFlashlightItem() {
     this.flashPlayer(ITEM_COLORS.flashlight);
     this.currentVisionRadius = FLASHLIGHT_VISION_RADIUS;
