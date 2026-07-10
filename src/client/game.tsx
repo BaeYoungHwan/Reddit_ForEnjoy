@@ -641,6 +641,9 @@ class MazeScene extends Phaser.Scene {
         // 엉뚱한 위치(리스폰 목적지도 원래 위치도 아닌 중간 지점)에 멈춰 있다가 다음 키
         // 입력에야 제자리로 튀는 버그가 있었음. isMoving 해제는 checkTrapTrigger 쪽에서
         // 판정이 다 끝난 뒤에 하도록 옮김(슬라이드 함정은 자기가 다시 잠그고 스스로 풂).
+        // 발자국 기록은 골인 여부와 무관하게 항상 남긴다.
+        void this.recordFootprint(targetX, targetY);
+
         if (this.checkGoalReached(targetX, targetY)) return; // 골인했으면 함정 확인 없이 종료
 
         // 아이템은 item.pickup 서버 호출로 확인(비동기) — 함정 확인과 독립적으로 진행.
@@ -727,6 +730,18 @@ class MazeScene extends Phaser.Scene {
       console.error('item.pickup 실패 — 로컬 아이템 목록으로 직접 판정', err);
       const localItem = this.remainingItems.find((item) => item.x === x && item.y === y);
       return localItem ? { picked: true, type: localItem.type } : { picked: false };
+    }
+  }
+
+  // 지나온 칸을 서버에 기록한다(map.getState가 다음 세션에 반환하는 공유 발자국 목록에
+  // 반영되어 다른 유저에게도 보임). 실패해도 현재 게임 진행과는 무관한 부가 기능이라
+  // trap/item처럼 로컬 폴백을 두지 않고 로그만 남긴다. isMoving을 막지 않는 fire-and-forget
+  // 호출이라 이동 체감 속도(네트워크 지연 문제)에 영향을 주지 않는다.
+  private async recordFootprint(x: number, y: number) {
+    try {
+      await trpc.footprint.record.mutate({ mapId: MAP_ID, tiles: [{ x, y }] });
+    } catch (err) {
+      console.error('footprint.record 실패', err);
     }
   }
 
@@ -907,6 +922,9 @@ class MazeScene extends Phaser.Scene {
       y: targetY * TILE_SIZE + TILE_SIZE / 2,
       duration: SLIDE_STEP_DURATION,
       onComplete: () => {
+        // 슬라이드로 지나가는 칸도 일반 이동과 동일하게 발자국을 남긴다.
+        void this.recordFootprint(targetX, targetY);
+
         // 미끄러지는 도중에 골인 지점에 닿으면 거기서 바로 멈춤 (계속 미끄러지지 않음)
         if (this.checkGoalReached(targetX, targetY)) return;
         this.slideStep(dx, dy); // 같은 방향으로 다음 칸 미끄러짐 시도 (벽이면 위에서 멈춤)
