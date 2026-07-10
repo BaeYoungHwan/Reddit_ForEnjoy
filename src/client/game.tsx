@@ -258,12 +258,19 @@ const DETECTOR_REVEAL_DISPLAY_MS = 5000;
 const FLASHLIGHT_VISION_RADIUS = 4;
 const FLASHLIGHT_DURATION_MS = 8000;
 
-// ── 효과음(public/sounds/*.mp3, 원호가 직접 소싱) ──────────────────
+// ── 효과음(public/sounds/*, 원호가 직접 소싱) ──────────────────
 // 배경음(BGM)과 로드아웃 화면의 아이템 선택/확정음은 이번 스코프에서 제외 — 그 두 가지만 빼고
 // 게임 화면(Phaser)에서 나는 모든 효과음을 여기서 로드/재생한다. 로드아웃 화면 자체(splash.tsx)의
 // 공용 버튼 클릭음은 Phaser가 아니라 별도로 처리(splash.tsx의 playUiClickSound 참고).
+//
+// footstep1~3: 원본 footstep.mp3 한 파일 안에 서로 다른 발걸음 소리 3개가 이어붙어 있었음
+// (무음 구간 분석으로 확인, analyze-footstep.mjs 스크립트로 RMS 엔벌로프 찍어서 경계 확인 후
+// split-footstep.mjs로 무음 구간 한가운데를 기준 분할 — wav로 저장, 원본 mp3는 삭제) → 한 걸음마다
+// 파일 전체(3개 소리 전부)가 재생되던 문제를 고쳐서, playFootstep()이 3개를 순서대로 하나씩만 재생.
 const SFX_PATHS = {
-  footstep: '/sounds/footstep.mp3',
+  footstep1: '/sounds/footstep-1.wav',
+  footstep2: '/sounds/footstep-2.wav',
+  footstep3: '/sounds/footstep-3.wav',
   itemPickup: '/sounds/item-pickup.mp3',
   shieldBlock: '/sounds/shield-block.mp3',
   detectorScan: '/sounds/trap-detector-scan.mp3',
@@ -371,6 +378,12 @@ class MazeScene extends Phaser.Scene {
   //  INVALID_MOVE로 오판정될 수 있다 — 이를 막기 위한 요청 직렬화.)
   private trapDispatcher = new SequentialDispatcher<TrapTriggerOutput>();
 
+  // 지금 재생 중인 발걸음 소리 인스턴스 — 다음 발걸음이나 다른 효과음(아이템 획득 등)이 날 때
+  // 아직 안 끝났으면 끊어서 겹쳐 들리지 않게 한다(playFootstep/playSfx 참고). 걸음 소리 3종을
+  // 순서대로 하나씩 재생하기 위한 인덱스도 같이 관리.
+  private footstepSound: Phaser.Sound.BaseSound | null = null;
+  private footstepIndex = 0;
+
   // 아이템 마커 도형(별 모양 — 함정 마커는 박스 모양이라 헷갈리지 않게 구분). 함정 마커와
   // 동일하게 안개 상태에 맞춰 밝기 조정됨.
   private itemRects: (Phaser.GameObjects.Star | undefined)[][] = [];
@@ -455,9 +468,30 @@ class MazeScene extends Phaser.Scene {
 
   // 효과음 재생 공용 헬퍼 — 파일 하나가 로드 실패해도(예: 아직 못 구한 사운드) 게임 전체가
   // 멈추면 안 되므로 try/catch로 감싼다.
+  //
+  // 발걸음 소리(길이 0.3~0.5초)가 한 칸 이동 시간(BASE_MOVE_DURATION=150ms)보다 훨씬 길어서,
+  // 도착 직후 아이템 획득/함정 발동 효과음이 겹쳐 재생되면 두 소리가 뒤섞여 들리는 문제가
+  // 있었다 — 다른 효과음이 날 때는 항상 먼저 남아있는 발걸음 소리를 끊는다.
   private playSfx(key: SfxKey) {
     try {
+      this.footstepSound?.stop();
       this.sound.play(key, { volume: 0.6 });
+    } catch (err) {
+      console.error(`효과음 재생 실패: ${key}`, err);
+    }
+  }
+
+  // 발걸음 전용 재생 — footstep1~3을 한 칸 이동마다 순서대로 하나씩만 재생한다(원래 세 소리가
+  // 한 파일에 이어붙어 있어서 매번 전부 재생되던 문제 수정). 이전 발걸음이 아직 울리는 중에
+  // 새 걸음을 내디디면(연속 이동 시 흔함) 겹쳐 들리지 않게 먼저 끊는다.
+  private playFootstep() {
+    const keys: SfxKey[] = ['footstep1', 'footstep2', 'footstep3'];
+    const key = keys[this.footstepIndex % keys.length]!;
+    this.footstepIndex++;
+    try {
+      this.footstepSound?.stop();
+      this.footstepSound = this.sound.add(key);
+      this.footstepSound.play({ volume: 0.6 });
     } catch (err) {
       console.error(`효과음 재생 실패: ${key}`, err);
     }
@@ -845,7 +879,7 @@ class MazeScene extends Phaser.Scene {
     this.playerGridX = targetX;
     this.playerGridY = targetY;
     this.animatePlayerStep(dx);
-    this.playSfx('footstep');
+    this.playFootstep();
 
     // tween(트윈) = 값을 순간이동이 아니라 "서서히" 바꿔주는 Phaser 기능.
     // 여기서는 캐릭터의 실제 화면 좌표(x, y)를 목표 지점까지 BASE_MOVE_DURATION(ms) 동안 부드럽게 이동시킴.
