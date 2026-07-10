@@ -17,3 +17,6 @@ export const POSITION_ANCHOR_TTL_SECONDS = 2 * 60 * 60;
 
 /** 근거: async-delivery.md 2절 — 리셋 기준은 날짜가 포함된 키 이름, TTL은 메모리 정리용 안전장치(3일) */
 export const DATA_SAFETY_TTL_SECONDS = 3 * 24 * 60 * 60;
+
+/** 근거: docs/design-docs/items.md 함정 탐지기 초안 수치("반경 3칸"). ⚠️ 플레이테스트로 조정 예정인 가정치 */
+export const DETECTOR_REVEAL_RADIUS = 3;

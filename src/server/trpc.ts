@@ -16,6 +16,7 @@ import {
 } from './core/redisKeys';
 import {
   DATA_SAFETY_TTL_SECONDS,
+  DETECTOR_REVEAL_RADIUS,
   FOOTPRINT_CAP_PER_MAP,
   PER_TYPE_TRAP_CAP,
   POSITION_ANCHOR_TTL_SECONDS,
@@ -75,6 +76,22 @@ async function advancePosition(posKey: string, x: number, y: number): Promise<vo
 
   await redis.set(posKey, tileMember({ x, y }));
   await redis.expire(posKey, POSITION_ANCHOR_TTL_SECONDS);
+}
+
+// 함정 탐지기 효과: 반경 내 함정을 별도 "스캔" API로 자유 조회하게 하면 trap.trigger의
+// 오라클 방지 설계(advancePosition — 인접 타일만 허용)가 무의미해진다. 대신 이 조회를
+// item.pickup 호출(이미 advancePosition으로 위치가 검증된 이벤트) 결과에 얹어서, 실제로
+// 탐지기 아이템이 있는 타일까지 걸어가 주웠을 때만 1회성으로 발동되게 한다.
+async function revealNearbyTraps(
+  mapId: string,
+  date: string,
+  center: { x: number; y: number }
+): Promise<TrapInstance[]> {
+  const boardKey = trapBoardKey(mapId, date);
+  const allTraps = await redis.hGetAll(boardKey);
+  return Object.entries(allTraps)
+    .map(([field, raw]) => ({ ...parseTile(field), type: (JSON.parse(raw) as { type: TrapType }).type }))
+    .filter((trap) => manhattanDistance(trap, center) <= DETECTOR_REVEAL_RADIUS);
 }
 
 // 해당 맵/날짜/유저의 아이템 보드를 하루 최초 1회만 고정 스폰 좌표로 채운다.
@@ -259,7 +276,13 @@ export const appRouter = t.router({
           return { picked: false as const };
         }
 
-        return { picked: true as const, type: raw as ItemType };
+        const type = raw as ItemType;
+        if (type === 'detector') {
+          const revealedTraps = await revealNearbyTraps(mapId, date, { x, y });
+          return { picked: true as const, type, revealedTraps };
+        }
+
+        return { picked: true as const, type };
       }),
   }),
 
