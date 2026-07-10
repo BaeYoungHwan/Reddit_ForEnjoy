@@ -196,9 +196,11 @@ const INSTALL_FAILURE_MESSAGES: Record<InstallFailureReason, string> = {
   RETRY: 'Placement failed, please try again',
 };
 
-// items.md 기준 아이템 4종 중 지금 구현하는 3종. 나머지(함정 탐지기)는 타 유저 함정을
-// 반경 내 공개하는 신규 서버 API가 먼저 있어야 해서 이번엔 제외(docs/wbs.md 참고).
-type ItemType = 'flashlight' | 'shield' | 'trapInstall';
+// items.md 기준 아이템 4종 중 서버 연동된 3종(손전등/쉴드/함정 탐지기) + 클라이언트 전용
+// 'trapInstall'(서버 스폰 데이터가 아직 없어 로컬 폴백 경로로만 테스트 가능 — docs/wbs.md
+// 전체 블로커 참고). 2026-07-10: PR #34로 함정 탐지기 서버 API(item.pickup의 revealedTraps)가
+// 추가돼 'detector'를 여기 포함시킴 — applyDetectorItem 참고.
+type ItemType = 'flashlight' | 'shield' | 'trapInstall' | 'detector';
 
 // 아이템 좌표+종류. shared/game-types.ts에도 같은 이름/형태의 타입이 있지만(item.pickup
 // 응답 등에 쓰임), 여기선 구조적으로 호환되는 로컬 타입을 그대로 쓴다(2026-07-09: 아이템
@@ -209,6 +211,7 @@ const ITEM_COLORS: Record<ItemType, number> = {
   flashlight: 0xfff59d, // 옅은 노랑
   shield: 0x33ffee, // 청록
   trapInstall: 0xff3355, // 빨강
+  detector: 0x34d399, // 에메랄드 — splash.tsx 로드아웃 화면의 Trap Detector 아이콘 색과 통일
 };
 
 // 픽업 라벨(말풍선 텍스트)에 쓸 이름 — splash.tsx 로드아웃 화면과 언어를 맞추기 위해 영문으로 통일.
@@ -216,7 +219,13 @@ const ITEM_LABELS: Record<ItemType, string> = {
   flashlight: 'Flashlight',
   shield: 'Shield',
   trapInstall: 'Trap Kit',
+  detector: 'Trap Detector',
 };
+
+// items.md 초안: 반경 3칸 내 함정을 5초간 표시(수치는 ⚠️ 가정치, 플레이테스트로 확정 예정).
+// 반경(DETECTOR_REVEAL_RADIUS=3)은 서버가 이미 적용해서 revealedTraps로 필터링해 보내주므로
+// 클라이언트는 "얼마나 오래 화면에 보여줄지"만 관리하면 된다.
+const DETECTOR_REVEAL_DISPLAY_MS = 5000;
 
 // items.md: 손전등은 시야 반경 2→4칸, 8초. 원래는 "주웠다가 원할 때 쓰는" 아이템이지만
 // 인벤토리/사용 버튼 UI가 아직 없어서, 이번엔 임시로 줍는 즉시 자동 발동시킨다
@@ -234,6 +243,7 @@ const TEMP_ITEMS: ItemInstance[] = [
   { x: 3, y: 1, type: 'flashlight' },
   { x: 7, y: 5, type: 'shield' },
   { x: 13, y: 7, type: 'trapInstall' },
+  { x: 14, y: 9, type: 'detector' }, // src/server/core/items.ts 실제 스폰 좌표와 동일
 ];
 
 // Phaser의 "씬(Scene)" = 게임 화면 한 장을 담당하는 클래스.
@@ -319,6 +329,18 @@ class MazeScene extends Phaser.Scene {
   // 아이템 마커 도형(별 모양 — 함정 마커는 박스 모양이라 헷갈리지 않게 구분). 함정 마커와
   // 동일하게 안개 상태에 맞춰 밝기 조정됨.
   private itemRects: (Phaser.GameObjects.Star | undefined)[][] = [];
+
+  // 함정 탐지기(detector)로 반경 내 "다른 유저" 함정을 잠깐 공개할 때 쓰는 임시 마커.
+  // this.myTraps(내가 설치한 함정, 항상 표시)와 달리 일정 시간 후 사라져야 하고, 안개(fog)와
+  // 무관하게 항상 보여야 의미가 있다(탐지기의 목적 자체가 "아직 안 밝힌 곳의 위험을 미리
+  // 알려주는 것") — applyDetectorItem/clearRevealedTrapMarkers 참고.
+  private revealedTrapMarkers: Phaser.GameObjects.Arc[] = [];
+
+  // applyDetectorItem이 예약한 "표시 종료" 타이머가 유효한지 판단하는 토큰. 탐지기는 맵당
+  // 스폰이 1곳뿐이라 실제로 겹칠 일은 드물지만, flashPlayerTrap 등에서 이미 겪은 "먼저 걸린
+  // 타이머가 나중 걸로 덮어써진 걸 모르고 지워버리는" 재트리거 경쟁을 막기 위해 동일한
+  // 토큰 비교 패턴을 적용해둔다.
+  private detectorRevealToken = 0;
 
   // 아직 안 주운 아이템 목록. loadServerState()가 map.getState 응답으로 채운다(서버 실패 시
   // TEMP_ITEMS로 폴백). 주우면 여기서 제거됨.
@@ -946,7 +968,13 @@ class MazeScene extends Phaser.Scene {
     } catch (err) {
       console.error('item.pickup 실패 — 로컬 아이템 목록으로 직접 판정', err);
       const localItem = this.remainingItems.find((item) => item.x === x && item.y === y);
-      return localItem ? { picked: true, type: localItem.type } : { picked: false };
+      // revealedTraps: undefined로 명시 — 백엔드 없는 로컬 폴백에선 다른 유저 함정을 알 방법이
+      // 없어(revealNearbyTraps는 서버 전용 로직) 탐지기를 주워도 아무것도 안 밝혀지는 게
+      // 맞는 동작. 필드 자체를 넣어두는 이유는 실제 서버 응답(ItemPickupOutput)과 반환 타입
+      // 형태를 통일해 호출부에서 옵셔널 체이닝 없이 그대로 접근할 수 있게 하기 위함.
+      return localItem
+        ? { picked: true, type: localItem.type, revealedTraps: undefined }
+        : { picked: false, type: undefined, revealedTraps: undefined };
     }
   }
 
@@ -983,6 +1011,12 @@ class MazeScene extends Phaser.Scene {
 
     if (result.type === 'flashlight') this.applyFlashlightItem();
     else if (result.type === 'shield') this.applyShieldItem();
+    // 서버(shared/game-types.ts ItemType)는 'trapInstall'을 반환할 일이 없다 — 로컬 폴백
+    // (reportItemPickup의 catch, TEMP_ITEMS 기반)에서만 나오는 클라이언트 전용 값이라 마지막
+    // else로 잡는다. 'detector'를 명시적으로 분기하지 않으면 이 else가 실수로 삼켜서
+    // applyTrapInstallItem이 잘못 호출되는 버그가 있었음(2026-07-10 발견 — 실제 서버 함정
+    // 탐지기 픽업이 함정 설치 아이템으로 오판정되던 문제).
+    else if (result.type === 'detector') this.applyDetectorItem(result.revealedTraps ?? []);
     else this.applyTrapInstallItem();
   }
 
@@ -1056,6 +1090,55 @@ class MazeScene extends Phaser.Scene {
     this.showFloatingLabel(`${ITEM_LABELS.shield} acquired!`);
     this.hasShield = true;
     this.flashPlayer(ITEM_COLORS.shield);
+  }
+
+  // 함정 탐지기 — items.md 초안: 반경 3칸 내 함정을 5초간 표시. 반경 필터링은 서버
+  // (revealNearbyTraps, DETECTOR_REVEAL_RADIUS)가 이미 끝낸 결과를 넘겨받으므로, 여기서는
+  // "받은 좌표에 마커를 얼마나 오래 보여줄지"만 담당한다. myTraps(내가 설치한 함정)와 달리
+  // 다른 유저의 함정이라 renderTrapMarkers 계열과 완전히 분리된 배열(revealedTrapMarkers)로
+  // 관리 — 표시 시간이 끝나면 흔적 없이 사라져야 하고, 그 사이 실제 함정 판정(trap.trigger)
+  // 로직에는 전혀 관여하지 않는 순수 시각 효과다.
+  private applyDetectorItem(revealedTraps: TrapInstance[]) {
+    this.showFloatingLabel(`${ITEM_LABELS.detector} acquired!`);
+    this.flashPlayer(ITEM_COLORS.detector);
+
+    this.clearRevealedTrapMarkers();
+    const token = ++this.detectorRevealToken;
+
+    for (const trap of revealedTraps) {
+      const cx = trap.x * TILE_SIZE + TILE_SIZE / 2;
+      const cy = trap.y * TILE_SIZE + TILE_SIZE / 2;
+      const marker = this.add.circle(cx, cy, TILE_SIZE * 0.22, TRAP_COLORS[trap.type], 0.35);
+      marker.setStrokeStyle(3, TRAP_COLORS[trap.type], 0.9);
+      marker.setDepth(12); // 안개/타일 도형(0~6)보다 위, 손전등 등 나머지 이펙트와 안 겹치는 자리
+
+      // 안개(탐색 여부)와 무관하게 항상 보여야 하므로 updateFog의 알파 조정 대상에 넣지 않고
+      // 여기서 직접 깜빡이는 펄스 트윈을 건다 — "위험 신호"처럼 눈에 띄게.
+      this.tweens.add({
+        targets: marker,
+        alpha: { from: 0.9, to: 0.35 },
+        duration: 400,
+        yoyo: true,
+        repeat: -1,
+        ease: 'Sine.easeInOut',
+      });
+
+      this.revealedTrapMarkers.push(marker);
+    }
+
+    this.time.delayedCall(DETECTOR_REVEAL_DISPLAY_MS, () => {
+      // 그 사이 탐지기를 한 번 더 주웠다면(맵당 스폰이 1곳뿐이라 실제로는 드묾) 이 타이머는
+      // 오래된 것이니 새로 표시된 마커를 건드리지 않는다 — 최신 타이머가 알아서 지운다.
+      if (this.detectorRevealToken === token) this.clearRevealedTrapMarkers();
+    });
+  }
+
+  private clearRevealedTrapMarkers() {
+    for (const marker of this.revealedTrapMarkers) {
+      this.tweens.killTweensOf(marker);
+      marker.destroy();
+    }
+    this.revealedTrapMarkers = [];
   }
 
   // 스플래시 로드아웃 화면(splash.tsx)에서 고른 아이템을 게임 시작 시 즉시 지급한다. 별도
