@@ -372,6 +372,42 @@ describe('item.pickup 유저별 독립 보드', () => {
   });
 });
 
+describe('item.pickup 함정 탐지기 (반경 공개, 오라클 방지 조율 회귀 테스트)', () => {
+  it('탐지기를 주우면 반경(3칸) 내 타 유저 함정만 revealedTraps로 함께 반환한다', async () => {
+    const installer = createCaller({ userId: 'user-installer' });
+    await installer.trap.install({ mapId: 'map-1', type: 'slow', x: 17, y: 9 }); // 탐지기 스폰(14,9)과 거리 3 — 반경 내
+    await installer.trap.install({ mapId: 'map-1', type: 'blind', x: 18, y: 9 }); // 거리 4 — 반경 밖
+
+    const picker = createCaller({ userId: 'user-picker' });
+    await picker.map.getState({ mapId: 'map-1' }); // 앵커: (0,0)
+    for (let x = 1; x <= 14; x++) {
+      await picker.item.pickup({ mapId: 'map-1', x, y: 0 });
+    }
+    for (let y = 1; y <= 8; y++) {
+      await picker.item.pickup({ mapId: 'map-1', x: 14, y });
+    }
+
+    const result = await picker.item.pickup({ mapId: 'map-1', x: 14, y: 9 });
+    expect(result.picked).toBe(true);
+    expect(result.type).toBe('detector');
+    expect(result.revealedTraps).toEqual(expect.arrayContaining([{ x: 17, y: 9, type: 'slow' }]));
+    expect(result.revealedTraps).not.toContainEqual(expect.objectContaining({ x: 18, y: 9 }));
+  });
+
+  it('탐지기 외 아이템은 revealedTraps 없이 반환한다(기존 손전등/쉴드 응답 형태 불변)', async () => {
+    const caller = createCaller({ userId: 'user-r' });
+    await caller.map.getState({ mapId: 'map-1' });
+    await caller.item.pickup({ mapId: 'map-1', x: 1, y: 0 });
+    await caller.item.pickup({ mapId: 'map-1', x: 2, y: 0 });
+    await caller.item.pickup({ mapId: 'map-1', x: 2, y: 1 });
+
+    await expect(caller.item.pickup({ mapId: 'map-1', x: 3, y: 1 })).resolves.toEqual({
+      picked: true,
+      type: 'flashlight',
+    });
+  });
+});
+
 describe('leaderboard.get username 매핑', () => {
   it('reddit.getUserById로 조회된 username을 entry에 채운다', async () => {
     mocks.users.set('user-g', { username: 'maze-runner' });

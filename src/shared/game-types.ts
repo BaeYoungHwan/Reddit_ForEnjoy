@@ -8,8 +8,8 @@ export type TrapInstance = Position & {
   type: TrapType;
 };
 
-// items.md 확정 4종 중 서버 API가 필요한 손전등/쉴드 2종만 우선 (함정 탐지기/함정 설치는 후속).
-export type ItemType = 'flashlight' | 'shield';
+// items.md 확정 4종 중 서버 API가 필요한 손전등/쉴드/함정 탐지기 3종 (함정 설치는 후속).
+export type ItemType = 'flashlight' | 'shield' | 'detector';
 
 export type ItemInstance = Position & {
   type: ItemType;
@@ -44,7 +44,10 @@ export type TrapTriggerInput = Position & { mapId: string };
 export type TrapTriggerOutput = { hit: boolean; type?: TrapType };
 
 export type ItemPickupInput = Position & { mapId: string };
-export type ItemPickupOutput = { picked: boolean; type?: ItemType };
+// revealedTraps: type이 'detector'일 때만 채워짐 — 탐지기 사용을 별도 API로 분리하지 않고
+// pickup 시점(이미 오라클 방지용 위치 인접 검증을 거친 이벤트)에 묶어 반환한다.
+// 근거: docs/design-docs/items.md 함정 탐지기 vs trap.trigger 오라클 방지 설계 충돌 조율 결과.
+export type ItemPickupOutput = { picked: boolean; type?: ItemType; revealedTraps?: TrapInstance[] };
 
 export type RunFinishInput = { mapId: string; clearTimeMs: number };
 export type RunFinishOutput = { rank: number; isNewRecord: boolean };
