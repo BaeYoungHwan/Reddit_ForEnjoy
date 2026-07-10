@@ -109,10 +109,13 @@ const PLAYER_WALK_SQUASH = 0.82; // 한 걸음 내딛을 때 세로로 눌리는
 const PLAYER_WALK_STRETCH = 1.12; // 눌리는 동안 가로로 살짝 넓어지는 비율
 
 // 함정에 걸렸을 때 flashPlayer(색 틴트)만으로는 "무엇에 걸렸는지" 한눈에 안 들어와서, 캐릭터
-// 이미지 자체를 그 함정을 상징하는 그림(예: 슬라이드→바나나 옷, 시야차단→고글)으로 잠깐
-// 바꾼다 — flashPlayerTrap 참고. 함정 탐지기 아이템용 그림(Character-detector.png)도 같이
-// 준비해뒀지만, 그 아이템 자체가 아직 서버에 구현 안 돼 있어(docs/wbs.md 참고) 지금은 로드만
-// 해두고 실제로 쓰지는 않는다.
+// 이미지 자체를 그 함정을 상징하는 그림(예: 슬라이드→바나나 옷, 시야차단→고글)으로 바꾼다 —
+// flashPlayerTrap 참고. 지속시간이 있는 효과(시야차단/역방향)는 그 효과가 끝날 때까지
+// 캐릭터 이미지도 같이 유지해야 자연스럽다(효과는 끝났는데 캐릭터만 먼저 원래대로 돌아오면
+// 어색함) — 아래 BLIND_DURATION_MS/REVERSE_DURATION_MS를 실제 효과 타이머와 캐릭터 이미지
+// 유지시간 양쪽에 공유해서 항상 같이 끝나도록 한다. 함정 탐지기 아이템용 그림
+// (Character-detector.png)도 같이 준비해뒀지만, 그 아이템 자체가 아직 서버에 구현 안 돼
+// 있어(docs/wbs.md 참고) 지금은 로드만 해두고 실제로 쓰지는 않는다.
 const PLAYER_TRAP_TEXTURE_KEYS: Record<TrapType, string> = {
   slow: 'player-character-slide',
   respawn: 'player-character-respawn',
@@ -120,7 +123,9 @@ const PLAYER_TRAP_TEXTURE_KEYS: Record<TrapType, string> = {
   reverse: 'player-character-reverse',
 };
 const PLAYER_DETECTOR_TEXTURE_KEY = 'player-character-detector'; // 위 주석 참고 — 아직 미사용
-const PLAYER_TRAP_FLASH_MS = 900; // 함정 전용 캐릭터 이미지로 바뀐 채 유지되는 시간(ms)
+// 리스폰은 순간이동이라 별도 "효과 지속시간"이 없지만, 표정이 바뀌는 게 눈에 잘 안 보일
+// 정도로 짧다는 피드백을 받아 리스폰만 따로 더 길게 유지되는 시간을 둔다.
+const RESPAWN_FLASH_MS = 1600;
 
 // vision-system.md 스펙: 기본 시야 반경 2칸.
 // 나중에 손전등(4칸)/시야차단 함정(0.5~1칸)을 만들 때 이 값을 상황에 맞게 바꿔주면 됨.
@@ -163,6 +168,11 @@ const TRAP_LABELS: Record<TrapType, string> = {
   blind: '시야차단',
   reverse: '역방향',
 };
+
+// 시야차단/역방향 효과의 실제 지속시간. applyBlindTrap/applyReverseTrap의 효과 타이머와
+// flashPlayerTrap의 캐릭터 이미지 유지시간이 항상 같이 끝나도록 상수 하나를 공유한다.
+const BLIND_DURATION_MS = 5000;
+const REVERSE_DURATION_MS = 4000;
 
 // trap.install 실패 사유 → 안내 문구. TrapInstallOutput.reason은 optional이라(성공 시엔
 // 항상 undefined) 값이 없을 때는 RETRY 문구로 대체.
@@ -772,15 +782,30 @@ class MazeScene extends Phaser.Scene {
     });
   }
 
-  // 함정 종류별로 flashPlayer(색 틴트)에 더해 캐릭터 이미지 자체를 그 함정을 상징하는 그림으로
-  // 잠깐 바꾼다 — 틴트 색만으로는 어떤 함정에 걸렸는지 직관적으로 안 와닿는다는 점을 보완.
-  // setDisplaySize를 다시 호출하는 이유: 함정별 원본 이미지 크기가 서로 달라서, 텍스처만
-  // 바꾸면 캐릭터가 표시되는 크기도 같이 바뀌어버림(원래 크기로 다시 맞춰줘야 함).
-  private flashPlayerTrap(type: TrapType) {
-    this.flashPlayer(TRAP_COLORS[type]);
+  // 캐릭터 이미지를 함정 종류를 상징하는 그림으로 바꾼다(원복은 별도 — revertPlayerTexture
+  // 또는 flashPlayerTrap의 delayedCall이 담당). setDisplaySize를 다시 호출하는 이유: 함정별
+  // 원본 이미지 크기가 서로 달라서, 텍스처만 바꾸면 캐릭터가 표시되는 크기도 같이
+  // 바뀌어버림(원래 크기로 다시 맞춰줘야 함).
+  private setPlayerTrapTexture(type: TrapType) {
     this.playerImg.setTexture(PLAYER_TRAP_TEXTURE_KEYS[type]).setDisplaySize(PLAYER_DISPLAY_SIZE, PLAYER_DISPLAY_SIZE);
-    this.time.delayedCall(PLAYER_TRAP_FLASH_MS, () => {
-      this.playerImg.setTexture(PLAYER_TEXTURE_KEY).setDisplaySize(PLAYER_DISPLAY_SIZE, PLAYER_DISPLAY_SIZE);
+  }
+
+  // 캐릭터 이미지를 평상시 모습으로 되돌린다.
+  private revertPlayerTexture() {
+    this.playerImg.setTexture(PLAYER_TEXTURE_KEY).setDisplaySize(PLAYER_DISPLAY_SIZE, PLAYER_DISPLAY_SIZE);
+  }
+
+  // 함정 종류별로 flashPlayer(색 틴트)에 더해 캐릭터 이미지 자체를 그 함정을 상징하는 그림으로
+  // durationMs 동안 바꾼다 — 틴트 색만으로는 어떤 함정에 걸렸는지 직관적으로 안 와닿는다는 점을
+  // 보완. durationMs는 그 함정의 실제 효과 지속시간과 맞춰서 넘겨야 한다(예: 시야차단은
+  // BLIND_DURATION_MS) — 그래야 "효과가 지속되는 동안 캐릭터도 유지"된다. 슬라이드처럼 지속
+  // 시간이 고정돼있지 않은 경우는 이 함수 대신 setPlayerTrapTexture/revertPlayerTexture를
+  // 효과 시작/종료 시점에 직접 호출한다(applySlideTrap/slideStep 참고).
+  private flashPlayerTrap(type: TrapType, durationMs: number) {
+    this.flashPlayer(TRAP_COLORS[type]);
+    this.setPlayerTrapTexture(type);
+    this.time.delayedCall(durationMs, () => {
+      this.revertPlayerTexture();
     });
   }
 
@@ -937,7 +962,8 @@ class MazeScene extends Phaser.Scene {
   // 효과: 밟으면 방금 누르고 있던 방향으로, 벽에 부딪힐 때까지 자동으로 한 칸씩 계속 미끄러짐.
   // 단, 미끄러지는 도중 "다른" 방향키를 누르면 그 자리에서 탈출 가능 (팀원 피드백 반영).
   private applySlideTrap(dx: number, dy: number) {
-    this.flashPlayerTrap('slow');
+    this.flashPlayer(TRAP_COLORS.slow);
+    this.setPlayerTrapTexture('slow'); // 미끄러지는 동안 계속 유지 — slideStep이 끝날 때 직접 되돌림
     this.isMoving = true; // 미끄러지는 동안은 방향키 입력을 무시하게 잠가둠
     this.slideStep(dx, dy);
   }
@@ -949,6 +975,7 @@ class MazeScene extends Phaser.Scene {
     const pressed = this.getPressedDirection();
     if (pressed && (pressed.dx !== dx || pressed.dy !== dy)) {
       this.isMoving = false;
+      this.revertPlayerTexture(); // 슬라이드 탈출 — 캐릭터 이미지도 같이 원복
       return;
     }
 
@@ -958,6 +985,7 @@ class MazeScene extends Phaser.Scene {
     if (!this.isWalkable(targetX, targetY)) {
       // 벽(또는 맵 끝)에 부딪혀서 미끄러짐이 끝남 → 다시 방향키 입력을 받을 수 있게 풀어줌
       this.isMoving = false;
+      this.revertPlayerTexture(); // 슬라이드 종료 — 캐릭터 이미지도 같이 원복
       return;
     }
 
@@ -990,7 +1018,7 @@ class MazeScene extends Phaser.Scene {
   // + 플레이테스트 결과 반영: 위치뿐 아니라 지금까지 밝힌 길도 함께 초기화해서 페널티를 더 크게 함
   // (traps.md 원안은 "위치만" 리셋이었으나, 벌칙감이 부족해 시야차단 함정처럼 탐색 기록도 리셋하도록 조정).
   private applyRespawnTrap() {
-    this.flashPlayerTrap('respawn');
+    this.flashPlayerTrap('respawn', RESPAWN_FLASH_MS);
 
     this.playerGridX = SPAWN_POSITION.x;
     this.playerGridY = SPAWN_POSITION.y;
@@ -1013,7 +1041,7 @@ class MazeScene extends Phaser.Scene {
   // 3. 시야차단 함정 — traps.md/vision-system.md: 지금까지 밝힌 길이 다시 안개로 덮이고,
   // 5초간 시야 반경이 크게 줄어듦 (이 게임의 시그니처 함정, 블라인드 모드와 직접 시너지).
   private applyBlindTrap() {
-    this.flashPlayerTrap('blind');
+    this.flashPlayerTrap('blind', BLIND_DURATION_MS);
 
     // 지금까지 탐색해서 기억해둔 모든 타일을 다시 'hidden'으로 되돌림 (탐험 진행도 페널티)
     for (let y = 0; y < MAP_HEIGHT; y++) {
@@ -1026,7 +1054,7 @@ class MazeScene extends Phaser.Scene {
     this.currentVisionRadius = 1;
     this.updateFog();
 
-    this.time.delayedCall(5000, () => {
+    this.time.delayedCall(BLIND_DURATION_MS, () => {
       this.currentVisionRadius = VISION_RADIUS;
       this.updateFog();
     });
@@ -1034,10 +1062,10 @@ class MazeScene extends Phaser.Scene {
 
   // 4. 역방향 함정 — traps.md: 4초간 방향키 입력이 반대로 동작.
   private applyReverseTrap() {
-    this.flashPlayerTrap('reverse');
+    this.flashPlayerTrap('reverse', REVERSE_DURATION_MS);
     this.isReversed = true;
 
-    this.time.delayedCall(4000, () => {
+    this.time.delayedCall(REVERSE_DURATION_MS, () => {
       this.isReversed = false;
     });
   }
