@@ -76,6 +76,98 @@ export function buildMazeSvgDataUri(map: MazeMap, options?: MazeBackgroundOption
   return `data:image/svg+xml,${encodeURIComponent(svg)}`;
 }
 
+export type RockWallTileOptions = {
+  cellSize?: number;
+  baseFill?: string;
+  facetFill?: string;
+  highlightFill?: string;
+  crackStroke?: string;
+  seed?: number;
+};
+
+/** 시드 고정 의사난수 생성기(mulberry32) — Math.random 대신 써서 같은 seed면 항상 같은 결과. */
+function mulberry32(seed: number): () => number {
+  let state = seed;
+  return () => {
+    state |= 0;
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** 중심(cx, cy)을 둘러싼 각진 다각형(암반 조각처럼 꼭짓점이 불규칙한 모양) 점 목록을 만든다. */
+function jaggedPolygonPoints(
+  rand: () => number,
+  vertexCount: number,
+  jitter: number,
+  cx: number,
+  cy: number,
+  radius: number
+): string {
+  const points: string[] = [];
+  for (let i = 0; i < vertexCount; i++) {
+    const angle = (i / vertexCount) * Math.PI * 2;
+    const r = radius * (1 - jitter / 2 + rand() * jitter);
+    points.push(`${(cx + Math.cos(angle) * r).toFixed(1)},${(cy + Math.sin(angle) * r).toFixed(1)}`);
+  }
+  return points.join(' ');
+}
+
+/**
+ * 각진 석벽 블록 대신, 모르타르 줄눈 없이 이어지는 "거친 동굴 암반" 타일 하나를 SVG로 그린다.
+ * 타일 전체를 빈틈없이 채우는 단색 바탕(테두리 선 없음 → 옆 타일과 이어붙여도 격자 줄눈이
+ * 안 보임) 위에, 시드 기반 의사난수로 불규칙한 각진 조각(짙은 명암 면 + 밝은 하이라이트 면)과
+ * 삐뚤빼뚤한 균열 선을 얹어 자연암 느낌을 낸다. seed가 같으면 항상 같은 모양(랜덤 아님).
+ */
+export function buildRockWallTileSvg(options: RockWallTileOptions = {}): string {
+  const cellSize = options.cellSize ?? CELL_SIZE;
+  const baseFill = options.baseFill ?? '#2b1d13';
+  const facetFill = options.facetFill ?? '#1c1209';
+  const highlightFill = options.highlightFill ?? '#5a4030';
+  const crackStroke = options.crackStroke ?? '#000000';
+  const rand = mulberry32(options.seed ?? 1);
+
+  const base = `<rect x="0" y="0" width="${cellSize}" height="${cellSize}" fill="${baseFill}" />`;
+
+  let facets = '';
+  const facetCount = 2 + Math.floor(rand() * 2);
+  for (let i = 0; i < facetCount; i++) {
+    const cx = rand() * cellSize;
+    const cy = rand() * cellSize;
+    const radius = cellSize * (0.28 + rand() * 0.22);
+    const pts = jaggedPolygonPoints(rand, 5 + Math.floor(rand() * 3), 0.7, cx, cy, radius);
+    facets += `<polygon points="${pts}" fill="${facetFill}" fill-opacity="0.55" />`;
+  }
+
+  const hcx = cellSize * (0.15 + rand() * 0.3);
+  const hcy = cellSize * (0.15 + rand() * 0.3);
+  const hRadius = cellSize * (0.2 + rand() * 0.15);
+  const highlight = `<polygon points="${jaggedPolygonPoints(rand, 5, 0.5, hcx, hcy, hRadius)}" fill="${highlightFill}" fill-opacity="0.45" />`;
+
+  let cracks = '';
+  const crackCount = 1 + Math.floor(rand() * 2);
+  for (let i = 0; i < crackCount; i++) {
+    const segments = 3 + Math.floor(rand() * 2);
+    let x = rand() * cellSize;
+    const path: string[] = [`M${x.toFixed(1)},0`];
+    for (let s = 1; s <= segments; s++) {
+      x = Math.max(0, Math.min(cellSize, x + (rand() - 0.5) * cellSize * 0.6));
+      const y = (cellSize * s) / segments;
+      path.push(`L${x.toFixed(1)},${y.toFixed(1)}`);
+    }
+    cracks += `<path d="${path.join(' ')}" stroke="${crackStroke}" stroke-opacity="0.35" stroke-width="0.6" fill="none" />`;
+  }
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${cellSize}" height="${cellSize}">${base}${facets}${highlight}${cracks}</svg>`;
+}
+
+/** buildRockWallTileSvg를 Phaser 텍스처로 바로 로드할 수 있는 raw data URI로 반환한다. */
+export function buildRockWallTileDataUri(options?: RockWallTileOptions): string {
+  return `data:image/svg+xml,${encodeURIComponent(buildRockWallTileSvg(options))}`;
+}
+
 /** 그리드 좌표를 배경 이미지(0~100%) 기준 위치로 변환한다. */
 export function tileToPercent(map: MazeMap, pos: Position): { left: string; top: string } {
   const cols = map.grid[0]?.length ?? 1;
