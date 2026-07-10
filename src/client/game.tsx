@@ -175,10 +175,10 @@ const TRAP_COLORS: Record<TrapType, number> = {
 const TRAP_TYPES: readonly TrapType[] = ['slow', 'respawn', 'blind', 'reverse'];
 
 const TRAP_LABELS: Record<TrapType, string> = {
-  slow: '슬라이드',
-  respawn: '리스폰',
-  blind: '시야차단',
-  reverse: '역방향',
+  slow: 'Slide',
+  respawn: 'Respawn',
+  blind: 'Blind',
+  reverse: 'Reverse',
 };
 
 // 시야차단/역방향 효과의 실제 지속시간. applyBlindTrap/applyReverseTrap의 효과 타이머와
@@ -190,10 +190,10 @@ const REVERSE_DURATION_MS = 4000;
 // 항상 undefined) 값이 없을 때는 RETRY 문구로 대체.
 type InstallFailureReason = NonNullable<TrapInstallOutput['reason']>;
 const INSTALL_FAILURE_MESSAGES: Record<InstallFailureReason, string> = {
-  TOTAL_CAP_REACHED: '설치 가능 개수를 다 썼어요',
-  TYPE_CAP_REACHED: '이 함정은 더 설치할 수 없어요',
-  TILE_OCCUPIED: '이미 함정이 있는 칸이에요',
-  RETRY: '설치 실패, 다시 시도해주세요',
+  TOTAL_CAP_REACHED: "You've used all your trap placements",
+  TYPE_CAP_REACHED: "You can't place this trap type anymore",
+  TILE_OCCUPIED: 'There is already a trap here',
+  RETRY: 'Placement failed, please try again',
 };
 
 // items.md 기준 아이템 4종 중 지금 구현하는 3종. 나머지(함정 탐지기)는 타 유저 함정을
@@ -211,11 +211,11 @@ const ITEM_COLORS: Record<ItemType, number> = {
   trapInstall: 0xff3355, // 빨강
 };
 
-// 픽업 라벨(말풍선 텍스트)에 쓸 한글 이름.
+// 픽업 라벨(말풍선 텍스트)에 쓸 이름 — splash.tsx 로드아웃 화면과 언어를 맞추기 위해 영문으로 통일.
 const ITEM_LABELS: Record<ItemType, string> = {
-  flashlight: '손전등',
-  shield: '쉴드',
-  trapInstall: '함정 설치',
+  flashlight: 'Flashlight',
+  shield: 'Shield',
+  trapInstall: 'Trap Kit',
 };
 
 // items.md: 손전등은 시야 반경 2→4칸, 8초. 원래는 "주웠다가 원할 때 쓰는" 아이템이지만
@@ -1031,7 +1031,7 @@ class MazeScene extends Phaser.Scene {
   // 효과가 끝난 뒤 손전등의 남은 지속시간이 복원되지 않고 기본값으로 돌아가는 것도 지금은
   // 의도한 단순화 — 팀 플레이테스트 피드백 있으면 재검토.
   private applyFlashlightItem() {
-    this.showFloatingLabel(`${ITEM_LABELS.flashlight} 획득!`);
+    this.showFloatingLabel(`${ITEM_LABELS.flashlight} acquired!`);
     this.flashPlayer(ITEM_COLORS.flashlight);
     this.currentVisionRadius = FLASHLIGHT_VISION_RADIUS;
     this.updateFog();
@@ -1053,7 +1053,7 @@ class MazeScene extends Phaser.Scene {
   // 함정 무효화(쉴드) — items.md: 반응형. 주우면 바로 발동하는 게 아니라 보유 상태로만
   // 바뀌고, 실제 효과는 다음 함정을 밟는 순간(checkTrapTrigger)에 소모되며 적용됨.
   private applyShieldItem() {
-    this.showFloatingLabel(`${ITEM_LABELS.shield} 획득!`);
+    this.showFloatingLabel(`${ITEM_LABELS.shield} acquired!`);
     this.hasShield = true;
     this.flashPlayer(ITEM_COLORS.shield);
   }
@@ -1076,7 +1076,7 @@ class MazeScene extends Phaser.Scene {
     else if (saved === 'trapDetector') {
       // 함정 탐지기는 아직 서버 API가 없어(docs/wbs.md 블로커 참고) 실제 효과를 줄 수 없다 —
       // 선택 자체는 존중하되, 조용히 무시하는 대신 지금은 미구현이라는 걸 알려준다.
-      this.showFloatingLabel('함정 탐지기 기능은 준비 중입니다');
+      this.showFloatingLabel('Trap Detector coming soon');
     }
   }
 
@@ -1086,7 +1086,7 @@ class MazeScene extends Phaser.Scene {
   private applyTrapInstallItem() {
     this.heldTrapType = TRAP_TYPES[Math.floor(Math.random() * TRAP_TYPES.length)]!;
     this.flashPlayer(ITEM_COLORS.trapInstall);
-    this.showFloatingLabel(`${ITEM_LABELS.trapInstall} 획득! (${TRAP_LABELS[this.heldTrapType]})`);
+    this.showFloatingLabel(`${ITEM_LABELS.trapInstall} acquired! (${TRAP_LABELS[this.heldTrapType]})`);
   }
 
   // Z키를 눌렀을 때 호출됨. 보유 중인 함정 설치권(heldTrapType)이 있을 때만 지금 서 있는
@@ -1115,7 +1115,7 @@ class MazeScene extends Phaser.Scene {
         this.heldTrapType = null; // 성공해야 소모(1회성)
         this.renderInstalledTrapMarker({ x: this.playerGridX, y: this.playerGridY, type });
         this.updateFog();
-        this.showFloatingLabel(`함정 설치 완료! (${TRAP_LABELS[type]})`);
+        this.showFloatingLabel(`Trap placed! (${TRAP_LABELS[type]})`);
         return;
       }
 

@@ -307,14 +307,27 @@ const Menu = ({
 // 웹뷰라 React state로는 못 넘김). 확인 버튼을 눌러야 실제로 게임을 시작하도록 해서, 선택
 // 안 하고 실수로 넘어가는 일이 없게 함(기본 선택값 없음).
 const Loadout = ({ onBack }: { onBack: () => void }) => {
+  // game.tsx의 applyLoadout()과 마찬가지로, localStorage 접근이 막힌 환경(서드파티 iframe
+  // 스토리지 정책 등)에서도 화면 자체는 렌더링/진행되게 try/catch로 방어한다 — PR #33 리뷰에서
+  // game.tsx만 방어돼 있고 여기는 방어가 없어 그 환경에서 스플래시 전체가 깨질 수 있다는 점이
+  // 지적됨(useState 초기화 함수 안 예외는 렌더링 중 처리 안 된 예외가 되어버림).
   const [selected, setSelected] = useState<LoadoutId | null>(() => {
-    const saved = localStorage.getItem(LOADOUT_STORAGE_KEY);
-    return LOADOUT_OPTIONS.some((opt) => opt.id === saved) ? (saved as LoadoutId) : null;
+    try {
+      const saved = localStorage.getItem(LOADOUT_STORAGE_KEY);
+      return LOADOUT_OPTIONS.some((opt) => opt.id === saved) ? (saved as LoadoutId) : null;
+    } catch {
+      return null;
+    }
   });
 
   const handleConfirm = (e: MouseEvent<HTMLButtonElement>) => {
     if (!selected) return;
-    localStorage.setItem(LOADOUT_STORAGE_KEY, selected);
+    try {
+      localStorage.setItem(LOADOUT_STORAGE_KEY, selected);
+    } catch {
+      // 저장 실패해도(예: 저장공간 막힘) 이번 판은 진행은 시켜준다 — game.tsx의 applyLoadout()이
+      // 값을 못 읽으면 그냥 빈손으로 시작하는 안전한 폴백을 이미 갖고 있음.
+    }
     requestExpandedMode(e.nativeEvent, 'game');
   };
 
