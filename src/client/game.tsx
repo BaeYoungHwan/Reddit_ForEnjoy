@@ -108,6 +108,11 @@ const BASE_MOVE_DURATION = 150;
 // 기본 이동보다 짧게 줘서 "제어권을 잃고 빠르게 밀려나는" 느낌을 냄.
 const SLIDE_STEP_DURATION = 80;
 
+// 발자국을 한 칸마다 즉시 서버로 보내지 않고 이 주기(ms)마다 모아서 한 번에 보낸다.
+// trap.trigger/item.pickup과 겹쳐 매 칸마다 요청이 늘어나는 걸 줄이기 위함
+// (PR #31 리뷰 반영 — 렉 문제가 있는 상황에서 요청 수를 더 늘리면 안 된다는 피드백).
+const FOOTPRINT_FLUSH_INTERVAL_MS = 2000;
+
 // 캐릭터 시작 위치 (map-1의 실제 시작 칸 S). 리스폰 함정이 여길 기준으로 되돌림.
 const SPAWN_POSITION = MAIN_MAP.start;
 
@@ -218,6 +223,10 @@ class MazeScene extends Phaser.Scene {
   // 다른 유저가 남긴 발자국 마커 도형(map.getState의 footprints). 안개 상태에 맞춰 같이
   // 밝기 조정됨(다시 안개가 덮이면 같이 흐려짐) — 내 발자국은 그리지 않는다.
   private footprintRects: (Phaser.GameObjects.Image | undefined)[][] = [];
+
+  // 아직 서버로 보내지 않고 모아둔 내 발자국 좌표. FOOTPRINT_FLUSH_INTERVAL_MS마다
+  // flushFootprints()가 한 번에 비워서 보낸다.
+  private pendingFootprints: Position[] = [];
 
   // 함정 마커 도형(박스+물음표 이미지를 담은 컨테이너). 안개 상태에 맞춰 같이 밝기 조정됨
   // (함정 탐지기 아이템 없이는 안개에 덮인 함정이 안 보이게 하기 위함).
@@ -354,6 +363,13 @@ class MazeScene extends Phaser.Scene {
 
     // 서버에 위치 앵커를 초기화하고 내가 설치한 함정 목록을 받아온다 (fire-and-forget).
     void this.loadServerState();
+
+    // 모아둔 발자국을 주기적으로 한 번에 서버로 보낸다(칸마다 개별 요청하지 않기 위함).
+    this.time.addEvent({
+      delay: FOOTPRINT_FLUSH_INTERVAL_MS,
+      loop: true,
+      callback: () => void this.flushFootprints(),
+    });
   }
 
   // 골인 지점 깃발(깃대+천 메쉬)을 만들어 this.goalRect에 담는다. 깃대 밑동이 타일 중심에
@@ -641,6 +657,9 @@ class MazeScene extends Phaser.Scene {
         // 엉뚱한 위치(리스폰 목적지도 원래 위치도 아닌 중간 지점)에 멈춰 있다가 다음 키
         // 입력에야 제자리로 튀는 버그가 있었음. isMoving 해제는 checkTrapTrigger 쪽에서
         // 판정이 다 끝난 뒤에 하도록 옮김(슬라이드 함정은 자기가 다시 잠그고 스스로 풂).
+        // 발자국 기록은 골인 여부와 무관하게 항상 남긴다.
+        this.queueFootprint(targetX, targetY);
+
         if (this.checkGoalReached(targetX, targetY)) return; // 골인했으면 함정 확인 없이 종료
 
         // 아이템은 item.pickup 서버 호출로 확인(비동기) — 함정 확인과 독립적으로 진행.
@@ -727,6 +746,28 @@ class MazeScene extends Phaser.Scene {
       console.error('item.pickup 실패 — 로컬 아이템 목록으로 직접 판정', err);
       const localItem = this.remainingItems.find((item) => item.x === x && item.y === y);
       return localItem ? { picked: true, type: localItem.type } : { picked: false };
+    }
+  }
+
+  // 지나온 칸을 발자국 큐에 쌓아둔다(즉시 전송하지 않음). 실제 전송은 flushFootprints가
+  // 주기적으로 처리 — trap.trigger/item.pickup과 매 칸 겹쳐서 요청이 늘어나는 걸 막기 위함.
+  private queueFootprint(x: number, y: number) {
+    this.pendingFootprints.push({ x, y });
+  }
+
+  // pendingFootprints에 쌓인 좌표를 한 번의 요청으로 서버에 기록한다(map.getState가 다음
+  // 세션에 반환하는 공유 발자국 목록에 반영되어 다른 유저에게도 보임). 실패해도 현재 게임
+  // 진행과는 무관한 부가 기능이라 trap/item처럼 로컬 폴백을 두지 않고 로그만 남긴다.
+  private async flushFootprints() {
+    if (this.pendingFootprints.length === 0) return;
+
+    const tiles = this.pendingFootprints;
+    this.pendingFootprints = [];
+
+    try {
+      await trpc.footprint.record.mutate({ mapId: MAP_ID, tiles });
+    } catch (err) {
+      console.error('footprint.record 실패', err);
     }
   }
 
@@ -907,6 +948,9 @@ class MazeScene extends Phaser.Scene {
       y: targetY * TILE_SIZE + TILE_SIZE / 2,
       duration: SLIDE_STEP_DURATION,
       onComplete: () => {
+        // 슬라이드로 지나가는 칸도 일반 이동과 동일하게 발자국을 남긴다.
+        this.queueFootprint(targetX, targetY);
+
         // 미끄러지는 도중에 골인 지점에 닿으면 거기서 바로 멈춤 (계속 미끄러지지 않음)
         if (this.checkGoalReached(targetX, targetY)) return;
         this.slideStep(dx, dy); // 같은 방향으로 다음 칸 미끄러짐 시도 (벽이면 위에서 멈춤)
@@ -977,6 +1021,9 @@ class MazeScene extends Phaser.Scene {
 
     this.hasFinished = true;
     this.isMoving = false;
+
+    // 다음 주기적 flush까지 기다리면 마지막 몇 칸이 화면 종료 후로 밀릴 수 있어 바로 전송.
+    void this.flushFootprints();
 
     this.add
       .text(
