@@ -39,14 +39,35 @@ const PATH_WIDTH = 26;
 // 이미지를 만들고, 통로와 맞닿은 벽 칸에만 이 타일을 개별 도형으로 배치한다(전체 배경
 // 이미지 한 장으로 깔면 안개와 무관하게 맵 전체가 항상 보여버려서 "탐험해야 벽도 보인다"는
 // 안개 시스템의 핵심을 깨버림 — 반드시 인접 바닥 칸의 안개 상태에 종속시켜야 함).
-const WALL_TILE_TEXTURE_KEY = 'maze-wall-tile';
+//
+// 2026-07-11 타일 아트 개선: 모든 벽이 완전히 똑같은 한 장의 텍스처를 반복해서 찍고 있어
+// 단조로워 보인다는 피드백 → 색조/명도만 살짝 다른 변형 3종을 추가로 만들어, 벽 칸 좌표
+// 기준 결정론적 해시로 어떤 변형을 쓸지 골라 붙인다(Math.random 아님 — 같은 맵은 항상 같은
+// 결과, splash.tsx 배경 등 다른 곳의 "고정, 랜덤 없음" 원칙과 동일하게 맞춤). 바닥 칸은
+// 이번에도 건드리지 않음(과거 회색 사각형 도입 시 "이동할 때마다 회색 선 생긴다"는 피드백으로
+// 제거된 이력이 있어 리스크가 큼 — updateFog/paintTile 주석 참고).
+const WALL_TILE_VARIANTS = [
+  { wallFill: '#2b1d13', highlightStroke: '#5a4030' }, // 기본 톤
+  { wallFill: '#241709', highlightStroke: '#4a3325' }, // 살짝 더 어둡게 그을린 톤
+  { wallFill: '#2a2410', highlightStroke: '#4f4a28' }, // 이끼 낀 듯 녹갈색 쪽으로 살짝 치우친 톤
+  { wallFill: '#33231a', highlightStroke: '#6b4d3a' }, // 살짝 밝은 햇빛 바랜 톤
+] as const;
 const WALL_TILE_MAP: MazeMap = { id: 'wall-tile', name: 'wall-tile', grid: [['wall']], start: { x: 0, y: 0 }, exit: { x: 0, y: 0 } };
-const WALL_TILE_TEXTURE_URI = buildMazeSvgDataUri(WALL_TILE_MAP, {
-  cellSize: TILE_SIZE,
-  wallFill: '#2b1d13',
-  mortarStroke: '#000000',
-  highlightStroke: '#5a4030',
-});
+const WALL_TILE_TEXTURE_KEYS = WALL_TILE_VARIANTS.map((_, i) => `maze-wall-tile-${i}`);
+const WALL_TILE_TEXTURE_URIS = WALL_TILE_VARIANTS.map((variant) =>
+  buildMazeSvgDataUri(WALL_TILE_MAP, {
+    cellSize: TILE_SIZE,
+    wallFill: variant.wallFill,
+    mortarStroke: '#000000',
+    highlightStroke: variant.highlightStroke,
+  })
+);
+
+// 벽 칸 좌표(x,y)로부터 항상 같은 변형 인덱스를 골라주는 결정론적 해시 — 같은 맵이면 새로고침
+// 해도 벽 무늬가 안 바뀜(랜덤이면 매번 텍스처가 바뀌어 "깜빡이는" 느낌이 나서 고정 필요).
+function wallVariantIndex(x: number, y: number): number {
+  return (x * 31 + y * 17) % WALL_TILE_VARIANTS.length;
+}
 
 // 발자국 마커: splash.tsx의 FootprintIcon과 같은 발바닥 모양 SVG(타원 조합)를 재사용.
 // 내 발자국은 안 그린다(안개가 걷혀서 "지나간 길"이 보이는 것만으로 충분) — 다른 유저가
@@ -394,7 +415,7 @@ class MazeScene extends Phaser.Scene {
   // 벽 석벽 텍스처, 발자국 아이콘(SVG data URI)과 함정/아이템 박스 이미지(public/sprites, 실제
   // PNG 파일)를 로드해둔다.
   preload() {
-    this.load.image(WALL_TILE_TEXTURE_KEY, WALL_TILE_TEXTURE_URI);
+    WALL_TILE_TEXTURE_KEYS.forEach((key, i) => this.load.image(key, WALL_TILE_TEXTURE_URIS[i]!));
     this.load.image(FOOTPRINT_TEXTURE_KEY, FOOTPRINT_TEXTURE_URI);
     this.load.image(ITEM_BOX_TEXTURE_KEY, '/sprites/ItemBox-box.png');
     this.load.image(ITEM_MARK_TEXTURE_KEY, '/sprites/ItemBox-mark.png');
@@ -428,8 +449,9 @@ class MazeScene extends Phaser.Scene {
           const touchesFloor =
             this.isWalkable(x, y - 1) || this.isWalkable(x, y + 1) || this.isWalkable(x - 1, y) || this.isWalkable(x + 1, y);
           if (touchesFloor) {
+            const textureKey = WALL_TILE_TEXTURE_KEYS[wallVariantIndex(x, y)]!;
             const image = this.add
-              .image(x * TILE_SIZE + TILE_SIZE / 2, y * TILE_SIZE + TILE_SIZE / 2, WALL_TILE_TEXTURE_KEY)
+              .image(x * TILE_SIZE + TILE_SIZE / 2, y * TILE_SIZE + TILE_SIZE / 2, textureKey)
               .setDepth(-1)
               .setAlpha(0);
             this.wallTiles.push({ x, y, image });
