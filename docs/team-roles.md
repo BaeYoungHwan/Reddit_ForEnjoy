@@ -7,7 +7,7 @@
 
 ### 1️⃣ 게임 플레이 / Phaser 담당 — 임소리
 - 담당 경로: `src/client` (`game.html`, `game.tsx`), `docs/design-docs/vision-system.md`, `docs/design-docs/traps.md`
-- 작업: 그리드 이동, 캐릭터 애니메이션, 안개(블라인드) 시야 시스템(상세: `vision-system.md`), 함정 4종 이펙트(상세: `traps.md`), 아이템 이펙트(`docs/design-docs/items.md` 확정 후 구현 — 1차 관리자), 게임 시작 전 아이템 로드아웃 선택 UI 연동, 조작감·비주얼 폴리싱
+- 작업: 그리드 이동, 캐릭터 애니메이션, 안개(블라인드) 시야 시스템(상세: `vision-system.md`), 함정 4종 이펙트(상세: `traps.md`), 아이템 이펙트(`docs/design-docs/items.md` 최종 4종 확정, 2026-07-09 — 1차 관리자. 함정 무효화(쉴드)·함정 설치 구현 완료(PR #29), 함정 탐지기·손전등 수치는 플레이테스트로 확정 예정), 게임 시작 전 아이템 로드아웃 선택 UI 연동, 조작감·비주얼 폴리싱
 - 필요 역량: Phaser 전문성, 게임 화면 구현
 - 심사기준 연결: Delightful UX, Best Use of Phaser
 
