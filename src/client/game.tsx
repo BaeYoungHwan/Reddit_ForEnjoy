@@ -239,11 +239,12 @@ const FLASHLIGHT_DURATION_MS = 8000;
 // 폴백 전용 — src/server/core/items.ts의 실제 스폰 좌표(map-1)와 맞춰뒀다.
 // ⚠️ 이 좌표들은 MAIN_MAP(map-1)의 바닥 칸이어야 함 — 코드로 검증하지 않으므로, 맵 레이아웃이
 // 또 바뀌면 여기도 같이 확인할 것(벽 칸을 가리키면 마커가 벽 속에 파묻혀 주울 수 없게 됨).
+// 2026-07-10: map-1 레이아웃 재설계(23x19)에 맞춰 좌표 갱신.
 const TEMP_ITEMS: ItemInstance[] = [
-  { x: 3, y: 1, type: 'flashlight' },
-  { x: 7, y: 5, type: 'shield' },
-  { x: 13, y: 7, type: 'trapInstall' },
-  { x: 14, y: 9, type: 'detector' }, // src/server/core/items.ts 실제 스폰 좌표와 동일
+  { x: 3, y: 3, type: 'flashlight' },
+  { x: 1, y: 14, type: 'shield' },
+  { x: 19, y: 15, type: 'trapInstall' },
+  { x: 9, y: 9, type: 'detector' }, // src/server/core/items.ts 실제 스폰 좌표와 동일
 ];
 
 // Phaser의 "씬(Scene)" = 게임 화면 한 장을 담당하는 클래스.
@@ -555,12 +556,13 @@ class MazeScene extends Phaser.Scene {
       // 이미 성공해 여기까지 오지 않는다.
       // ⚠️ 아래 좌표들도 TEMP_ITEMS와 마찬가지로 MAIN_MAP(map-1)의 바닥 칸이어야 하며
       // 코드로 검증하지 않는다 — 맵이 바뀌면 같이 확인할 것.
+      // 2026-07-10: map-1 레이아웃 재설계(23x19)에 맞춰 좌표 갱신.
       console.error('map.getState 실패 — 로컬 프리뷰용 임시 데이터로 대체', err);
       this.myTraps = [
-        { x: 5, y: 7, type: 'slow' },
-        { x: 9, y: 3, type: 'respawn' },
-        { x: 3, y: 5, type: 'blind' },
-        { x: 7, y: 3, type: 'reverse' },
+        { x: 4, y: 5, type: 'slow' },
+        { x: 2, y: 13, type: 'respawn' },
+        { x: 8, y: 9, type: 'blind' },
+        { x: 18, y: 1, type: 'reverse' },
       ];
       footprints = [
         { x: 4, y: 1 },
