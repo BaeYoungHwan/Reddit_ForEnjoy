@@ -239,12 +239,12 @@ const FLASHLIGHT_DURATION_MS = 8000;
 // 폴백 전용 — src/server/core/items.ts의 실제 스폰 좌표(map-1)와 맞춰뒀다.
 // ⚠️ 이 좌표들은 MAIN_MAP(map-1)의 바닥 칸이어야 함 — 코드로 검증하지 않으므로, 맵 레이아웃이
 // 또 바뀌면 여기도 같이 확인할 것(벽 칸을 가리키면 마커가 벽 속에 파묻혀 주울 수 없게 됨).
-// 2026-07-10: map-1 레이아웃 3차 재설계(트리형 구조)에 맞춰 좌표 갱신.
+// 2026-07-10: map-1 레이아웃 4차 재설계(기능별 배치)에 맞춰 좌표 갱신.
 const TEMP_ITEMS: ItemInstance[] = [
-  { x: 11, y: 1, type: 'flashlight' },
-  { x: 13, y: 7, type: 'shield' },
-  { x: 21, y: 7, type: 'trapInstall' },
-  { x: 13, y: 11, type: 'detector' }, // src/server/core/items.ts 실제 스폰 좌표와 동일
+  { x: 5, y: 12, type: 'flashlight' },
+  { x: 9, y: 1, type: 'shield' },
+  { x: 23, y: 1, type: 'trapInstall' },
+  { x: 15, y: 12, type: 'detector' }, // src/server/core/items.ts 실제 스폰 좌표와 동일
 ];
 
 // Phaser의 "씬(Scene)" = 게임 화면 한 장을 담당하는 클래스.
@@ -556,19 +556,19 @@ class MazeScene extends Phaser.Scene {
       // 이미 성공해 여기까지 오지 않는다.
       // ⚠️ 아래 좌표들도 TEMP_ITEMS와 마찬가지로 MAIN_MAP(map-1)의 바닥 칸이어야 하며
       // 코드로 검증하지 않는다 — 맵이 바뀌면 같이 확인할 것.
-      // 2026-07-10: map-1 레이아웃 3차 재설계(트리형 구조)에 맞춰 좌표 갱신.
-      // slow(슬라이드)는 특히 "밟았을 때 실제로 여러 칸 미끄러지는지"가 중요해서, 4방향 중
-      // 최소 한쪽으로 충분히 뚫려있는 자리(러너웨이)를 계산해서 골랐음 — 예전엔 이 계산
-      // 없이 대충 골라서 바로 옆이 벽이라 거의 안 미끄러지는 문제가 있었음.
+      // 2026-07-10: map-1 레이아웃 4차 재설계에 맞춰 좌표 갱신. myTraps는 실제로는 "내가
+      // 설치한 함정"(서버 응답 기준, trapInstallerKey)이라 맵에 고정 배치되는 개념이 아님 —
+      // 여기 좌표는 백엔드 없는 로컬 프리뷰에서만 쓰이는 임시 데이터라 바닥 칸이기만 하면
+      // 되고, 위치 자체에 실제 게임플레이 의미는 없음.
       console.error('map.getState 실패 — 로컬 프리뷰용 임시 데이터로 대체', err);
       this.myTraps = [
-        { x: 1, y: 6, type: 'slow' },
-        { x: 15, y: 7, type: 'respawn' },
-        { x: 9, y: 19, type: 'blind' },
-        { x: 5, y: 11, type: 'reverse' },
+        { x: 3, y: 3, type: 'slow' },
+        { x: 17, y: 3, type: 'respawn' },
+        { x: 3, y: 17, type: 'blind' },
+        { x: 21, y: 17, type: 'reverse' },
       ];
       footprints = [
-        { x: 4, y: 1 },
+        { x: 2, y: 1 },
         { x: 5, y: 3 },
         { x: 1, y: 7 },
       ];
