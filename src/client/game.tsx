@@ -262,6 +262,14 @@ class MazeScene extends Phaser.Scene {
   private playerBaseScaleX = 1;
   private playerBaseScaleY = 1;
 
+  // 걷기 스쿼시(squash & stretch) 트윈의 참조. 시야차단/역방향처럼 몇 초씩 지속되는 함정
+  // 효과가 끝나 텍스처가 원복되는 시점은 이동과 전혀 무관한 고정 시각이라, 플레이어가 그
+  // 사이 계속 걷고 있었다면 원복 순간에 이 트윈이 아직 scaleX/scaleY를 움직이고 있을 확률이
+  // 꽤 높다 — 이 상태에서 텍스처를 바꾸면(setPlayerTexture) 트윈이 이후 프레임에도 계속
+  // 자기 값으로 덮어써서 캐릭터 크기가 꼬인 채로 남는다. setPlayerTexture에서 텍스처를
+  // 바꾸기 직전에 이 트윈을 멈춰서 막는다.
+  private walkBobTween?: Phaser.Tweens.Tween;
+
   // 지속시간이 있는 함정 효과(시야차단/역방향/리스폰)별로 "언제 끝나는지"(this.time.now 기준
   // ms)를 기억해두는 표. 예전엔 단순 카운터(토큰) 하나로 "마지막에 뭘 걸었는지"만 추적했는데,
   // 그러면 서로 다른 함정을 연달아 밟았을 때 나중에 건 효과가 먼저 끝나버려도 그 타이머가
@@ -710,7 +718,10 @@ class MazeScene extends Phaser.Scene {
       this.playerImg.setFlipX(this.playerFacingLeft);
     }
 
-    this.tweens.add({
+    // 이전 걸음의 스쿼시 트윈이 아직 안 끝났으면(연속 이동 등) 멈추고 새로 시작 — 마무리 못한
+    // 트윈이 남아있으면 setPlayerTexture가 맞춰둔 크기를 나중에 덮어써버릴 수 있다.
+    this.walkBobTween?.stop();
+    this.walkBobTween = this.tweens.add({
       targets: this.playerImg,
       scaleY: this.playerBaseScaleY * PLAYER_WALK_SQUASH,
       scaleX: this.playerBaseScaleX * PLAYER_WALK_STRETCH,
@@ -830,7 +841,12 @@ class MazeScene extends Phaser.Scene {
   // 하는데, 이때 playerBaseScaleX/Y를 안 갱신하면 이 함정 텍스처가 떠 있는 동안 걷기
   // 트윈(animatePlayerStep)이 이전 텍스처 기준 배율을 써서 캐릭터가 살짝 찌그러져 보인다 —
   // 항상 "지금 화면에 보이는 텍스처" 기준으로 걷기 트윈이 동작하도록 여기서 같이 맞춰준다.
+  // 걷기 스쿼시 트윈을 먼저 멈추는 이유: 시야차단/역방향처럼 몇 초씩 지속되는 효과가 끝나서
+  // 텍스처가 원복되는 시점은 이동과 무관한 고정 시각이라, 그 순간 이 트윈이 아직 돌고 있을
+  // 수 있다 — 트윈을 안 멈추고 두면 이후 프레임에도 계속 scaleX/scaleY를 자기 값으로
+  // 덮어써서, 지금 막 맞춘 크기가 곧바로 다시 틀어져 버린다.
   private setPlayerTexture(key: string) {
+    this.walkBobTween?.stop();
     this.playerImg.setTexture(key).setDisplaySize(PLAYER_DISPLAY_SIZE, PLAYER_DISPLAY_SIZE);
     this.playerBaseScaleX = this.playerImg.scaleX;
     this.playerBaseScaleY = this.playerImg.scaleY;
@@ -879,6 +895,11 @@ class MazeScene extends Phaser.Scene {
   private flashPlayerTrap(type: TimedTrapType, durationMs: number) {
     this.flashPlayer(TRAP_COLORS[type]);
     const expireAt = this.time.now + durationMs;
+    // 만료 시각이 다른 효과와 정확히 같아지는 경우(refreshPlayerTrapVisual의 동점 처리 참고)
+    // "가장 최근에 건" 효과가 이기게 하려면, Map의 순서(iteration order)가 항상 최신 트리거
+    // 순서를 따라야 한다. Map.set()은 이미 있는 키의 값만 바꿀 뿐 순서는 안 바꾸므로, 같은
+    // 종류를 다시 밟아 재트리거하는 경우에도 순서가 갱신되도록 먼저 delete한 뒤 다시 set한다.
+    this.activeTrapEffects.delete(type);
     this.activeTrapEffects.set(type, expireAt);
     this.refreshPlayerTrapVisual();
 
