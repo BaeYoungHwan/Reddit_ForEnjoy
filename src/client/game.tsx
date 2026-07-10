@@ -284,6 +284,14 @@ const SFX_PATHS = {
 } as const;
 type SfxKey = keyof typeof SFX_PATHS;
 
+// 2026-07-11 피드백: 전반적으로 소리가 커서 기존 0.6 대비 20% 낮춤. 단, 리스폰 함정은
+// 페널티가 가장 큰 함정(위치+탐험 기록 전부 초기화)이라 존재감이 있어야 한다는 반대 피드백을
+// 받아 기존 0.6 대비 15% 키움 — 그래서 리스폰만 별도 볼륨을 준다.
+const DEFAULT_SFX_VOLUME = 0.48;
+const SFX_VOLUME_OVERRIDES: Partial<Record<SfxKey, number>> = {
+  trapRespawn: 0.69,
+};
+
 // ── 아이템 스폰 좌표 ──────────────────────────
 // 2026-07-09: 정상적으로는 loadServerState()가 map.getState 응답(state.items)으로
 // remainingItems를 채운다. 이 상수는 서버 호출이 실패했을 때(백엔드 없는 로컬 프리뷰 등)의
@@ -378,17 +386,23 @@ class MazeScene extends Phaser.Scene {
   //  INVALID_MOVE로 오판정될 수 있다 — 이를 막기 위한 요청 직렬화.)
   private trapDispatcher = new SequentialDispatcher<TrapTriggerOutput>();
 
-  // 지금 재생 중인 발걸음 소리 인스턴스 — 다음 발걸음이나 다른 효과음(아이템 획득 등)이 날 때
-  // 아직 안 끝났으면 끊어서 겹쳐 들리지 않게 한다(playFootstep/playSfx 참고). 걸음 소리 3종을
-  // 순서대로 하나씩 재생하기 위한 인덱스도 같이 관리.
+  // 지금 재생 중인 발걸음 소리 인스턴스 — 다음 발걸음이 날 때 아직 안 끝났으면 끊어서 겹쳐
+  // 들리지 않게 한다(playFootstepNow 참고). 걸음 소리 3종을 순서대로 하나씩 재생하기 위한
+  // 인덱스도 같이 관리.
   private footstepSound: Phaser.Sound.BaseSound | null = null;
   private footstepIndex = 0;
+
+  // 발걸음을 "이벤트 효과음이 끝난 뒤로" 미뤄뒀을 때, 그 사이 또 다른 발걸음 요청이 들어오면
+  // 먼저 예약해둔 재생을 무효화하기 위한 토큰(playFootstep 참고) — 항상 가장 최근 요청 하나만
+  // 실제로 재생됨.
+  private footstepDelayToken = 0;
 
   // 지금 재생 중인 "이벤트" 효과음(발걸음 제외 — 함정 발동, 아이템 획득 등) 인스턴스. 함정을
   // 연달아 밟는 등 이벤트 효과음끼리 겹치면 두 소리가 뒤섞여 들리는 문제가 있어서, 새 이벤트
   // 효과음이 날 때 이전 것을 끊어 항상 "가장 최근에 발동한 효과음"만 들리게 한다(playSfx 참고).
-  // 발걸음은 반대로 이벤트 효과음을 끊지 않는다(playFootstep 참고) — 걷는 동안 함정/아이템
-  // 소리가 끊기면 안 되므로 우선순위를 이벤트 효과음이 항상 이기는 쪽으로 둠.
+  // 반대로 발걸음은 이벤트 효과음을 끊지 않고, 오히려 이벤트 효과음이 아직 재생 중이면 그게
+  // 끝날 때까지 기다렸다가 재생한다(playFootstep 참고) — 아이템을 먹자마자 걸어도 두 소리가
+  // 겹치지 않고 순서대로 들리게 하기 위함.
   private lastEventSound: Phaser.Sound.BaseSound | null = null;
 
   // 아이템 마커 도형(별 모양 — 함정 마커는 박스 모양이라 헷갈리지 않게 구분). 함정 마커와
@@ -489,23 +503,41 @@ class MazeScene extends Phaser.Scene {
       this.lastEventSound?.stop();
       const sound = this.sound.add(key);
       this.lastEventSound = sound;
-      sound.play({ volume: 0.6 });
+      sound.play({ volume: SFX_VOLUME_OVERRIDES[key] ?? DEFAULT_SFX_VOLUME });
     } catch (err) {
       console.error(`효과음 재생 실패: ${key}`, err);
     }
   }
 
-  // 발걸음 전용 재생 — footstep1~3을 한 칸 이동마다 순서대로 하나씩만 재생한다(원래 세 소리가
-  // 한 파일에 이어붙어 있어서 매번 전부 재생되던 문제 수정). 이전 발걸음이 아직 울리는 중에
-  // 새 걸음을 내디디면(연속 이동 시 흔함) 겹쳐 들리지 않게 먼저 끊는다.
+  // 발걸음 재생 요청 — 아이템 획득 등 이벤트 효과음이 아직 재생 중이면 그게 끝날 때까지
+  // 미뤘다가 재생한다(피드백: 아이템 먹고 바로 걸어도 두 소리가 안 겹치고 순서대로 나야 함).
+  // 대기 중 또 다른 발걸음이 요청되면(연속 이동) 토큰을 갱신해 먼저 예약해둔 재생을 무효화 —
+  // 항상 가장 최근 요청 하나만 실제로 재생됨.
   private playFootstep() {
+    const activeEvent = this.lastEventSound;
+    if (activeEvent?.isPlaying) {
+      const token = ++this.footstepDelayToken;
+      const remainingMs = Math.max(30, (activeEvent.duration - activeEvent.seek) * 1000);
+      this.time.delayedCall(remainingMs, () => {
+        if (token !== this.footstepDelayToken) return; // 그 사이 더 최근 요청이 들어왔으면 무시
+        this.playFootstep(); // 재평가 — 대기하는 사이 다른 이벤트 효과음으로 바뀌었으면 다시 대기
+      });
+      return;
+    }
+    this.playFootstepNow();
+  }
+
+  // 발걸음 소리를 실제로 재생 — footstep1~3을 한 칸 이동마다 순서대로 하나씩만 재생한다(원래 세
+  // 소리가 한 파일에 이어붙어 있어서 매번 전부 재생되던 문제 수정). 이전 발걸음이 아직 울리는
+  // 중에 새 걸음을 내디디면(연속 이동 시 흔함) 겹쳐 들리지 않게 먼저 끊는다.
+  private playFootstepNow() {
     const keys: SfxKey[] = ['footstep1', 'footstep2', 'footstep3'];
     const key = keys[this.footstepIndex % keys.length]!;
     this.footstepIndex++;
     try {
       this.footstepSound?.stop();
       this.footstepSound = this.sound.add(key);
-      this.footstepSound.play({ volume: 0.6 });
+      this.footstepSound.play({ volume: DEFAULT_SFX_VOLUME });
     } catch (err) {
       console.error(`효과음 재생 실패: ${key}`, err);
     }
