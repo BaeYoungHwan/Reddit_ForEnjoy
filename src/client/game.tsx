@@ -246,17 +246,25 @@ class MazeScene extends Phaser.Scene {
   // 캐릭터 이미지(Character-normal.png). setFlipX로 좌우 방향을 표현한다.
   private playerImg!: Phaser.GameObjects.Image;
 
+  // flashPlayer가 예약해둔 "틴트 해제" 타이머. 새 flashPlayer 호출이 올 때 이전 타이머를
+  // 취소해야, 200ms 안에 색이 다른 효과를 연달아 밟았을 때 먼저 걸린 타이머가 나중 색을
+  // 조기에 지워버리는 문제가 안 생긴다.
+  private clearTintTimer?: Phaser.Time.TimerEvent;
+
   // 캐릭터 이미지의 "쉬는 상태" 기준 스케일. 걷기 트윈(squash & stretch)이 매번 이 값을
   // 기준으로 눌렸다 펴져야 여러 번 빠르게 이동해도 크기가 조금씩 어긋나며 누적되지 않는다.
   private playerBaseScaleX = 1;
   private playerBaseScaleY = 1;
 
-  // 함정 이미지 효과가 몇 번째로 발동됐는지 세는 값. 지속시간이 있는 함정(시야차단/역방향)을
-  // 효과가 끝나기 전에 다시 밟으면, 먼저 걸린 효과의 "durationMs 뒤 원복" 타이머가 나중에
-  // 뒤늦게 실행되면서 방금 새로 건 효과를 조기에 끊어버리는 문제가 있었다 — 타이머를 걸 때
-  // 이 값을 찍어두고, 실제로 원복을 실행하기 직전에 그 사이 값이 안 바뀌었는지(=더 최신
-  // 효과가 안 겹쳤는지) 확인해서, 오래된 타이머는 아무것도 안 하고 조용히 스킵한다.
-  private playerTrapToken = 0;
+  // 지속시간이 있는 함정 효과(시야차단/역방향/리스폰)별로 "언제 끝나는지"(this.time.now 기준
+  // ms)를 기억해두는 표. 예전엔 단순 카운터(토큰) 하나로 "마지막에 뭘 걸었는지"만 추적했는데,
+  // 그러면 서로 다른 함정을 연달아 밟았을 때 나중에 건 효과가 먼저 끝나버려도 그 타이머가
+  // "최신"이라고 오판해 캐릭터를 원복시켜버리는 문제가 있었다(실제로는 먼저 건 효과가 아직
+  // 안 끝났는데). 이제는 "지금 활성 중인 효과들 중 가장 늦게 끝나는 것"을 항상 화면에
+  // 반영한다 — refreshPlayerTrapVisual 참고. 슬라이드는 지속시간이 고정이 아니라(벽 만날
+  // 때까지) 이 표에 넣지 않고 isSliding으로 따로 관리(슬라이드 중엔 항상 최우선으로 표시).
+  private activeTrapEffects = new Map<TrapType, number>();
+  private isSliding = false;
 
   // 마지막으로 이동한 좌우 방향(true면 왼쪽을 보고 있음). 위/아래로만 이동해도 이 값은
   // 유지되므로, 캐릭터는 계속 마지막으로 봤던 좌우 방향을 보게 된다.
@@ -801,47 +809,75 @@ class MazeScene extends Phaser.Scene {
   }
 
   // 함정을 밟았을 때 캐릭터 색을 잠깐 바꿔서 "뭔가 발동했다"는 걸 보여주는 간단한 이펙트.
+  // 이전에 걸어둔 clearTint 타이머가 아직 안 끝났으면 취소하고 새로 건다 — 안 그러면 200ms
+  // 안에 색이 다른 효과를 연달아 밟았을 때, 먼저 걸린 타이머가 나중 색을 조기에 지워버린다.
   private flashPlayer(color: number) {
     this.playerImg.setTint(color);
-    this.time.delayedCall(200, () => {
+    this.clearTintTimer?.remove();
+    this.clearTintTimer = this.time.delayedCall(200, () => {
       this.playerImg.clearTint(); // 원래 이미지 색으로 복귀
     });
   }
 
-  // 캐릭터 이미지를 함정 종류를 상징하는 그림으로 바꾼다(원복은 별도 — revertPlayerTexture
-  // 또는 flashPlayerTrap의 delayedCall이 담당). setDisplaySize를 다시 호출하는 이유: 함정별
-  // 원본 이미지 크기가 서로 달라서, 텍스처만 바꾸면 캐릭터가 표시되는 크기도 같이
-  // 바뀌어버림(원래 크기로 다시 맞춰줘야 함). 반환값(토큰)은 이 효과가 "아직 최신인지"
-  // 나중에 확인하는 데 쓰인다 — flashPlayerTrap 주석 참고.
-  private setPlayerTrapTexture(type: TrapType): number {
-    this.playerImg.setTexture(PLAYER_TRAP_TEXTURE_KEYS[type]).setDisplaySize(PLAYER_DISPLAY_SIZE, PLAYER_DISPLAY_SIZE);
-    return ++this.playerTrapToken;
+  // 캐릭터 이미지를 바꾸고, 그 텍스처 기준으로 "쉬는 상태" 스케일(playerBaseScaleX/Y)도 같이
+  // 갱신한다. 함정별 원본 이미지 크기가 서로 달라서 setDisplaySize로 매번 크기를 다시 맞춰야
+  // 하는데, 이때 playerBaseScaleX/Y를 안 갱신하면 이 함정 텍스처가 떠 있는 동안 걷기
+  // 트윈(animatePlayerStep)이 이전 텍스처 기준 배율을 써서 캐릭터가 살짝 찌그러져 보인다 —
+  // 항상 "지금 화면에 보이는 텍스처" 기준으로 걷기 트윈이 동작하도록 여기서 같이 맞춰준다.
+  private setPlayerTexture(key: string) {
+    this.playerImg.setTexture(key).setDisplaySize(PLAYER_DISPLAY_SIZE, PLAYER_DISPLAY_SIZE);
+    this.playerBaseScaleX = this.playerImg.scaleX;
+    this.playerBaseScaleY = this.playerImg.scaleY;
   }
 
-  // 캐릭터 이미지를 평상시 모습으로 되돌린다.
-  private revertPlayerTexture() {
-    this.playerImg.setTexture(PLAYER_TEXTURE_KEY).setDisplaySize(PLAYER_DISPLAY_SIZE, PLAYER_DISPLAY_SIZE);
-    this.playerTrapToken++; // 지금 진행 중이던 효과도 여기서 끝난 것으로 처리
+  // 지금 화면에 어떤 캐릭터 이미지를 보여줘야 하는지 다시 계산해서 반영한다 — 슬라이드 중이면
+  // 무조건 슬라이드 이미지가 최우선(슬라이드는 activeTrapEffects에 안 들어가고 isSliding으로
+  // 관리), 아니면 activeTrapEffects 중 "가장 늦게 끝나는" 효과의 이미지를 보여주고, 활성
+  // 효과가 하나도 없으면 평상시 모습으로 되돌린다. 함정 효과 시작/종료(flashPlayerTrap의
+  // 타이머, applySlideTrap/slideStep의 시작·종료 지점, checkGoalReached)에서 항상 이 함수를
+  // 거쳐야 "지금 활성 중인 효과와 화면이 어긋나는" 문제가 안 생긴다.
+  private refreshPlayerTrapVisual() {
+    if (this.isSliding) {
+      this.setPlayerTexture(PLAYER_TRAP_TEXTURE_KEYS.slow);
+      return;
+    }
+
+    let latestType: TrapType | undefined;
+    let latestExpireAt = -Infinity;
+    for (const [type, expireAt] of this.activeTrapEffects) {
+      if (expireAt > latestExpireAt) {
+        latestExpireAt = expireAt;
+        latestType = type;
+      }
+    }
+
+    this.setPlayerTexture(latestType ? PLAYER_TRAP_TEXTURE_KEYS[latestType] : PLAYER_TEXTURE_KEY);
   }
 
   // 함정 종류별로 flashPlayer(색 틴트)에 더해 캐릭터 이미지 자체를 그 함정을 상징하는 그림으로
   // durationMs 동안 바꾼다 — 틴트 색만으로는 어떤 함정에 걸렸는지 직관적으로 안 와닿는다는 점을
   // 보완. durationMs는 그 함정의 실제 효과 지속시간과 맞춰서 넘겨야 한다(예: 시야차단은
   // BLIND_DURATION_MS) — 그래야 "효과가 지속되는 동안 캐릭터도 유지"된다. 슬라이드처럼 지속
-  // 시간이 고정돼있지 않은 경우는 이 함수 대신 setPlayerTrapTexture/revertPlayerTexture를
-  // 효과 시작/종료 시점에 직접 호출한다(applySlideTrap/slideStep 참고).
+  // 시간이 고정돼있지 않은 경우는 이 함수 대신 isSliding/refreshPlayerTrapVisual을 효과
+  // 시작/종료 시점에 직접 호출한다(applySlideTrap/slideStep 참고).
   //
-  // 지속시간이 끝나기 전에 같은(또는 다른) 함정을 다시 밟으면, 이 함수가 다시 호출돼 새
-  // 타이머가 걸리는데 — 이때 "먼저 걸려 있던" 타이머가 나중에 뒤늦게 실행되면서 방금 새로
-  // 건 효과를 조기에 원복시켜버리는 문제가 있었다(playerTrapToken이 도입된 이유). 타이머를
-  // 걸 때의 토큰을 기억해뒀다가, 실제 실행 시점에 그 사이 토큰이 안 바뀌었을 때만(=더 최신
-  // 효과가 안 겹쳤을 때만) 원복한다.
+  // 지속시간이 끝나기 전에 같은(또는 다른) 함정을 다시 밟아도 activeTrapEffects에 각자 자기
+  // 만료 시각으로 따로 기록되고, refreshPlayerTrapVisual이 그중 가장 늦게 끝나는 효과를
+  // 계속 보여주므로, 먼저 건 효과가 아직 안 끝났는데 캐릭터가 먼저 원래대로 돌아와버리는
+  // 문제가 안 생긴다(예전엔 카운터 하나로 "마지막에 뭘 걸었는지"만 봐서, 나중에 건 효과가
+  // 먼저 끝나버리면 그 타이머가 캐릭터를 조기에 원복시켰음).
   private flashPlayerTrap(type: TrapType, durationMs: number) {
     this.flashPlayer(TRAP_COLORS[type]);
-    const token = this.setPlayerTrapTexture(type);
+    const expireAt = this.time.now + durationMs;
+    this.activeTrapEffects.set(type, expireAt);
+    this.refreshPlayerTrapVisual();
+
     this.time.delayedCall(durationMs, () => {
-      if (this.playerTrapToken === token) {
-        this.revertPlayerTexture();
+      // 그 사이 같은 종류가 다시 발동해서 만료 시각이 갱신됐으면(더 나중 시각), 이 타이머는
+      // 오래된 것이니 아무것도 하지 않는다 — 갱신된 타이머가 나중에 알아서 지운다.
+      if (this.activeTrapEffects.get(type) === expireAt) {
+        this.activeTrapEffects.delete(type);
+        this.refreshPlayerTrapVisual();
       }
     });
   }
@@ -1022,7 +1058,8 @@ class MazeScene extends Phaser.Scene {
   // 단, 미끄러지는 도중 "다른" 방향키를 누르면 그 자리에서 탈출 가능 (팀원 피드백 반영).
   private applySlideTrap(dx: number, dy: number) {
     this.flashPlayer(TRAP_COLORS.slow);
-    this.setPlayerTrapTexture('slow'); // 미끄러지는 동안 계속 유지 — slideStep이 끝날 때 직접 되돌림
+    this.isSliding = true; // 미끄러지는 동안엔 다른 함정 효과보다 슬라이드 이미지를 우선 표시
+    this.refreshPlayerTrapVisual();
     this.isMoving = true; // 미끄러지는 동안은 방향키 입력을 무시하게 잠가둠
     this.slideStep(dx, dy);
   }
@@ -1034,7 +1071,8 @@ class MazeScene extends Phaser.Scene {
     const pressed = this.getPressedDirection();
     if (pressed && (pressed.dx !== dx || pressed.dy !== dy)) {
       this.isMoving = false;
-      this.revertPlayerTexture(); // 슬라이드 탈출 — 캐릭터 이미지도 같이 원복
+      this.isSliding = false;
+      this.refreshPlayerTrapVisual(); // 슬라이드 탈출 — 시야차단 등 다른 효과가 아직 활성이면 그걸로, 없으면 평상시 모습으로
       return;
     }
 
@@ -1044,7 +1082,8 @@ class MazeScene extends Phaser.Scene {
     if (!this.isWalkable(targetX, targetY)) {
       // 벽(또는 맵 끝)에 부딪혀서 미끄러짐이 끝남 → 다시 방향키 입력을 받을 수 있게 풀어줌
       this.isMoving = false;
-      this.revertPlayerTexture(); // 슬라이드 종료 — 캐릭터 이미지도 같이 원복
+      this.isSliding = false;
+      this.refreshPlayerTrapVisual(); // 슬라이드 종료 — 시야차단 등 다른 효과가 아직 활성이면 그걸로, 없으면 평상시 모습으로
       return;
     }
 
@@ -1139,6 +1178,12 @@ class MazeScene extends Phaser.Scene {
 
     this.hasFinished = true;
     this.isMoving = false;
+
+    // 슬라이드로 미끄러지다 정확히 골인 칸에 멈추는 경우, slideStep이 원복 호출까지 못
+    // 가고 여기서 바로 끝나버려서 캐릭터가 슬라이드 의상을 입은 채로 골인 화면에 남는
+    // 문제가 있었다 — 여기서도 확실히 정리한다.
+    this.isSliding = false;
+    this.refreshPlayerTrapVisual();
 
     // 다음 주기적 flush까지 기다리면 마지막 몇 칸이 화면 종료 후로 밀릴 수 있어 바로 전송.
     void this.flushFootprints();
