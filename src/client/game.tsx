@@ -258,6 +258,25 @@ const DETECTOR_REVEAL_DISPLAY_MS = 5000;
 const FLASHLIGHT_VISION_RADIUS = 4;
 const FLASHLIGHT_DURATION_MS = 8000;
 
+// ── 효과음(public/sounds/*.mp3, 원호가 직접 소싱) ──────────────────
+// 배경음(BGM)과 로드아웃 화면의 아이템 선택/확정음은 이번 스코프에서 제외 — 그 두 가지만 빼고
+// 게임 화면(Phaser)에서 나는 모든 효과음을 여기서 로드/재생한다. 로드아웃 화면 자체(splash.tsx)의
+// 공용 버튼 클릭음은 Phaser가 아니라 별도로 처리(splash.tsx의 playUiClickSound 참고).
+const SFX_PATHS = {
+  footstep: '/sounds/footstep.mp3',
+  itemPickup: '/sounds/item-pickup.mp3',
+  shieldBlock: '/sounds/shield-block.mp3',
+  detectorScan: '/sounds/trap-detector-scan.mp3',
+  trapInstallSuccess: '/sounds/trap-install-success.mp3',
+  trapInstallFail: '/sounds/trap-install-fail.mp3',
+  trapSlide: '/sounds/trap-slide.mp3',
+  trapRespawn: '/sounds/trap-respawn.mp3',
+  trapBlind: '/sounds/trap-blind.mp3',
+  trapReverse: '/sounds/trap-reverse.mp3',
+  goal: '/sounds/goal.mp3',
+} as const;
+type SfxKey = keyof typeof SFX_PATHS;
+
 // ── 아이템 스폰 좌표 ──────────────────────────
 // 2026-07-09: 정상적으로는 loadServerState()가 map.getState 응답(state.items)으로
 // remainingItems를 채운다. 이 상수는 서버 호출이 실패했을 때(백엔드 없는 로컬 프리뷰 등)의
@@ -431,6 +450,17 @@ class MazeScene extends Phaser.Scene {
     this.load.image(PLAYER_TRAP_TEXTURE_KEYS.blind, '/sprites/Character-blind.png');
     this.load.image(PLAYER_TRAP_TEXTURE_KEYS.reverse, '/sprites/Character-reverse.png');
     this.load.image(PLAYER_DETECTOR_TEXTURE_KEY, '/sprites/Character-detector.png');
+    (Object.keys(SFX_PATHS) as SfxKey[]).forEach((key) => this.load.audio(key, SFX_PATHS[key]));
+  }
+
+  // 효과음 재생 공용 헬퍼 — 파일 하나가 로드 실패해도(예: 아직 못 구한 사운드) 게임 전체가
+  // 멈추면 안 되므로 try/catch로 감싼다.
+  private playSfx(key: SfxKey) {
+    try {
+      this.sound.play(key, { volume: 0.6 });
+    } catch (err) {
+      console.error(`효과음 재생 실패: ${key}`, err);
+    }
   }
 
   // create(): 게임이 시작될 때 딱 한 번만 실행됨. 여기서 맵과 캐릭터를 화면에 배치합니다.
@@ -815,6 +845,7 @@ class MazeScene extends Phaser.Scene {
     this.playerGridX = targetX;
     this.playerGridY = targetY;
     this.animatePlayerStep(dx);
+    this.playSfx('footstep');
 
     // tween(트윈) = 값을 순간이동이 아니라 "서서히" 바꿔주는 Phaser 기능.
     // 여기서는 캐릭터의 실제 화면 좌표(x, y)를 목표 지점까지 BASE_MOVE_DURATION(ms) 동안 부드럽게 이동시킴.
@@ -1083,6 +1114,7 @@ class MazeScene extends Phaser.Scene {
   // 쉴드가 함정을 막아줬을 때 캐릭터를 감싸는 원형 이펙트 — 하얀 테두리 + 옅은 하늘색
   // 원이 커지면서 투명해지는 트윈으로 "보호막이 퍼졌다 사라지는" 느낌을 냄.
   private showShieldBlockEffect() {
+    this.playSfx('shieldBlock');
     const ring = this.add.circle(this.playerImg.x, this.playerImg.y, TILE_SIZE * 0.35, 0xbfffff, 0.5);
     ring.setStrokeStyle(3, 0xffffff, 0.9);
     ring.setDepth(15);
@@ -1103,6 +1135,7 @@ class MazeScene extends Phaser.Scene {
   // 효과가 끝난 뒤 손전등의 남은 지속시간이 복원되지 않고 기본값으로 돌아가는 것도 지금은
   // 의도한 단순화 — 팀 플레이테스트 피드백 있으면 재검토.
   private applyFlashlightItem() {
+    this.playSfx('itemPickup');
     this.showFloatingLabel(`${ITEM_LABELS.flashlight} acquired!`);
     this.flashPlayer(ITEM_COLORS.flashlight);
     this.currentVisionRadius = FLASHLIGHT_VISION_RADIUS;
@@ -1125,6 +1158,7 @@ class MazeScene extends Phaser.Scene {
   // 함정 무효화(쉴드) — items.md: 반응형. 주우면 바로 발동하는 게 아니라 보유 상태로만
   // 바뀌고, 실제 효과는 다음 함정을 밟는 순간(checkTrapTrigger)에 소모되며 적용됨.
   private applyShieldItem() {
+    this.playSfx('itemPickup');
     this.showFloatingLabel(`${ITEM_LABELS.shield} acquired!`);
     this.hasShield = true;
     this.flashPlayer(ITEM_COLORS.shield);
@@ -1137,8 +1171,10 @@ class MazeScene extends Phaser.Scene {
   // 관리 — 표시 시간이 끝나면 흔적 없이 사라져야 하고, 그 사이 실제 함정 판정(trap.trigger)
   // 로직에는 전혀 관여하지 않는 순수 시각 효과다.
   private applyDetectorItem(revealedTraps: TrapInstance[]) {
+    this.playSfx('itemPickup');
     this.showFloatingLabel(`${ITEM_LABELS.detector} acquired!`);
     this.flashPlayer(ITEM_COLORS.detector);
+    this.playSfx('detectorScan');
 
     this.clearRevealedTrapMarkers();
     const token = ++this.detectorRevealToken;
@@ -1205,6 +1241,7 @@ class MazeScene extends Phaser.Scene {
   // 정해진다(뽑기형 — 플레이어가 종류를 고르지 않음, 2026-07-09 확인). 실제 서버 호출은
   // Z키를 눌렀을 때 attemptInstall()에서 처리.
   private applyTrapInstallItem() {
+    this.playSfx('itemPickup');
     this.heldTrapType = TRAP_TYPES[Math.floor(Math.random() * TRAP_TYPES.length)]!;
     this.flashPlayer(ITEM_COLORS.trapInstall);
     this.showFloatingLabel(`${ITEM_LABELS.trapInstall} acquired! (${TRAP_LABELS[this.heldTrapType]})`);
@@ -1233,6 +1270,7 @@ class MazeScene extends Phaser.Scene {
       this.myTraps = result.myTraps;
 
       if (result.success) {
+        this.playSfx('trapInstallSuccess');
         this.heldTrapType = null; // 성공해야 소모(1회성)
         this.renderInstalledTrapMarker({ x: this.playerGridX, y: this.playerGridY, type });
         this.updateFog();
@@ -1241,6 +1279,7 @@ class MazeScene extends Phaser.Scene {
       }
 
       // 실패(개수 제한/타일 점유 등)면 소모되지 않고 그대로 들고 있음 — 다른 칸에서 재시도 가능.
+      this.playSfx('trapInstallFail');
       const message = result.reason
         ? INSTALL_FAILURE_MESSAGES[result.reason]
         : INSTALL_FAILURE_MESSAGES.RETRY;
@@ -1258,6 +1297,7 @@ class MazeScene extends Phaser.Scene {
   // 효과: 밟으면 방금 누르고 있던 방향으로, 벽에 부딪힐 때까지 자동으로 한 칸씩 계속 미끄러짐.
   // 단, 미끄러지는 도중 "다른" 방향키를 누르면 그 자리에서 탈출 가능 (팀원 피드백 반영).
   private applySlideTrap(dx: number, dy: number) {
+    this.playSfx('trapSlide');
     this.flashPlayer(TRAP_COLORS.slow);
     this.isSliding = true; // 미끄러지는 동안엔 다른 함정 효과보다 슬라이드 이미지를 우선 표시
     this.refreshPlayerTrapVisual();
@@ -1320,6 +1360,7 @@ class MazeScene extends Phaser.Scene {
   // + 플레이테스트 결과 반영: 위치뿐 아니라 지금까지 밝힌 길도 함께 초기화해서 페널티를 더 크게 함
   // (traps.md 원안은 "위치만" 리셋이었으나, 벌칙감이 부족해 시야차단 함정처럼 탐색 기록도 리셋하도록 조정).
   private applyRespawnTrap() {
+    this.playSfx('trapRespawn');
     this.flashPlayerTrap('respawn', RESPAWN_FLASH_MS);
 
     this.playerGridX = SPAWN_POSITION.x;
@@ -1343,6 +1384,7 @@ class MazeScene extends Phaser.Scene {
   // 3. 시야차단 함정 — traps.md/vision-system.md: 지금까지 밝힌 길이 다시 안개로 덮이고,
   // 5초간 시야 반경이 크게 줄어듦 (이 게임의 시그니처 함정, 블라인드 모드와 직접 시너지).
   private applyBlindTrap() {
+    this.playSfx('trapBlind');
     // 지금까지 탐색해서 기억해둔 모든 타일을 다시 'hidden'으로 되돌림 (탐험 진행도 페널티)
     for (let y = 0; y < MAP_HEIGHT; y++) {
       for (let x = 0; x < MAP_WIDTH; x++) {
@@ -1367,6 +1409,7 @@ class MazeScene extends Phaser.Scene {
 
   // 4. 역방향 함정 — traps.md: 4초간 방향키 입력이 반대로 동작.
   private applyReverseTrap() {
+    this.playSfx('trapReverse');
     this.isReversed = true;
 
     // applyBlindTrap과 동일한 이유로 실제 효과 복원을 onExpire로 넘긴다.
@@ -1380,6 +1423,7 @@ class MazeScene extends Phaser.Scene {
   private checkGoalReached(x: number, y: number): boolean {
     if (x !== GOAL_POSITION.x || y !== GOAL_POSITION.y) return false;
 
+    this.playSfx('goal');
     this.hasFinished = true;
     this.isMoving = false;
 
