@@ -50,6 +50,7 @@ function parseLayout(id: string, name: string, rows: string[]): MazeMap {
 // 6칸 이상인 칸이 160곳). 골인 지점은 여전히 모서리가 아닌 미로 내부. 생성/검증 스크립트는
 // 시드 고정 recursive-backtracker(방향 유지 편향 포함) + 소량 루프 + BFS 도달성/러너웨이
 // 계산 방식(재현 가능) — 함정/아이템 스폰 좌표도 전부 이 레이아웃 기준으로 다시 확인해
+// 갱신함(server/core/items.ts, game.tsx의 TEMP_ITEMS/myTraps 폴백도 같이 확인할 것).
 // 2026-07-10 4차 재설계(피드백 반영): 3차도 실제 플레이해보니 "안개 걷힌 곳도 아닌데
 // 시야가 뚫려 보인다"는 별도 버그(체비셰프 거리 기반 시야 판정이 벽을 무시함 — game.tsx
 // updateFog, 1️⃣ 임소리와 별도 논의 예정)로 인해 조기에 골인 지점이 보여버리는 문제가
