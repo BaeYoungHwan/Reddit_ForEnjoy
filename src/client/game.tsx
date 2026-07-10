@@ -246,6 +246,13 @@ class MazeScene extends Phaser.Scene {
   private playerBaseScaleX = 1;
   private playerBaseScaleY = 1;
 
+  // 함정 이미지 효과가 몇 번째로 발동됐는지 세는 값. 지속시간이 있는 함정(시야차단/역방향)을
+  // 효과가 끝나기 전에 다시 밟으면, 먼저 걸린 효과의 "durationMs 뒤 원복" 타이머가 나중에
+  // 뒤늦게 실행되면서 방금 새로 건 효과를 조기에 끊어버리는 문제가 있었다 — 타이머를 걸 때
+  // 이 값을 찍어두고, 실제로 원복을 실행하기 직전에 그 사이 값이 안 바뀌었는지(=더 최신
+  // 효과가 안 겹쳤는지) 확인해서, 오래된 타이머는 아무것도 안 하고 조용히 스킵한다.
+  private playerTrapToken = 0;
+
   // 마지막으로 이동한 좌우 방향(true면 왼쪽을 보고 있음). 위/아래로만 이동해도 이 값은
   // 유지되므로, 캐릭터는 계속 마지막으로 봤던 좌우 방향을 보게 된다.
   private playerFacingLeft = false;
@@ -785,14 +792,17 @@ class MazeScene extends Phaser.Scene {
   // 캐릭터 이미지를 함정 종류를 상징하는 그림으로 바꾼다(원복은 별도 — revertPlayerTexture
   // 또는 flashPlayerTrap의 delayedCall이 담당). setDisplaySize를 다시 호출하는 이유: 함정별
   // 원본 이미지 크기가 서로 달라서, 텍스처만 바꾸면 캐릭터가 표시되는 크기도 같이
-  // 바뀌어버림(원래 크기로 다시 맞춰줘야 함).
-  private setPlayerTrapTexture(type: TrapType) {
+  // 바뀌어버림(원래 크기로 다시 맞춰줘야 함). 반환값(토큰)은 이 효과가 "아직 최신인지"
+  // 나중에 확인하는 데 쓰인다 — flashPlayerTrap 주석 참고.
+  private setPlayerTrapTexture(type: TrapType): number {
     this.playerImg.setTexture(PLAYER_TRAP_TEXTURE_KEYS[type]).setDisplaySize(PLAYER_DISPLAY_SIZE, PLAYER_DISPLAY_SIZE);
+    return ++this.playerTrapToken;
   }
 
   // 캐릭터 이미지를 평상시 모습으로 되돌린다.
   private revertPlayerTexture() {
     this.playerImg.setTexture(PLAYER_TEXTURE_KEY).setDisplaySize(PLAYER_DISPLAY_SIZE, PLAYER_DISPLAY_SIZE);
+    this.playerTrapToken++; // 지금 진행 중이던 효과도 여기서 끝난 것으로 처리
   }
 
   // 함정 종류별로 flashPlayer(색 틴트)에 더해 캐릭터 이미지 자체를 그 함정을 상징하는 그림으로
@@ -801,11 +811,19 @@ class MazeScene extends Phaser.Scene {
   // BLIND_DURATION_MS) — 그래야 "효과가 지속되는 동안 캐릭터도 유지"된다. 슬라이드처럼 지속
   // 시간이 고정돼있지 않은 경우는 이 함수 대신 setPlayerTrapTexture/revertPlayerTexture를
   // 효과 시작/종료 시점에 직접 호출한다(applySlideTrap/slideStep 참고).
+  //
+  // 지속시간이 끝나기 전에 같은(또는 다른) 함정을 다시 밟으면, 이 함수가 다시 호출돼 새
+  // 타이머가 걸리는데 — 이때 "먼저 걸려 있던" 타이머가 나중에 뒤늦게 실행되면서 방금 새로
+  // 건 효과를 조기에 원복시켜버리는 문제가 있었다(playerTrapToken이 도입된 이유). 타이머를
+  // 걸 때의 토큰을 기억해뒀다가, 실제 실행 시점에 그 사이 토큰이 안 바뀌었을 때만(=더 최신
+  // 효과가 안 겹쳤을 때만) 원복한다.
   private flashPlayerTrap(type: TrapType, durationMs: number) {
     this.flashPlayer(TRAP_COLORS[type]);
-    this.setPlayerTrapTexture(type);
+    const token = this.setPlayerTrapTexture(type);
     this.time.delayedCall(durationMs, () => {
-      this.revertPlayerTexture();
+      if (this.playerTrapToken === token) {
+        this.revertPlayerTexture();
+      }
     });
   }
 
