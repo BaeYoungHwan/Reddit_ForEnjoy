@@ -9,6 +9,7 @@ import { buildMazeSvgDataUri } from './mazePattern';
 import { computeClothWaveX } from './goalFlagWave';
 import { trpc } from './trpcClient';
 import { SequentialDispatcher } from './sequentialDispatcher';
+import { LOADOUT_STORAGE_KEY } from './loadout';
 import type { Position, TrapInstallOutput, TrapInstance, TrapTriggerOutput, TrapType } from '../shared/game-types';
 
 // flashPlayerTrap/activeTrapEffects가 다루는 함정 종류. 슬라이드('slow')는 지속시간이
@@ -445,6 +446,10 @@ class MazeScene extends Phaser.Scene {
 
     // 게임 시작하자마자 시작 지점 기준으로 시야(안개)부터 계산해서 보여줌
     this.updateFog();
+
+    // 스플래시 로드아웃 화면에서 고른 아이템 지급 — updateFog 이후에 호출해야 손전등이
+    // 즉시 넓힌 시야가 초기 안개 계산에 덮이지 않는다.
+    this.applyLoadout();
 
     // 서버에 위치 앵커를 초기화하고 내가 설치한 함정 목록을 받아온다 (fire-and-forget).
     void this.loadServerState();
@@ -1051,6 +1056,28 @@ class MazeScene extends Phaser.Scene {
     this.showFloatingLabel(`${ITEM_LABELS.shield} 획득!`);
     this.hasShield = true;
     this.flashPlayer(ITEM_COLORS.shield);
+  }
+
+  // 스플래시 로드아웃 화면(splash.tsx)에서 고른 아이템을 게임 시작 시 즉시 지급한다. 별도
+  // 웹뷰라 React state로 못 넘기고 localStorage로 넘겨받는다(loadout.ts 참고 — 예전엔 이
+  // 값을 아무도 안 읽어서 로드아웃 선택이 실제 게임에 전혀 반영이 안 됐음, PR #33 리뷰로
+  // 발견). 값이 없거나 알아볼 수 없으면(예: 스플래시를 거치지 않고 game.html에 바로 진입한
+  // 로컬 프리뷰) 아무것도 지급하지 않는다 — "선택 안 하면 빈손으로 시작"이 안전한 기본값.
+  private applyLoadout() {
+    let saved: string | null;
+    try {
+      saved = localStorage.getItem(LOADOUT_STORAGE_KEY);
+    } catch {
+      return; // localStorage 접근이 막힌 환경에서도 게임 자체는 정상 진행되게
+    }
+
+    if (saved === 'flashlight') this.applyFlashlightItem();
+    else if (saved === 'shield') this.applyShieldItem();
+    else if (saved === 'trapDetector') {
+      // 함정 탐지기는 아직 서버 API가 없어(docs/wbs.md 블로커 참고) 실제 효과를 줄 수 없다 —
+      // 선택 자체는 존중하되, 조용히 무시하는 대신 지금은 미구현이라는 걸 알려준다.
+      this.showFloatingLabel('함정 탐지기 기능은 준비 중입니다');
+    }
   }
 
   // 함정 설치 — items.md: 즉시 소모(1회성). 어떤 함정을 설치하게 될지는 줍는 순간 랜덤으로

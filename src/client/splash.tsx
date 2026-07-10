@@ -14,6 +14,7 @@ import { angleBetween, buildMazeBackground, findPath, tileToPercent } from './ma
 import { formatClearTime } from './format';
 import { getMazeMap } from '../shared/maps';
 import type { LeaderboardEntry } from '../shared/game-types';
+import { LOADOUT_STORAGE_KEY, type LoadoutId } from './loadout';
 
 const DEFAULT_MAP_ID = 'map-1';
 const MAIN_MAP = getMazeMap(DEFAULT_MAP_ID);
@@ -47,15 +48,9 @@ const FOOTPRINTS = WALK_TILES.map((tile, i) => {
 
 type View = 'menu' | 'loadout' | 'leaderboard';
 
-// items.md 2026-07-09 확정: 로드아웃에서 고를 수 있는 건 4종 중 "함정 설치"를 뺀 3종뿐
-// (함정 설치는 상시 보유가 아니라 맵에서 랜덤 스폰된 걸 주워야 쓸 수 있음 — 다른 아이템과 동일 방식).
-// 함정 탐지기는 아직 서버 API가 없어(game-types.ts의 ItemType은 flashlight/shield뿐)
-// 클라이언트 전용 id로 취급한다 — 서버 연동은 이 화면의 스코프 밖(1️⃣ "아이템 로드아웃 UI 연동" 담당).
-type LoadoutId = 'trapDetector' | 'shield' | 'flashlight';
-
-// game.tsx가 별도 웹뷰(entrypoint)로 뜨기 때문에 React state로는 선택값을 못 넘긴다 — 같은
-// origin의 localStorage로 넘긴다(TEMP_MAP/TEMP_ITEMS처럼, 실제 서버 연동 전 임시 다리 역할).
-const LOADOUT_STORAGE_KEY = 'maze-footprints:loadout';
+// LoadoutId/LOADOUT_STORAGE_KEY는 ./loadout.ts로 옮겨서 game.tsx와 공유한다(2026-07-10 —
+// 처음엔 여기 로컬로 정의했었는데, game.tsx가 이 값을 전혀 안 읽어서 로드아웃 선택이 실제
+// 게임에 반영 안 되는 문제가 있었음 — PR #33 리뷰에서 발견, applyLoadout으로 연결).
 
 const RANK_STYLES: Record<number, string> = {
   1: 'bg-amber-400 border-amber-600 text-amber-950',
