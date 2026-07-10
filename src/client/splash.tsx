@@ -14,6 +14,7 @@ import { angleBetween, buildMazeBackground, findPath, tileToPercent } from './ma
 import { formatClearTime } from './format';
 import { getMazeMap } from '../shared/maps';
 import type { LeaderboardEntry } from '../shared/game-types';
+import { LOADOUT_STORAGE_KEY, type LoadoutId } from './loadout';
 
 const DEFAULT_MAP_ID = 'map-1';
 const MAIN_MAP = getMazeMap(DEFAULT_MAP_ID);
@@ -45,7 +46,11 @@ const FOOTPRINTS = WALK_TILES.map((tile, i) => {
   };
 });
 
-type View = 'menu' | 'leaderboard';
+type View = 'menu' | 'loadout' | 'leaderboard';
+
+// LoadoutId/LOADOUT_STORAGE_KEY는 ./loadout.ts로 옮겨서 game.tsx와 공유한다(2026-07-10 —
+// 처음엔 여기 로컬로 정의했었는데, game.tsx가 이 값을 전혀 안 읽어서 로드아웃 선택이 실제
+// 게임에 반영 안 되는 문제가 있었음 — PR #33 리뷰에서 발견, applyLoadout으로 연결).
 
 const RANK_STYLES: Record<number, string> = {
   1: 'bg-amber-400 border-amber-600 text-amber-950',
@@ -138,6 +143,79 @@ const FootprintIcon = ({
   </svg>
 );
 
+// 로드아웃 3종 아이콘 — RankIcon처럼 currentColor 기반 단순 도형으로 통일.
+const TrapDetectorIcon = () => (
+  <svg viewBox="0 0 24 24" className="w-7 h-7" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+    <circle cx="11" cy="11" r="6.5" />
+    <line x1="15.7" y1="15.7" x2="21" y2="21" strokeLinecap="round" />
+  </svg>
+);
+
+const ShieldIcon = () => (
+  <svg viewBox="0 0 24 24" className="w-7 h-7" fill="currentColor" aria-hidden>
+    <path d="M12 2.5 4.5 5.5v6c0 5 3.2 8.6 7.5 10 4.3-1.4 7.5-5 7.5-10v-6L12 2.5Z" />
+  </svg>
+);
+
+const FlashlightIcon = () => (
+  <svg viewBox="0 0 24 24" className="w-7 h-7" aria-hidden>
+    <path d="M8.2 11 9 6.5h6l0.8 4.5H8.2Z" fill="currentColor" />
+    <rect x="9" y="11" width="6" height="10" rx="1.5" fill="currentColor" />
+    <g stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+      <line x1="12" y1="3.5" x2="12" y2="1.3" />
+      <line x1="7.8" y1="4.7" x2="6.3" y2="3.1" />
+      <line x1="16.2" y1="4.7" x2="17.7" y2="3.1" />
+    </g>
+  </svg>
+);
+
+// 로드아웃 카드가 선택됐을 때 오른쪽에 뜨는 작은 체크 배지. 배지 배경(bg-current)이
+// 카드의 accent 색을 그대로 물려받으므로, 체크 표시 자체는 그 반대색(어두운 배경)으로 그려야
+// 잘 보인다 — 부모(button)의 currentColor가 아니라 슬레이트 950 고정색을 씀.
+const CheckIcon = () => (
+  <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="#020617" strokeWidth="3" aria-hidden>
+    <path d="M4 12.5 9.5 18 20 6" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+// 3종 로드아웃 정의 — 색은 게임 화면(game.tsx ITEM_COLORS)의 손전등/쉴드 색과 맞추고,
+// 함정 탐지기는 기존 함정 4색(파랑/보라/회색/주황)과 안 겹치는 에메랄드로 새로 지정.
+// iconAccent는 선택 여부와 무관하게 항상 적용 — 처음부터 아이콘이 각자 색을 띠어야
+// 글자를 안 읽어도 세 옵션이 한눈에 구분된다(accent는 카드가 "선택됐을 때"만 적용).
+const LOADOUT_OPTIONS: {
+  id: LoadoutId;
+  label: string;
+  description: string;
+  icon: ReactNode;
+  accent: string;
+  iconAccent: string;
+}[] = [
+  {
+    id: 'trapDetector',
+    label: 'Trap Detector',
+    description: 'Briefly reveals nearby traps',
+    icon: <TrapDetectorIcon />,
+    accent: 'text-emerald-300 border-emerald-500/60 bg-emerald-500/10',
+    iconAccent: 'text-emerald-400 bg-emerald-500/15',
+  },
+  {
+    id: 'shield',
+    label: 'Trap Shield',
+    description: 'Blocks the next trap you hit',
+    icon: <ShieldIcon />,
+    accent: 'text-cyan-300 border-cyan-500/60 bg-cyan-500/10',
+    iconAccent: 'text-cyan-400 bg-cyan-500/15',
+  },
+  {
+    id: 'flashlight',
+    label: 'Flashlight',
+    description: 'See farther for a short while',
+    icon: <FlashlightIcon />,
+    accent: 'text-amber-300 border-amber-500/60 bg-amber-500/10',
+    iconAccent: 'text-amber-400 bg-amber-500/15',
+  },
+];
+
 const MazeBackdrop = () => (
   <div aria-hidden className="absolute inset-0 overflow-hidden pointer-events-none">
     <div
@@ -194,7 +272,13 @@ const LogoTitle = ({ size = 'text-4xl' }: { size?: string }) => (
   </h1>
 );
 
-const Menu = ({ onShowLeaderboard }: { onShowLeaderboard: () => void }) => (
+const Menu = ({
+  onShowLeaderboard,
+  onShowLoadout,
+}: {
+  onShowLeaderboard: () => void;
+  onShowLoadout: () => void;
+}) => (
   <>
     <HudButton onClick={onShowLeaderboard} label="Leaderboard" icon={<RankIcon />} />
     <PawTrail />
@@ -206,7 +290,7 @@ const Menu = ({ onShowLeaderboard }: { onShowLeaderboard: () => void }) => (
         then cross paths with other explorers&apos; traces and traps.
       </p>
     </div>
-    <PlayButton onClick={(e) => requestExpandedMode(e.nativeEvent, 'game')} />
+    <PlayButton onClick={onShowLoadout} />
     {context?.username ? (
       <div className="flex items-center gap-1.5 bg-slate-800/80 border border-slate-700 rounded-full pl-1 pr-3 py-1">
         <span className="w-4 h-4 rounded-full bg-orange-500" aria-hidden />
@@ -217,6 +301,95 @@ const Menu = ({ onShowLeaderboard }: { onShowLeaderboard: () => void }) => (
     ) : null}
   </>
 );
+
+// 게임 시작 전 아이템 로드아웃(3종 중 1개) 선택 화면. PLAY를 누르면 바로 게임으로 가지 않고
+// 여기를 먼저 거친다 — 선택 결과는 localStorage에 저장해뒀다가 game.tsx가 읽어간다(별도
+// 웹뷰라 React state로는 못 넘김). 확인 버튼을 눌러야 실제로 게임을 시작하도록 해서, 선택
+// 안 하고 실수로 넘어가는 일이 없게 함(기본 선택값 없음).
+const Loadout = ({ onBack }: { onBack: () => void }) => {
+  // game.tsx의 applyLoadout()과 마찬가지로, localStorage 접근이 막힌 환경(서드파티 iframe
+  // 스토리지 정책 등)에서도 화면 자체는 렌더링/진행되게 try/catch로 방어한다 — PR #33 리뷰에서
+  // game.tsx만 방어돼 있고 여기는 방어가 없어 그 환경에서 스플래시 전체가 깨질 수 있다는 점이
+  // 지적됨(useState 초기화 함수 안 예외는 렌더링 중 처리 안 된 예외가 되어버림).
+  const [selected, setSelected] = useState<LoadoutId | null>(() => {
+    try {
+      const saved = localStorage.getItem(LOADOUT_STORAGE_KEY);
+      return LOADOUT_OPTIONS.some((opt) => opt.id === saved) ? (saved as LoadoutId) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  const handleConfirm = (e: MouseEvent<HTMLButtonElement>) => {
+    if (!selected) return;
+    try {
+      localStorage.setItem(LOADOUT_STORAGE_KEY, selected);
+    } catch {
+      // 저장 실패해도(예: 저장공간 막힘) 이번 판은 진행은 시켜준다 — game.tsx의 applyLoadout()이
+      // 값을 못 읽으면 그냥 빈손으로 시작하는 안전한 폴백을 이미 갖고 있음.
+    }
+    requestExpandedMode(e.nativeEvent, 'game');
+  };
+
+  return (
+    <div className="w-full flex flex-col gap-4">
+      <div className="flex items-center gap-2">
+        <button
+          className="flex items-center justify-center w-9 h-9 rounded-xl border-2 border-slate-700 text-slate-300 hover:text-white hover:border-slate-500 transition cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-400"
+          onClick={onBack}
+          aria-label="Back"
+        >
+          ←
+        </button>
+        <h1 className="font-display text-lg tracking-wide text-white">Choose Your Item</h1>
+      </div>
+      <p className="text-xs text-slate-400 -mt-3">Pick one item to carry into today&apos;s maze.</p>
+
+      <div className="flex flex-col gap-2.5" role="radiogroup" aria-label="Choose your item">
+        {LOADOUT_OPTIONS.map((opt) => {
+          const isSelected = selected === opt.id;
+          return (
+            <button
+              key={opt.id}
+              onClick={() => setSelected(opt.id)}
+              role="radio"
+              aria-checked={isSelected}
+              className={`flex items-center gap-3 rounded-2xl border-2 px-4 py-3 text-left transition cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-400 ${
+                isSelected
+                  ? opt.accent
+                  : 'border-slate-700 bg-slate-800/50 text-slate-300 hover:border-slate-500'
+              }`}
+            >
+              <span className={`flex items-center justify-center w-10 h-10 rounded-full shrink-0 ${opt.iconAccent}`}>
+                {opt.icon}
+              </span>
+              <span className="flex flex-col flex-1">
+                <span className="text-sm font-semibold">{opt.label}</span>
+                <span className="text-xs opacity-80">{opt.description}</span>
+              </span>
+              <span
+                aria-hidden
+                className={`flex items-center justify-center w-5 h-5 rounded-full border-2 shrink-0 transition ${
+                  isSelected ? 'bg-current border-current' : 'border-slate-600'
+                }`}
+              >
+                {isSelected ? <CheckIcon /> : null}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      <button
+        className="mt-1 w-full rounded-full bg-gradient-to-b from-[#ff7a4d] to-[#d93900] border-b-[4px] border-[#7a2400] py-2.5 font-display text-sm tracking-wide text-white transition cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 disabled:grayscale active:translate-y-[2px] active:border-b-[2px] hover:brightness-110 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-400"
+        onClick={handleConfirm}
+        disabled={!selected}
+      >
+        Start
+      </button>
+    </div>
+  );
+};
 
 const PODIUM_MEDAL: Record<number, string> = { 1: '🥇', 2: '🥈', 3: '🥉' };
 const PODIUM_HEIGHT: Record<number, string> = { 1: 'h-24', 2: 'h-16', 3: 'h-12' };
@@ -310,7 +483,9 @@ export const Splash = () => {
       <div className="relative z-10 w-full max-w-sm">
         <RivetPanel>
           {view === 'menu' ? (
-            <Menu onShowLeaderboard={() => setView('leaderboard')} />
+            <Menu onShowLeaderboard={() => setView('leaderboard')} onShowLoadout={() => setView('loadout')} />
+          ) : view === 'loadout' ? (
+            <Loadout onBack={() => setView('menu')} />
           ) : (
             <Leaderboard onBack={() => setView('menu')} />
           )}
