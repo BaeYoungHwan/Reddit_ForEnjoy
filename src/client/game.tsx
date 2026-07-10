@@ -263,14 +263,13 @@ const FLASHLIGHT_DURATION_MS = 8000;
 // 게임 화면(Phaser)에서 나는 모든 효과음을 여기서 로드/재생한다. 로드아웃 화면 자체(splash.tsx)의
 // 공용 버튼 클릭음은 Phaser가 아니라 별도로 처리(splash.tsx의 playUiClickSound 참고).
 //
-// footstep1~3: 원본 footstep.mp3 한 파일 안에 서로 다른 발걸음 소리 3개가 이어붙어 있었음
-// (무음 구간 분석으로 확인, analyze-footstep.mjs 스크립트로 RMS 엔벌로프 찍어서 경계 확인 후
-// split-footstep.mjs로 무음 구간 한가운데를 기준 분할 — wav로 저장, 원본 mp3는 삭제) → 한 걸음마다
-// 파일 전체(3개 소리 전부)가 재생되던 문제를 고쳐서, playFootstep()이 3개를 순서대로 하나씩만 재생.
+// footstep: 원본 오디오 파일이 걷기 한 사이클(발걸음 소리가 여러 번 반복 녹음된 것) 전체를
+// 담고 있어서 재생할 때마다 여러 번 소리가 나는 문제가 있었음(무음 구간 분석으로 확인,
+// analyze-footstep.mjs/analyze-newfootstep.mjs 스크립트로 RMS 엔벌로프 찍어서 확인) →
+// extract-single-footstep.mjs로 그중 한 걸음만 잘라내 wav로 저장(원본은 삭제), 그 한 소리만
+// 매 칸 이동마다 재생.
 const SFX_PATHS = {
-  footstep1: '/sounds/footstep-1.wav',
-  footstep2: '/sounds/footstep-2.wav',
-  footstep3: '/sounds/footstep-3.wav',
+  footstep: '/sounds/footstep.wav',
   itemPickup: '/sounds/item-pickup.mp3',
   shieldBlock: '/sounds/shield-block.mp3',
   detectorScan: '/sounds/trap-detector-scan.mp3',
@@ -387,10 +386,8 @@ class MazeScene extends Phaser.Scene {
   private trapDispatcher = new SequentialDispatcher<TrapTriggerOutput>();
 
   // 지금 재생 중인 발걸음 소리 인스턴스 — 다음 발걸음이 날 때 아직 안 끝났으면 끊어서 겹쳐
-  // 들리지 않게 한다(playFootstepNow 참고). 걸음 소리 3종을 순서대로 하나씩 재생하기 위한
-  // 인덱스도 같이 관리.
+  // 들리지 않게 한다(playFootstepNow 참고).
   private footstepSound: Phaser.Sound.BaseSound | null = null;
-  private footstepIndex = 0;
 
   // 발걸음을 "이벤트 효과음이 끝난 뒤로" 미뤄뒀을 때, 그 사이 또 다른 발걸음 요청이 들어오면
   // 먼저 예약해둔 재생을 무효화하기 위한 토큰(playFootstep 참고) — 항상 가장 최근 요청 하나만
@@ -527,19 +524,15 @@ class MazeScene extends Phaser.Scene {
     this.playFootstepNow();
   }
 
-  // 발걸음 소리를 실제로 재생 — footstep1~3을 한 칸 이동마다 순서대로 하나씩만 재생한다(원래 세
-  // 소리가 한 파일에 이어붙어 있어서 매번 전부 재생되던 문제 수정). 이전 발걸음이 아직 울리는
-  // 중에 새 걸음을 내디디면(연속 이동 시 흔함) 겹쳐 들리지 않게 먼저 끊는다.
+  // 발걸음 소리를 실제로 재생. 이전 발걸음이 아직 울리는 중에 새 걸음을 내디디면(연속 이동 시
+  // 흔함) 겹쳐 들리지 않게 먼저 끊는다.
   private playFootstepNow() {
-    const keys: SfxKey[] = ['footstep1', 'footstep2', 'footstep3'];
-    const key = keys[this.footstepIndex % keys.length]!;
-    this.footstepIndex++;
     try {
       this.footstepSound?.stop();
-      this.footstepSound = this.sound.add(key);
+      this.footstepSound = this.sound.add('footstep');
       this.footstepSound.play({ volume: DEFAULT_SFX_VOLUME });
     } catch (err) {
-      console.error(`효과음 재생 실패: ${key}`, err);
+      console.error('효과음 재생 실패: footstep', err);
     }
   }
 
