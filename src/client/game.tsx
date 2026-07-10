@@ -892,7 +892,14 @@ class MazeScene extends Phaser.Scene {
   // 계속 보여주므로, 먼저 건 효과가 아직 안 끝났는데 캐릭터가 먼저 원래대로 돌아와버리는
   // 문제가 안 생긴다(예전엔 카운터 하나로 "마지막에 뭘 걸었는지"만 봐서, 나중에 건 효과가
   // 먼저 끝나버리면 그 타이머가 캐릭터를 조기에 원복시켰음).
-  private flashPlayerTrap(type: TimedTrapType, durationMs: number) {
+  // onExpire는 시야차단/역방향처럼 "캐릭터 이미지 말고 실제 게임 효과"도 같이 지속시간을
+  // 갖는 경우, 그 효과를 복원하는 로직을 넘겨받아 이 함수의 재트리거 판정과 정확히 같은
+  // 타이밍에 함께 실행한다(applyBlindTrap/applyReverseTrap 참고). 처음엔 이걸 "만료 시각을
+  // 반환해서 호출자가 자기 타이머를 따로 걸게" 하는 방식으로 만들었는데, 그러면 이 함수
+  // 내부 타이머와 호출자 타이머가 같은 durationMs로 각자 독립적으로 예약되어 거의 동시에
+  // 실행되고, 어느 쪽이 먼저 activeTrapEffects에서 키를 지우느냐에 따라 나중 것이 "이미
+  // 지워졌다"고 오판하는 경쟁 상태가 있었다 — 타이머를 하나로 합쳐야 근본적으로 안전하다.
+  private flashPlayerTrap(type: TimedTrapType, durationMs: number, onExpire?: () => void) {
     this.flashPlayer(TRAP_COLORS[type]);
     const expireAt = this.time.now + durationMs;
     // 만료 시각이 다른 효과와 정확히 같아지는 경우(refreshPlayerTrapVisual의 동점 처리 참고)
@@ -909,6 +916,7 @@ class MazeScene extends Phaser.Scene {
       if (this.activeTrapEffects.get(type) === expireAt) {
         this.activeTrapEffects.delete(type);
         this.refreshPlayerTrapVisual();
+        onExpire?.();
       }
     });
   }
@@ -1173,8 +1181,6 @@ class MazeScene extends Phaser.Scene {
   // 3. 시야차단 함정 — traps.md/vision-system.md: 지금까지 밝힌 길이 다시 안개로 덮이고,
   // 5초간 시야 반경이 크게 줄어듦 (이 게임의 시그니처 함정, 블라인드 모드와 직접 시너지).
   private applyBlindTrap() {
-    this.flashPlayerTrap('blind', BLIND_DURATION_MS);
-
     // 지금까지 탐색해서 기억해둔 모든 타일을 다시 'hidden'으로 되돌림 (탐험 진행도 페널티)
     for (let y = 0; y < MAP_HEIGHT; y++) {
       for (let x = 0; x < MAP_WIDTH; x++) {
@@ -1186,7 +1192,12 @@ class MazeScene extends Phaser.Scene {
     this.currentVisionRadius = 1;
     this.updateFog();
 
-    this.time.delayedCall(BLIND_DURATION_MS, () => {
+    // 캐릭터 이미지 원복과 실제 효과(시야 반경) 복원이 항상 같은 타이밍/조건으로 함께
+    // 일어나도록 onExpire로 넘긴다 — 예전엔 이 복원을 별도 delayedCall로 따로 걸었는데,
+    // 캐릭터 이미지는 재트리거 보호(activeTrapEffects)를 받는데 시야 반경은 못 받아서,
+    // 지속시간이 끝나기 전에 시야차단을 다시 밟으면 먼저 걸린 타이머가 시야를 조기에
+    // 풀어버리는(실제 게임 효과가 캐릭터 이미지보다 먼저 끝나버리는) 문제가 있었다.
+    this.flashPlayerTrap('blind', BLIND_DURATION_MS, () => {
       this.currentVisionRadius = VISION_RADIUS;
       this.updateFog();
     });
@@ -1194,10 +1205,10 @@ class MazeScene extends Phaser.Scene {
 
   // 4. 역방향 함정 — traps.md: 4초간 방향키 입력이 반대로 동작.
   private applyReverseTrap() {
-    this.flashPlayerTrap('reverse', REVERSE_DURATION_MS);
     this.isReversed = true;
 
-    this.time.delayedCall(REVERSE_DURATION_MS, () => {
+    // applyBlindTrap과 동일한 이유로 실제 효과 복원을 onExpire로 넘긴다.
+    this.flashPlayerTrap('reverse', REVERSE_DURATION_MS, () => {
       this.isReversed = false;
     });
   }
