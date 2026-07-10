@@ -384,6 +384,13 @@ class MazeScene extends Phaser.Scene {
   private footstepSound: Phaser.Sound.BaseSound | null = null;
   private footstepIndex = 0;
 
+  // 지금 재생 중인 "이벤트" 효과음(발걸음 제외 — 함정 발동, 아이템 획득 등) 인스턴스. 함정을
+  // 연달아 밟는 등 이벤트 효과음끼리 겹치면 두 소리가 뒤섞여 들리는 문제가 있어서, 새 이벤트
+  // 효과음이 날 때 이전 것을 끊어 항상 "가장 최근에 발동한 효과음"만 들리게 한다(playSfx 참고).
+  // 발걸음은 반대로 이벤트 효과음을 끊지 않는다(playFootstep 참고) — 걷는 동안 함정/아이템
+  // 소리가 끊기면 안 되므로 우선순위를 이벤트 효과음이 항상 이기는 쪽으로 둠.
+  private lastEventSound: Phaser.Sound.BaseSound | null = null;
+
   // 아이템 마커 도형(별 모양 — 함정 마커는 박스 모양이라 헷갈리지 않게 구분). 함정 마커와
   // 동일하게 안개 상태에 맞춰 밝기 조정됨.
   private itemRects: (Phaser.GameObjects.Star | undefined)[][] = [];
@@ -472,10 +479,17 @@ class MazeScene extends Phaser.Scene {
   // 발걸음 소리(길이 0.3~0.5초)가 한 칸 이동 시간(BASE_MOVE_DURATION=150ms)보다 훨씬 길어서,
   // 도착 직후 아이템 획득/함정 발동 효과음이 겹쳐 재생되면 두 소리가 뒤섞여 들리는 문제가
   // 있었다 — 다른 효과음이 날 때는 항상 먼저 남아있는 발걸음 소리를 끊는다.
+  //
+  // 마찬가지로, 함정을 연달아 밟는 등 이벤트 효과음끼리 겹치는 경우도 있어서(이전 함정
+  // 효과음이 아직 울리는 중에 새 함정을 밟으면 두 소리가 섞여 들림) 새 이벤트 효과음을 틀기
+  // 전에 이전 이벤트 효과음도 끊는다 — 항상 "가장 최근에 발동한 효과음"만 들리게 함.
   private playSfx(key: SfxKey) {
     try {
       this.footstepSound?.stop();
-      this.sound.play(key, { volume: 0.6 });
+      this.lastEventSound?.stop();
+      const sound = this.sound.add(key);
+      this.lastEventSound = sound;
+      sound.play({ volume: 0.6 });
     } catch (err) {
       console.error(`효과음 재생 실패: ${key}`, err);
     }
@@ -1205,7 +1219,9 @@ class MazeScene extends Phaser.Scene {
   // 관리 — 표시 시간이 끝나면 흔적 없이 사라져야 하고, 그 사이 실제 함정 판정(trap.trigger)
   // 로직에는 전혀 관여하지 않는 순수 시각 효과다.
   private applyDetectorItem(revealedTraps: TrapInstance[]) {
-    this.playSfx('itemPickup');
+    // 공용 픽업음(itemPickup) 대신 detectorScan만 재생 — playSfx는 "이벤트 효과음끼리 겹치면
+    // 최신 것만 들리게" 직전 소리를 끊는데, 둘을 곧바로 이어서 틀면 itemPickup이 시작하자마자
+    // detectorScan한테 끊겨서 실제로는 절대 안 들리는 죽은 호출이 되므로 아예 하나만 남긴다.
     this.showFloatingLabel(`${ITEM_LABELS.detector} acquired!`);
     this.flashPlayer(ITEM_COLORS.detector);
     this.playSfx('detectorScan');
