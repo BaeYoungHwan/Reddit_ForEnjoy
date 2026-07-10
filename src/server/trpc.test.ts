@@ -278,8 +278,8 @@ describe('map.getState 아이템 시딩', () => {
 
     expect(first.items).toEqual(
       expect.arrayContaining([
-        { x: 3, y: 3, type: 'flashlight' },
-        { x: 1, y: 14, type: 'shield' },
+        { x: 9, y: 1, type: 'flashlight' },
+        { x: 5, y: 9, type: 'shield' },
       ])
     );
     expect(second.items).toEqual(first.items);
@@ -288,16 +288,16 @@ describe('map.getState 아이템 시딩', () => {
   it('아이템을 주운 뒤 재호출해도 해당 아이템이 다시 채워지지 않는다(재생성 버그 회귀)', async () => {
     const caller = createCaller({ userId: 'user-q' });
     await caller.map.getState({ mapId: 'map-1' });
-    // 앵커(1,1) -> (3,3): 인접 이동만 반복(실제 미로 벽은 검증하지 않음, 거리<=1만 확인).
-    await caller.item.pickup({ mapId: 'map-1', x: 2, y: 1 });
-    await caller.item.pickup({ mapId: 'map-1', x: 3, y: 1 });
-    await caller.item.pickup({ mapId: 'map-1', x: 3, y: 2 });
-    const result = await caller.item.pickup({ mapId: 'map-1', x: 3, y: 3 });
+    // 앵커(1,1) -> (9,1): 인접 이동만 반복(실제 미로 벽은 검증하지 않음, 거리<=1만 확인).
+    for (let x = 2; x < 9; x++) {
+      await caller.item.pickup({ mapId: 'map-1', x, y: 1 });
+    }
+    const result = await caller.item.pickup({ mapId: 'map-1', x: 9, y: 1 });
     expect(result).toEqual({ picked: true, type: 'flashlight' });
 
     const state = await caller.map.getState({ mapId: 'map-1' });
-    expect(state.items).not.toContainEqual({ x: 3, y: 3, type: 'flashlight' });
-    expect(state.items).toContainEqual({ x: 1, y: 14, type: 'shield' });
+    expect(state.items).not.toContainEqual({ x: 9, y: 1, type: 'flashlight' });
+    expect(state.items).toContainEqual({ x: 5, y: 9, type: 'shield' });
   });
 });
 
@@ -333,21 +333,17 @@ describe('item.pickup 유저별 독립 보드', () => {
     const callerA = createCaller({ userId: 'user-o' });
     const callerB = createCaller({ userId: 'user-p' });
 
-    // 두 유저 모두 아이템 좌표(3,3)에 인접하도록 앵커를 맞춰둔다.
+    // 두 유저 모두 아이템 좌표(9,1)에 인접하도록 앵커를 맞춰둔다.
     await callerA.map.getState({ mapId: 'map-1' });
-    await callerA.item.pickup({ mapId: 'map-1', x: 2, y: 1 }); // 앵커: (1,1) → (2,1)
     await callerB.map.getState({ mapId: 'map-1' });
-    await callerB.item.pickup({ mapId: 'map-1', x: 2, y: 1 });
-
-    // 두 유저 모두 인접 이동을 반복해 (3,3) 근처(3,2)까지 이동시킨다.
-    await callerA.item.pickup({ mapId: 'map-1', x: 3, y: 1 });
-    await callerA.item.pickup({ mapId: 'map-1', x: 3, y: 2 });
-    await callerB.item.pickup({ mapId: 'map-1', x: 3, y: 1 });
-    await callerB.item.pickup({ mapId: 'map-1', x: 3, y: 2 });
+    for (let x = 2; x < 9; x++) {
+      await callerA.item.pickup({ mapId: 'map-1', x, y: 1 });
+      await callerB.item.pickup({ mapId: 'map-1', x, y: 1 });
+    }
 
     const [resultA, resultB] = await Promise.all([
-      callerA.item.pickup({ mapId: 'map-1', x: 3, y: 3 }),
-      callerB.item.pickup({ mapId: 'map-1', x: 3, y: 3 }),
+      callerA.item.pickup({ mapId: 'map-1', x: 9, y: 1 }),
+      callerB.item.pickup({ mapId: 'map-1', x: 9, y: 1 }),
     ]);
 
     // 유저별 독립 보드라 경쟁이 없다 — 두 유저 모두 같은 아이템을 각자 성공적으로 주울 수 있다.
@@ -358,13 +354,13 @@ describe('item.pickup 유저별 독립 보드', () => {
   it('같은 유저가 동일 요청을 중복 전송해도 한 번만 성공한다', async () => {
     const caller = createCaller({ userId: 'user-dup' });
     await caller.map.getState({ mapId: 'map-1' });
-    await caller.item.pickup({ mapId: 'map-1', x: 2, y: 1 });
-    await caller.item.pickup({ mapId: 'map-1', x: 3, y: 1 });
-    await caller.item.pickup({ mapId: 'map-1', x: 3, y: 2 });
+    for (let x = 2; x < 9; x++) {
+      await caller.item.pickup({ mapId: 'map-1', x, y: 1 });
+    }
 
     const [first, second] = await Promise.all([
-      caller.item.pickup({ mapId: 'map-1', x: 3, y: 3 }),
-      caller.item.pickup({ mapId: 'map-1', x: 3, y: 3 }),
+      caller.item.pickup({ mapId: 'map-1', x: 9, y: 1 }),
+      caller.item.pickup({ mapId: 'map-1', x: 9, y: 1 }),
     ]);
 
     const results = [first, second];
@@ -376,33 +372,30 @@ describe('item.pickup 유저별 독립 보드', () => {
 describe('item.pickup 함정 탐지기 (반경 공개, 오라클 방지 조율 회귀 테스트)', () => {
   it('탐지기를 주우면 반경(3칸) 내 타 유저 함정만 revealedTraps로 함께 반환한다', async () => {
     const installer = createCaller({ userId: 'user-installer' });
-    await installer.trap.install({ mapId: 'map-1', type: 'slow', x: 12, y: 9 }); // 탐지기 스폰(9,9)과 거리 3 — 반경 내
-    await installer.trap.install({ mapId: 'map-1', type: 'blind', x: 13, y: 9 }); // 거리 4 — 반경 밖
+    await installer.trap.install({ mapId: 'map-1', type: 'slow', x: 18, y: 2 }); // 탐지기 스폰(15,2)과 거리 3 — 반경 내
+    await installer.trap.install({ mapId: 'map-1', type: 'blind', x: 19, y: 2 }); // 거리 4 — 반경 밖
 
     const picker = createCaller({ userId: 'user-picker' });
     await picker.map.getState({ mapId: 'map-1' }); // 앵커: (1,1)
-    for (let x = 2; x <= 9; x++) {
+    for (let x = 2; x <= 15; x++) {
       await picker.item.pickup({ mapId: 'map-1', x, y: 1 });
     }
-    for (let y = 2; y <= 8; y++) {
-      await picker.item.pickup({ mapId: 'map-1', x: 9, y });
-    }
 
-    const result = await picker.item.pickup({ mapId: 'map-1', x: 9, y: 9 });
+    const result = await picker.item.pickup({ mapId: 'map-1', x: 15, y: 2 });
     expect(result.picked).toBe(true);
     expect(result.type).toBe('detector');
-    expect(result.revealedTraps).toEqual(expect.arrayContaining([{ x: 12, y: 9, type: 'slow' }]));
-    expect(result.revealedTraps).not.toContainEqual(expect.objectContaining({ x: 13, y: 9 }));
+    expect(result.revealedTraps).toEqual(expect.arrayContaining([{ x: 18, y: 2, type: 'slow' }]));
+    expect(result.revealedTraps).not.toContainEqual(expect.objectContaining({ x: 19, y: 2 }));
   });
 
   it('탐지기 외 아이템은 revealedTraps 없이 반환한다(기존 손전등/쉴드 응답 형태 불변)', async () => {
     const caller = createCaller({ userId: 'user-r' });
     await caller.map.getState({ mapId: 'map-1' });
-    await caller.item.pickup({ mapId: 'map-1', x: 2, y: 1 });
-    await caller.item.pickup({ mapId: 'map-1', x: 3, y: 1 });
-    await caller.item.pickup({ mapId: 'map-1', x: 3, y: 2 });
+    for (let x = 2; x < 9; x++) {
+      await caller.item.pickup({ mapId: 'map-1', x, y: 1 });
+    }
 
-    await expect(caller.item.pickup({ mapId: 'map-1', x: 3, y: 3 })).resolves.toEqual({
+    await expect(caller.item.pickup({ mapId: 'map-1', x: 9, y: 1 })).resolves.toEqual({
       picked: true,
       type: 'flashlight',
     });

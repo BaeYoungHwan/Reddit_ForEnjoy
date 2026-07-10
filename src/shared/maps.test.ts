@@ -10,7 +10,7 @@ describe('MAZE_MAPS / map-1', () => {
   });
 
   it('parses E as the exit tile and its grid cell as exit', () => {
-    expect(map.exit).toEqual({ x: 15, y: 13 });
+    expect(map.exit).toEqual({ x: 19, y: 9 });
     expect(map.grid[map.exit.y]![map.exit.x]).toBe('exit');
   });
 
@@ -20,9 +20,9 @@ describe('MAZE_MAPS / map-1', () => {
   });
 
   it('produces a rectangular grid matching the layout dimensions', () => {
-    expect(map.grid.length).toBe(19);
+    expect(map.grid.length).toBe(21);
     for (const row of map.grid) {
-      expect(row.length).toBe(23);
+      expect(row.length).toBe(25);
     }
   });
 
