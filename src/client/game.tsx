@@ -11,6 +11,12 @@ import { trpc } from './trpcClient';
 import { SequentialDispatcher } from './sequentialDispatcher';
 import type { Position, TrapInstallOutput, TrapInstance, TrapTriggerOutput, TrapType } from '../shared/game-types';
 
+// flashPlayerTrap/activeTrapEffects가 다루는 함정 종류. 슬라이드('slow')는 지속시간이
+// 고정이 아니라(벽 만날 때까지) 이 지속시간 기반 메커니즘에 절대 들어가면 안 되고
+// isSliding으로 따로 관리해야 하므로, 타입에서부터 제외해 실수로 섞여 들어가는 걸
+// 컴파일 타임에 막는다.
+type TimedTrapType = Exclude<TrapType, 'slow'>;
+
 // 실제 고정 맵 데이터(송원호 담당, src/shared/maps.ts). splash.tsx의 배경 미리보기와 같은 데이터.
 const MAIN_MAP = getMazeMap('map-1');
 const MAP_WIDTH = MAIN_MAP.grid[0]!.length;
@@ -263,7 +269,7 @@ class MazeScene extends Phaser.Scene {
   // 안 끝났는데). 이제는 "지금 활성 중인 효과들 중 가장 늦게 끝나는 것"을 항상 화면에
   // 반영한다 — refreshPlayerTrapVisual 참고. 슬라이드는 지속시간이 고정이 아니라(벽 만날
   // 때까지) 이 표에 넣지 않고 isSliding으로 따로 관리(슬라이드 중엔 항상 최우선으로 표시).
-  private activeTrapEffects = new Map<TrapType, number>();
+  private activeTrapEffects = new Map<TimedTrapType, number>();
   private isSliding = false;
 
   // 마지막으로 이동한 좌우 방향(true면 왼쪽을 보고 있음). 위/아래로만 이동해도 이 값은
@@ -842,10 +848,14 @@ class MazeScene extends Phaser.Scene {
       return;
     }
 
-    let latestType: TrapType | undefined;
+    let latestType: TimedTrapType | undefined;
     let latestExpireAt = -Infinity;
     for (const [type, expireAt] of this.activeTrapEffects) {
-      if (expireAt > latestExpireAt) {
+      // 만료 시각이 정확히 같으면(같은 durationMs를 가진 서로 다른 함정을 짧은 간격으로
+      // 걸었을 때 우연히 겹칠 수 있음) >= 를 써서 더 나중에 건 효과가 이기게 한다 — 단순 >
+      // 이면 먼저 등록된 쪽이 항상 이겨서, 나중에 건 효과의 이미지가 활성 기간 내내 한 번도
+      // 안 보이는 문제가 있었다.
+      if (expireAt >= latestExpireAt) {
         latestExpireAt = expireAt;
         latestType = type;
       }
@@ -866,7 +876,7 @@ class MazeScene extends Phaser.Scene {
   // 계속 보여주므로, 먼저 건 효과가 아직 안 끝났는데 캐릭터가 먼저 원래대로 돌아와버리는
   // 문제가 안 생긴다(예전엔 카운터 하나로 "마지막에 뭘 걸었는지"만 봐서, 나중에 건 효과가
   // 먼저 끝나버리면 그 타이머가 캐릭터를 조기에 원복시켰음).
-  private flashPlayerTrap(type: TrapType, durationMs: number) {
+  private flashPlayerTrap(type: TimedTrapType, durationMs: number) {
     this.flashPlayer(TRAP_COLORS[type]);
     const expireAt = this.time.now + durationMs;
     this.activeTrapEffects.set(type, expireAt);
