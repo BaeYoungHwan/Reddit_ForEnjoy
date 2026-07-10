@@ -339,6 +339,12 @@ class MazeScene extends Phaser.Scene {
   // 지금 적용 중인 시야 반경. 평소엔 VISION_RADIUS와 같고, 시야차단 함정에 걸리면 잠깐 줄어듦.
   private currentVisionRadius = VISION_RADIUS;
 
+  // 손전등 효과가 언제 끝나는지(this.time.now 기준 ms). applyBlindTrap/applyReverseTrap과
+  // 똑같은 이유로 필요하다 — 지속시간이 끝나기 전에 손전등을 한 번 더 주우면, 먼저 걸린
+  // 타이머가 나중에 뒤늦게 실행되면서 시야 반경을 조기에 원래대로 되돌려버리는 문제가
+  // 있었다. 손전등은 함정이 아니라 activeTrapEffects에는 안 들어가므로 별도 필드로 관리.
+  private flashlightExpireAt = 0;
+
   // 역방향 함정에 걸린 상태인지 여부. true면 방향키 입력을 반대로 뒤집어서 처리함.
   private isReversed = false;
 
@@ -1025,9 +1031,17 @@ class MazeScene extends Phaser.Scene {
     this.currentVisionRadius = FLASHLIGHT_VISION_RADIUS;
     this.updateFog();
 
+    // 지속시간이 끝나기 전에 손전등을 한 번 더 주우면(맵에 여러 개 스폰될 수 있음), 먼저
+    // 걸린 타이머는 자기가 만료 시각을 갱신할 때 저장해둔 값과 지금 값이 다르면(=더 최신
+    // 손전등이 그 사이 갱신했으면) 아무것도 하지 않는다 — applyBlindTrap/applyReverseTrap과
+    // 동일한 재트리거 보호 패턴.
+    const expireAt = this.time.now + FLASHLIGHT_DURATION_MS;
+    this.flashlightExpireAt = expireAt;
     this.time.delayedCall(FLASHLIGHT_DURATION_MS, () => {
-      this.currentVisionRadius = VISION_RADIUS;
-      this.updateFog();
+      if (this.flashlightExpireAt === expireAt) {
+        this.currentVisionRadius = VISION_RADIUS;
+        this.updateFog();
+      }
     });
   }
 
