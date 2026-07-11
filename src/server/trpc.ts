@@ -81,16 +81,24 @@ async function advancePosition(posKey: string, x: number, y: number): Promise<vo
 // 오라클 방지 설계(advancePosition — 인접 타일만 허용)가 무의미해진다. 대신 이 조회를
 // item.pickup 호출(이미 advancePosition으로 위치가 검증된 이벤트) 결과에 얹어서, 실제로
 // 탐지기 아이템이 있는 타일까지 걸어가 주웠을 때만 1회성으로 발동되게 한다.
+// 본인이 설치한 함정은 제외한다 — trap.trigger가 이미 설치자 본인을 회피 처리하고
+// 클라이언트도 myTraps로 항상 표시하므로(game.tsx), 여기 포함시키면 같은 함정이 두 번
+// 그려지는 중복 표시가 생긴다.
 async function revealNearbyTraps(
   mapId: string,
   date: string,
-  center: { x: number; y: number }
+  center: { x: number; y: number },
+  userId: string
 ): Promise<TrapInstance[]> {
   const boardKey = trapBoardKey(mapId, date);
   const allTraps = await redis.hGetAll(boardKey);
   return Object.entries(allTraps)
-    .map(([field, raw]) => ({ ...parseTile(field), type: (JSON.parse(raw) as { type: TrapType }).type }))
-    .filter((trap) => chebyshevDistance(trap, center) <= DETECTOR_REVEAL_RADIUS);
+    .map(([field, raw]) => {
+      const parsed = JSON.parse(raw) as { type: TrapType; installerId: string };
+      return { ...parseTile(field), type: parsed.type, installerId: parsed.installerId };
+    })
+    .filter((trap) => trap.installerId !== userId && chebyshevDistance(trap, center) <= DETECTOR_REVEAL_RADIUS)
+    .map(({ x, y, type }) => ({ x, y, type }));
 }
 
 // 해당 맵/날짜/유저의 미스터리 박스 보드를 하루 최초 1회만 고정 스폰 좌표로 채운다.
@@ -293,7 +301,7 @@ export const appRouter = t.router({
         }
 
         if (rolled.type === 'detector') {
-          const revealedTraps = await revealNearbyTraps(mapId, date, { x, y });
+          const revealedTraps = await revealNearbyTraps(mapId, date, { x, y }, ctx.userId);
           return { picked: true as const, outcome: 'item' as const, type: rolled.type, revealedTraps };
         }
 
