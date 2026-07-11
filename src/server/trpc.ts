@@ -23,8 +23,8 @@ import {
   TOTAL_TRAP_CAP,
 } from './core/gameConfig';
 import { getMapStartPosition } from './core/maps';
-import { getItemSpawns } from './core/items';
-import type { ItemInstance, ItemType, TrapInstance, TrapType } from '../shared/game-types';
+import { getMysteryBoxSpawns, rollMysteryOutcome } from './core/items';
+import type { TrapInstance, TrapType } from '../shared/game-types';
 
 type TrpcContext = { userId: string | undefined };
 
@@ -47,17 +47,16 @@ function manhattanDistance(a: { x: number; y: number }, b: { x: number; y: numbe
   return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
 }
 
+// 함정 탐지기 반경 계산 전용 — 그리드 4방향 이동 인접성 판정(manhattanDistance)과는
+// 다른 기준. game.tsx의 updateFog 시야 반경 계산과 동일한 공식(대각선 포함, 정사각형 반경).
+function chebyshevDistance(a: { x: number; y: number }, b: { x: number; y: number }): number {
+  return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
+}
+
 function toTrapInstances(installerFields: Record<string, string>): TrapInstance[] {
   return Object.entries(installerFields).map(([field, type]) => ({
     ...parseTile(field),
     type: type as TrapType,
-  }));
-}
-
-function toItemInstances(boardFields: Record<string, string>): ItemInstance[] {
-  return Object.entries(boardFields).map(([field, type]) => ({
-    ...parseTile(field),
-    type: type as ItemType,
   }));
 }
 
@@ -91,18 +90,20 @@ async function revealNearbyTraps(
   const allTraps = await redis.hGetAll(boardKey);
   return Object.entries(allTraps)
     .map(([field, raw]) => ({ ...parseTile(field), type: (JSON.parse(raw) as { type: TrapType }).type }))
-    .filter((trap) => manhattanDistance(trap, center) <= DETECTOR_REVEAL_RADIUS);
+    .filter((trap) => chebyshevDistance(trap, center) <= DETECTOR_REVEAL_RADIUS);
 }
 
-// 해당 맵/날짜/유저의 아이템 보드를 하루 최초 1회만 고정 스폰 좌표로 채운다.
+// 해당 맵/날짜/유저의 미스터리 박스 보드를 하루 최초 1회만 고정 스폰 좌표로 채운다.
 // 유저별로 독립된 보드라 한 유저의 픽업이 다른 유저의 스폰 여부에 영향을 주지 않는다
 // (고정 스폰 좌표가 맵당 2곳뿐이라 전역 공유였다면 가장 먼저 도착한 유저가 하루치를
-// 다 가져가 버렸을 것 — 함정과 달리 아이템은 유저마다 독립적으로 존재).
+// 다 가져가 버렸을 것 — 함정과 달리 미스터리 박스는 유저마다 독립적으로 존재).
 // 시딩 여부를 "필드 존재"가 아니라 전용 마커 키(NX)로 판정해야 한다 — hSetNX만 쓰면
 // item.pickup의 hDel로 지워진 필드가 다음 map.getState 호출 때 다시 채워져 버려서
-// (재생성 버그) 픽업한 아이템이 무한정 재획득 가능해진다. 마커 키는 map.getState가 이미
+// (재생성 버그) 픽업한 박스가 무한정 재획득 가능해진다. 마커 키는 map.getState가 이미
 // 위치 앵커 초기화에 쓰는 SET NX 1회성 패턴(아래 posKey 초기화 참고)과 동일하다.
-async function ensureItemsSeeded(mapId: string, date: string, userId: string): Promise<void> {
+// 보드 값 자체엔 타입을 저장하지 않는다 — 결과는 item.pickup이 픽업 시점에 rollMysteryOutcome()으로
+// 결정하므로, 저장 값은 "이 타일에 미확인 박스가 있다"는 존재 표시(placeholder)일 뿐이다.
+async function ensureMysteryBoxesSeeded(mapId: string, date: string, userId: string): Promise<void> {
   const seededKey = itemSeededKey(mapId, date, userId);
   const firstSeed = await redis.set(seededKey, '1', { nx: true });
   if (!firstSeed) return;
@@ -110,7 +111,7 @@ async function ensureItemsSeeded(mapId: string, date: string, userId: string): P
   const boardKey = itemBoardKey(mapId, date, userId);
   await redis.hSet(
     boardKey,
-    Object.fromEntries(getItemSpawns(mapId).map((item) => [tileMember(item), item.type]))
+    Object.fromEntries(getMysteryBoxSpawns(mapId).map((pos) => [tileMember(pos), '1']))
   );
   await redis.expire(boardKey, DATA_SAFETY_TTL_SECONDS);
   await redis.expire(seededKey, DATA_SAFETY_TTL_SECONDS);
@@ -122,11 +123,11 @@ export const appRouter = t.router({
       const date = getKstDateString();
       const { mapId } = input;
 
-      // 아이템은 유저별 독립 보드 — 밟는 위치는 비밀이 아니지만(오라클 방지 대상 아님),
+      // 미스터리 박스는 유저별 독립 보드 — 밟는 위치는 비밀이 아니지만(오라클 방지 대상 아님),
       // 스폰 좌표가 소수라 전역 공유하면 먼저 도착한 유저가 하루치를 다 가져가 버린다.
-      await ensureItemsSeeded(mapId, date, ctx.userId);
+      await ensureMysteryBoxesSeeded(mapId, date, ctx.userId);
 
-      const [footprintMembers, myTrapFields, itemFields] = await Promise.all([
+      const [footprintMembers, myTrapFields, mysteryBoxFields] = await Promise.all([
         redis.zRange(footprintKey(mapId, date), 0, -1),
         redis.hGetAll(trapInstallerKey(mapId, date, ctx.userId)),
         redis.hGetAll(itemBoardKey(mapId, date, ctx.userId)),
@@ -144,7 +145,8 @@ export const appRouter = t.router({
         date,
         footprints: footprintMembers.map((m) => parseTile(m.member)),
         myTraps: toTrapInstances(myTrapFields),
-        items: toItemInstances(itemFields),
+        // 타입 없이 좌표만 반환 — 먹기 전엔 아이템/함정 여부조차 알 수 없어야 한다.
+        mysteryBoxes: Object.keys(mysteryBoxFields).map((field) => parseTile(field)),
       };
     }),
   }),
@@ -276,13 +278,26 @@ export const appRouter = t.router({
           return { picked: false as const };
         }
 
-        const type = raw as ItemType;
-        if (type === 'detector') {
-          const revealedTraps = await revealNearbyTraps(mapId, date, { x, y });
-          return { picked: true as const, type, revealedTraps };
+        // 미스터리 박스: 저장된 값엔 타입이 없다 — 여기서 결과를 굴려서 처음으로 결정한다.
+        const rolled = rollMysteryOutcome();
+
+        if (rolled.outcome === 'trap') {
+          // 스폰형 함정: 설치형(trap.trigger)과 달리 설치자 개념이 없으므로 개수 제한/자기
+          // 회피 로직 대상이 아니다 — 픽업자 본인에게 그 자리에서 즉시 발동.
+          if (rolled.type === 'respawn') {
+            const start = getMapStartPosition(mapId);
+            await redis.set(posKey, tileMember(start));
+            await redis.expire(posKey, POSITION_ANCHOR_TTL_SECONDS);
+          }
+          return { picked: true as const, outcome: 'trap' as const, type: rolled.type };
         }
 
-        return { picked: true as const, type };
+        if (rolled.type === 'detector') {
+          const revealedTraps = await revealNearbyTraps(mapId, date, { x, y });
+          return { picked: true as const, outcome: 'item' as const, type: rolled.type, revealedTraps };
+        }
+
+        return { picked: true as const, outcome: 'item' as const, type: rolled.type };
       }),
   }),
 
