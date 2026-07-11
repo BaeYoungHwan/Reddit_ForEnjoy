@@ -16,6 +16,17 @@ import { getMazeMap } from '../shared/maps';
 import type { LeaderboardEntry } from '../shared/game-types';
 import { LOADOUT_STORAGE_KEY, type LoadoutId } from './loadout';
 
+// 공용 버튼 클릭음(public/sounds/ui-click.mp3) — 로드아웃 화면의 아이템 선택/확정 버튼은
+// 이번 스코프에서 제외(사용자 지시)라 일부러 안 붙임. Phaser가 아니라 순수 React 화면이라
+// game.tsx의 Phaser Sound Manager 대신 가벼운 HTMLAudioElement로 재생한다.
+function playUiClickSound() {
+  try {
+    void new Audio('/sounds/ui-click.mp3').play();
+  } catch {
+    // 자동재생 정책 등으로 재생이 막혀도 화면 전환 자체는 계속 진행돼야 한다.
+  }
+}
+
 const DEFAULT_MAP_ID = 'map-1';
 const MAIN_MAP = getMazeMap(DEFAULT_MAP_ID);
 const MAIN_MAP_BACKGROUND = buildMazeBackground(MAIN_MAP);
@@ -280,7 +291,14 @@ const Menu = ({
   onShowLoadout: () => void;
 }) => (
   <>
-    <HudButton onClick={onShowLeaderboard} label="Leaderboard" icon={<RankIcon />} />
+    <HudButton
+      onClick={() => {
+        playUiClickSound();
+        onShowLeaderboard();
+      }}
+      label="Leaderboard"
+      icon={<RankIcon />}
+    />
     <PawTrail />
     <div className="flex flex-col items-center gap-2">
       <LogoTitle />
@@ -290,7 +308,12 @@ const Menu = ({
         then cross paths with other explorers&apos; traces and traps.
       </p>
     </div>
-    <PlayButton onClick={onShowLoadout} />
+    <PlayButton
+      onClick={() => {
+        playUiClickSound();
+        onShowLoadout();
+      }}
+    />
     {context?.username ? (
       <div className="flex items-center gap-1.5 bg-slate-800/80 border border-slate-700 rounded-full pl-1 pr-3 py-1">
         <span className="w-4 h-4 rounded-full bg-orange-500" aria-hidden />
@@ -336,7 +359,10 @@ const Loadout = ({ onBack }: { onBack: () => void }) => {
       <div className="flex items-center gap-2">
         <button
           className="flex items-center justify-center w-9 h-9 rounded-xl border-2 border-slate-700 text-slate-300 hover:text-white hover:border-slate-500 transition cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-orange-400"
-          onClick={onBack}
+          onClick={() => {
+            playUiClickSound();
+            onBack();
+          }}
           aria-label="Back"
         >
           ←
@@ -420,7 +446,10 @@ const Leaderboard = ({ onBack }: { onBack: () => void }) => {
       <div className="flex items-center gap-2">
         <button
           className="flex items-center justify-center w-9 h-9 rounded-xl border-2 border-slate-700 text-slate-300 hover:text-white hover:border-slate-500 transition cursor-pointer"
-          onClick={onBack}
+          onClick={() => {
+            playUiClickSound();
+            onBack();
+          }}
           aria-label="Back"
         >
           ←
@@ -435,7 +464,10 @@ const Leaderboard = ({ onBack }: { onBack: () => void }) => {
             <p className="text-sm text-red-400 text-center">{error}</p>
             <button
               className="text-slate-300 hover:text-white transition text-xs cursor-pointer underline underline-offset-4"
-              onClick={reload}
+              onClick={() => {
+                playUiClickSound();
+                reload();
+              }}
             >
               Retry
             </button>
