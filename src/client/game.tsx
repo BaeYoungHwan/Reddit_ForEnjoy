@@ -1336,10 +1336,16 @@ class MazeScene extends Phaser.Scene {
   }
 
   // 픽업/설치/함정 발동 시 짧게 퍼졌다 사라지는 원형 이펙트 공통 헬퍼. 손전등 버스트, 쉴드 팝,
-  // 탐지기 스캔 펄스, 함정 설치 쿵, 리스폰 소멸/생성 이펙트가 전부 "원을 만들고 스케일+알파
-  // 트윈으로 커지거나 작아지며 사라진다"는 같은 모양이라 하나로 뽑았다(2026-07-12, 코드 리뷰
-  // 피드백 반영 — 예전엔 이 6곳이 거의 같은 코드를 조금씩 다르게 복붙하고 있었음). 옵션은
-  // 필요한 것만 넘기면 되고 나머지는 기본값을 쓴다.
+  // 탐지기 스캔 펄스, 함정 설치 쿵, 리스폰 소멸/생성 이펙트가 전부 "원을 만들고 커지거나
+  // 작아지며 사라진다"는 같은 모양이라 하나로 뽑았다(2026-07-12, 코드 리뷰 피드백 반영 —
+  // 예전엔 이 6곳이 거의 같은 코드를 조금씩 다르게 복붙하고 있었음). 옵션은 필요한 것만
+  // 넘기면 되고 나머지는 기본값을 쓴다.
+  //
+  // endScale이냐 endRadius냐: 기본은 setScale로 통째로 확대/축소하는 endScale인데, 이러면
+  // 테두리(strokeWidth)도 같이 두꺼워진다(원 전체가 그 비율로 커지므로) — 대부분의 이펙트는
+  // 배율이 1.6~2배라 티가 안 나지만, 탐지기 스캔 펄스처럼 배율이 훨씬 크면(0.2칸→3칸, 15배)
+  // 얇던 링이 두꺼운 원반처럼 보여버린다(2026-07-12 리뷰에서 발견). 이런 경우 endRadius를
+  // 대신 지정하면 실제 반지름(geometry)만 늘어나고 테두리 두께는 그대로 유지된다.
   private spawnPulseEffect(
     x: number,
     y: number,
@@ -1352,7 +1358,8 @@ class MazeScene extends Phaser.Scene {
       strokeAlpha?: number; // 기본 0.9
       startScale?: number; // 기본 1(원래 크기에서 시작)
       startAlpha?: number; // 기본 1
-      endScale: number;
+      endScale?: number; // endRadius와 둘 중 하나만 지정(둘 다 안 주면 크기 변화 없음)
+      endRadius?: number; // 테두리 두께를 유지하며 반지름 자체를 늘리고 싶을 때
       endAlpha?: number; // 기본 0
       duration: number;
       depth?: number; // 기본 9(캐릭터 depth 10 바로 아래)
@@ -1370,7 +1377,7 @@ class MazeScene extends Phaser.Scene {
 
     this.tweens.add({
       targets: circle,
-      scale: opts.endScale,
+      ...(opts.endRadius !== undefined ? { radius: opts.endRadius } : { scale: opts.endScale ?? 1 }),
       alpha: opts.endAlpha ?? 0,
       duration: opts.duration,
       onComplete: () => circle.destroy(),
@@ -1494,14 +1501,15 @@ class MazeScene extends Phaser.Scene {
     this.playSfx('detectorScan');
 
     // 탐지 반경만큼 훅 퍼지는 스캔 펄스 — "지금 이 범위를 스캔했다"를 시각적으로 보여준다.
-    // 시작 반지름(TILE_SIZE*0.2) 기준으로 DETECTOR_SCAN_RADIUS_TILES칸까지 퍼지도록 스케일 계산.
+    // endRadius 사용(endScale 아님) — 배율이 15배(0.2칸→3칸)라 스케일로 키우면 테두리까지
+    // 15배 두꺼워져서 "얇은 링"이 아니라 "두꺼운 원반"처럼 보이는 문제가 있었다(2026-07-12).
     this.spawnPulseEffect(this.playerImg.x, this.playerImg.y, {
       radius: TILE_SIZE * 0.2,
       color: ITEM_COLORS.detector,
       strokeWidth: 3,
       strokeAlpha: 0.8,
       startAlpha: 0.8,
-      endScale: DETECTOR_SCAN_RADIUS_TILES / 0.2,
+      endRadius: TILE_SIZE * DETECTOR_SCAN_RADIUS_TILES,
       duration: 500,
     });
 
