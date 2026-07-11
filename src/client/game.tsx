@@ -25,6 +25,11 @@ const MAP_HEIGHT = MAIN_MAP.grid.length;
 // 서버에 등록된 실제 맵 ID. 함정/발자국 API는 mapId 단위로 데이터를 구분한다.
 const MAP_ID = 'map-1';
 
+// 지금이 백엔드 없는 로컬 정적 프리뷰(npx serve dist/client)인지 판단하는 기준. 실제 devvit
+// 웹뷰(배포/playtest)는 절대 localhost로 안 뜨므로, 에러 종류를 추측하는 것보다 훨씬 확실한
+// 신호다(2026-07-12, attemptInstall의 에러 처리를 상황별로 나누기 위해 도입 — 임소리 확인).
+const IS_LOCAL_PREVIEW = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+
 const TILE_SIZE = 64; // 타일 한 칸의 픽셀 크기 (정사각형 한 변의 길이)
 
 // 통로 폭(px). 칸 전체(TILE_SIZE)를 통로로 채우면 사방이 넓게 뚫린 팩맨 게임판처럼
@@ -176,6 +181,11 @@ const WALL_BUMP_COOLDOWN_MS = 150;
 // 슬라이드 함정에 걸려 미끄러질 때, 한 칸당 걸리는 시간(ms).
 // 기본 이동보다 짧게 줘서 "제어권을 잃고 빠르게 밀려나는" 느낌을 냄.
 const SLIDE_STEP_DURATION = 80;
+
+// 슬라이드 중 카메라 흔들림 — 몇 칸을 미끄러질지 미리 알 수 없어 넉넉한 길이로 걸어두고
+// slideStep이 멈추는 지점에서 shakeEffect.reset()으로 조기 종료한다(applySlideTrap 참고).
+const SLIDE_SHAKE_DURATION = 2000;
+const SLIDE_SHAKE_INTENSITY = 0.008;
 
 // 발자국을 한 칸마다 즉시 서버로 보내지 않고 이 주기(ms)마다 모아서 한 번에 보낸다.
 // trap.trigger/item.pickup과 겹쳐 매 칸마다 요청이 늘어나는 걸 줄이기 위함
@@ -1325,20 +1335,61 @@ class MazeScene extends Phaser.Scene {
     });
   }
 
+  // 픽업/설치/함정 발동 시 짧게 퍼졌다 사라지는 원형 이펙트 공통 헬퍼. 손전등 버스트, 쉴드 팝,
+  // 탐지기 스캔 펄스, 함정 설치 쿵, 리스폰 소멸/생성 이펙트가 전부 "원을 만들고 스케일+알파
+  // 트윈으로 커지거나 작아지며 사라진다"는 같은 모양이라 하나로 뽑았다(2026-07-12, 코드 리뷰
+  // 피드백 반영 — 예전엔 이 6곳이 거의 같은 코드를 조금씩 다르게 복붙하고 있었음). 옵션은
+  // 필요한 것만 넘기면 되고 나머지는 기본값을 쓴다.
+  private spawnPulseEffect(
+    x: number,
+    y: number,
+    opts: {
+      radius: number;
+      color: number;
+      fillAlpha?: number; // 기본 0(테두리만 있는 링 모양) — 채워진 원이면 지정
+      strokeWidth?: number; // 지정하면 테두리도 그림
+      strokeColor?: number; // 기본값: color와 동일
+      strokeAlpha?: number; // 기본 0.9
+      startScale?: number; // 기본 1(원래 크기에서 시작)
+      startAlpha?: number; // 기본 1
+      endScale: number;
+      endAlpha?: number; // 기본 0
+      duration: number;
+      depth?: number; // 기본 9(캐릭터 depth 10 바로 아래)
+      additive?: boolean; // true면 가산 블렌드(겹칠수록 밝아지는 빛 느낌)
+    }
+  ) {
+    const circle = this.add.circle(x, y, opts.radius, opts.color, opts.fillAlpha ?? 0);
+    if (opts.strokeWidth) {
+      circle.setStrokeStyle(opts.strokeWidth, opts.strokeColor ?? opts.color, opts.strokeAlpha ?? 0.9);
+    }
+    if (opts.additive) circle.setBlendMode(Phaser.BlendModes.ADD);
+    circle.setDepth(opts.depth ?? 9);
+    if (opts.startScale !== undefined) circle.setScale(opts.startScale);
+    if (opts.startAlpha !== undefined) circle.setAlpha(opts.startAlpha);
+
+    this.tweens.add({
+      targets: circle,
+      scale: opts.endScale,
+      alpha: opts.endAlpha ?? 0,
+      duration: opts.duration,
+      onComplete: () => circle.destroy(),
+    });
+  }
+
   // 쉴드가 함정을 막아줬을 때 캐릭터를 감싸는 원형 이펙트 — 하얀 테두리 + 옅은 하늘색
   // 원이 커지면서 투명해지는 트윈으로 "보호막이 퍼졌다 사라지는" 느낌을 냄.
   private showShieldBlockEffect() {
     this.playSfx('shieldBlock');
-    const ring = this.add.circle(this.playerImg.x, this.playerImg.y, TILE_SIZE * 0.35, 0xbfffff, 0.5);
-    ring.setStrokeStyle(3, 0xffffff, 0.9);
-    ring.setDepth(15);
-
-    this.tweens.add({
-      targets: ring,
-      scale: 2,
-      alpha: 0,
+    this.spawnPulseEffect(this.playerImg.x, this.playerImg.y, {
+      radius: TILE_SIZE * 0.35,
+      color: 0xbfffff,
+      fillAlpha: 0.5,
+      strokeWidth: 3,
+      strokeColor: 0xffffff,
+      endScale: 2,
       duration: 500,
-      onComplete: () => ring.destroy(),
+      depth: 15,
     });
   }
 
@@ -1357,15 +1408,13 @@ class MazeScene extends Phaser.Scene {
 
     // 픽업 순간 훅 퍼지는 버스트 — "빛이 확 켜졌다"는 느낌. 가산 블렌드(ADD)로 빛이 겹칠수록
     // 더 밝아지게 해서 반짝이는 인상을 준다.
-    const burst = this.add.circle(this.playerImg.x, this.playerImg.y, TILE_SIZE * 0.3, ITEM_COLORS.flashlight, 0.6);
-    burst.setBlendMode(Phaser.BlendModes.ADD);
-    burst.setDepth(9); // 캐릭터(depth 10) 바로 아래 — 캐릭터를 가리지 않고 감싸는 느낌
-    this.tweens.add({
-      targets: burst,
-      scale: 3,
-      alpha: 0,
+    this.spawnPulseEffect(this.playerImg.x, this.playerImg.y, {
+      radius: TILE_SIZE * 0.3,
+      color: ITEM_COLORS.flashlight,
+      fillAlpha: 0.6,
+      additive: true,
+      endScale: 3,
       duration: 400,
-      onComplete: () => burst.destroy(),
     });
 
     // 지속시간 내내 캐릭터를 은은하게 감싸는 글로우 — "지금 손전등이 켜져있다"를 계속 보여줌.
@@ -1408,14 +1457,14 @@ class MazeScene extends Phaser.Scene {
 
     // 픽업 순간 짧은 팝 — showShieldBlockEffect(소모될 때 터지는 큰 링)보다 작고 빠르게 해서
     // "장착됐다"와 "막아줬다"를 구분되게 한다.
-    const pop = this.add.circle(this.playerImg.x, this.playerImg.y, TILE_SIZE * 0.25, 0xbfffff, 0.7);
-    pop.setStrokeStyle(2, 0xffffff, 0.9);
-    this.tweens.add({
-      targets: pop,
-      scale: 1.6,
-      alpha: 0,
+    this.spawnPulseEffect(this.playerImg.x, this.playerImg.y, {
+      radius: TILE_SIZE * 0.25,
+      color: 0xbfffff,
+      fillAlpha: 0.7,
+      strokeWidth: 2,
+      strokeColor: 0xffffff,
+      endScale: 1.6,
       duration: 300,
-      onComplete: () => pop.destroy(),
     });
 
     // 보유 중임을 계속 보여주는 얇은 링. 이미 보유 중(재트리거)이면 새로 만들지 않는다.
@@ -1445,15 +1494,15 @@ class MazeScene extends Phaser.Scene {
     this.playSfx('detectorScan');
 
     // 탐지 반경만큼 훅 퍼지는 스캔 펄스 — "지금 이 범위를 스캔했다"를 시각적으로 보여준다.
-    const scanPulse = this.add.circle(this.playerImg.x, this.playerImg.y, TILE_SIZE * 0.2, ITEM_COLORS.detector, 0);
-    scanPulse.setStrokeStyle(3, ITEM_COLORS.detector, 0.8);
-    scanPulse.setDepth(9);
-    this.tweens.add({
-      targets: scanPulse,
-      radius: TILE_SIZE * DETECTOR_SCAN_RADIUS_TILES,
-      alpha: { from: 0.8, to: 0 },
+    // 시작 반지름(TILE_SIZE*0.2) 기준으로 DETECTOR_SCAN_RADIUS_TILES칸까지 퍼지도록 스케일 계산.
+    this.spawnPulseEffect(this.playerImg.x, this.playerImg.y, {
+      radius: TILE_SIZE * 0.2,
+      color: ITEM_COLORS.detector,
+      strokeWidth: 3,
+      strokeAlpha: 0.8,
+      startAlpha: 0.8,
+      endScale: DETECTOR_SCAN_RADIUS_TILES / 0.2,
       duration: 500,
-      onComplete: () => scanPulse.destroy(),
     });
 
     this.clearRevealedTrapMarkers();
@@ -1570,14 +1619,24 @@ class MazeScene extends Phaser.Scene {
         : INSTALL_FAILURE_MESSAGES.RETRY;
       this.showFloatingLabel(message);
     } catch (err) {
-      // 백엔드 없는 로컬 프리뷰용 폴백 — loadServerState/reportPosition/reportItemPickup과
-      // 동일한 패턴(2026-07-11 임소리 요청, 로컬에서 눈으로 확인하려고 추가). 개수 제한/타일
-      // 점유 같은 실패 판정은 서버 전용 로직(Redis 기반)이라 로컬에서 재현할 수 없으므로,
-      // 여기선 항상 성공한 것으로 처리한다 — 실서버가 응답하는 환경(devvit playtest/배포)에서는
-      // try가 먼저 성공해 여기까지 오지 않는다.
-      console.error('trap.install 실패 — 로컬 프리뷰용 즉시 성공 처리로 대체', err);
-      this.myTraps = [...this.myTraps, { x: this.playerGridX, y: this.playerGridY, type }];
-      this.handleInstallSuccess(type);
+      // 2026-07-12: 에러가 나면 무조건 "로컬이라 그렇겠지"하고 성공 처리하던 걸, IS_LOCAL_PREVIEW로
+      // 실제 환경을 확인해서 나누도록 수정(임소리 지적 — 실배포에서 진짜 네트워크 에러가 나도
+      // 똑같이 성공한 척 하면 서버엔 안 남았는데 클라만 설치된 것처럼 보이는 위험이 있었음).
+      if (!IS_LOCAL_PREVIEW) {
+        // 실서버가 있는 환경(devvit playtest/배포)에서 진짜로 실패한 경우 — 성공한 척하지 않고
+        // 정직하게 실패로 안내한다. heldTrapType은 그대로 유지되니(위 catch 진입 전 소모 안 함)
+        // 다른 칸에서, 또는 같은 칸에서 다시 시도 가능.
+        console.error('trap.install 실패(실서버 환경)', err);
+        this.playSfx('trapInstallFail');
+        this.showFloatingLabel(INSTALL_FAILURE_MESSAGES.RETRY);
+      } else {
+        // 백엔드 없는 로컬 프리뷰용 폴백 — loadServerState/reportPosition/reportItemPickup과
+        // 동일한 패턴. 개수 제한/타일 점유 같은 실패 판정은 서버 전용 로직(Redis 기반)이라
+        // 로컬에서 재현할 수 없으므로, 여기선 항상 성공한 것으로 처리한다.
+        console.error('trap.install 실패 — 로컬 프리뷰용 즉시 성공 처리로 대체', err);
+        this.myTraps = [...this.myTraps, { x: this.playerGridX, y: this.playerGridY, type }];
+        this.handleInstallSuccess(type);
+      }
     } finally {
       this.isInstalling = false;
     }
@@ -1599,14 +1658,13 @@ class MazeScene extends Phaser.Scene {
     // 설치 순간 "쿵" 내려놓는 느낌의 짧은 펄스 — 설치된 칸에서 함정 색으로 한 번 퍼짐.
     const cx = this.playerGridX * TILE_SIZE + TILE_SIZE / 2;
     const cy = this.playerGridY * TILE_SIZE + TILE_SIZE / 2;
-    const thump = this.add.circle(cx, cy, TILE_SIZE * 0.15, TRAP_COLORS[type], 0.7);
-    thump.setDepth(11);
-    this.tweens.add({
-      targets: thump,
-      scale: 3,
-      alpha: 0,
+    this.spawnPulseEffect(cx, cy, {
+      radius: TILE_SIZE * 0.15,
+      color: TRAP_COLORS[type],
+      fillAlpha: 0.7,
+      endScale: 3,
       duration: 350,
-      onComplete: () => thump.destroy(),
+      depth: 11,
     });
   }
 
@@ -1625,7 +1683,7 @@ class MazeScene extends Phaser.Scene {
     // 미끄러지는 동안 화면이 살짝 흔들려서 "통제 불능/어질어질"한 느낌을 준다. 몇 칸을
     // 미끄러질지 미리 알 수 없어서 넉넉한 길이로 걸어두고, slideStep이 멈추는 두 지점(방향키
     // 이탈/벽 충돌)에서 shakeEffect.reset()으로 조기 종료한다.
-    this.cameras.main.shake(2000, 0.008);
+    this.cameras.main.shake(SLIDE_SHAKE_DURATION, SLIDE_SHAKE_INTENSITY);
 
     this.slideStep(dx, dy);
   }
@@ -1707,14 +1765,13 @@ class MazeScene extends Phaser.Scene {
     this.flashPlayerTrap('respawn', RESPAWN_FLASH_MS);
 
     // 사라지는 이펙트 — 원래 있던 자리에서 함정 색(보라)으로 작은 원이 확 커지며 흩어짐.
-    const vanish = this.add.circle(this.playerImg.x, this.playerImg.y, TILE_SIZE * 0.3, TRAP_COLORS.respawn, 0.6);
-    vanish.setDepth(11);
-    this.tweens.add({
-      targets: vanish,
-      scale: 2.5,
-      alpha: 0,
+    this.spawnPulseEffect(this.playerImg.x, this.playerImg.y, {
+      radius: TILE_SIZE * 0.3,
+      color: TRAP_COLORS.respawn,
+      fillAlpha: 0.6,
+      endScale: 2.5,
       duration: 350,
-      onComplete: () => vanish.destroy(),
+      depth: 11,
     });
 
     this.playerGridX = SPAWN_POSITION.x;
@@ -1726,16 +1783,15 @@ class MazeScene extends Phaser.Scene {
 
     // 나타나는 이펙트 — 스폰 위치에서 큰 원이 줄어들며 응축되는 느낌(사라지는 쪽과 대비되게
     // 시작 스케일을 크게 잡고 줄인다)으로 "다시 나타났다"를 표현.
-    const appear = this.add.circle(this.playerImg.x, this.playerImg.y, TILE_SIZE * 0.5, TRAP_COLORS.respawn, 0.5);
-    appear.setStrokeStyle(3, TRAP_COLORS.respawn, 0.9);
-    appear.setScale(2.5);
-    appear.setDepth(11);
-    this.tweens.add({
-      targets: appear,
-      scale: 0.2,
-      alpha: 0,
+    this.spawnPulseEffect(this.playerImg.x, this.playerImg.y, {
+      radius: TILE_SIZE * 0.5,
+      color: TRAP_COLORS.respawn,
+      fillAlpha: 0.5,
+      strokeWidth: 3,
+      startScale: 2.5,
+      endScale: 0.2,
       duration: 400,
-      onComplete: () => appear.destroy(),
+      depth: 11,
     });
 
     // 지금까지 탐색해서 기억해둔 모든 타일을 다시 'hidden'으로 되돌림 (탐험 진행도 페널티)
