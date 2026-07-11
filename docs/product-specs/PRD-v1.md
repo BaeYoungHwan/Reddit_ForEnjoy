@@ -88,3 +88,4 @@ Reddit Devvit 플랫폼 (`devvit playtest` → `devvit upload` → `devvit publi
 | ~~아이템 최종 4~5종 확정~~ (`docs/design-docs/items.md` 참조) | 팀 | ✅ 확정 완료(2026-07-09) |
 | 시야 반경/함정 지속시간 등 밸런스 수치 (`docs/design-docs/vision-system.md`, `traps.md`) | 임소리 + 플레이테스트 | Day3 (7/10)까지 초안 |
 | 발자국 표시 개수 상한 (성능 영향) | 배영환 | P1 착수 전 |
+| 데일리 리셋 UX 구체 스펙 미정(`team-roles.md`엔 담당 항목으로만 존재, 디자인 없음) | 팀(송원호 구현) | 2026-07-14(화) 전 — 그 전에 정해져야 제출 자료 준비 전 구현 시간 확보 가능 |

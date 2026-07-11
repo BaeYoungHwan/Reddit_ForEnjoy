@@ -8,7 +8,7 @@ describe('buildMazeBackground', () => {
   it('returns a data-uri background image string and matching backgroundSize', () => {
     const { backgroundImage, backgroundSize } = buildMazeBackground(map);
     expect(backgroundImage).toMatch(/^url\("data:image\/svg\+xml,/);
-    expect(backgroundSize).toBe('266px 210px');
+    expect(backgroundSize).toBe('350px 294px');
   });
 
   it('is deterministic — same map always produces the same output', () => {
@@ -19,8 +19,8 @@ describe('buildMazeBackground', () => {
 describe('tileToPercent', () => {
   it('converts a tile position to a percentage within the grid', () => {
     const { left, top } = tileToPercent(map, { x: 1, y: 1 });
-    expect(parseFloat(left)).toBeCloseTo((1.5 / 19) * 100);
-    expect(parseFloat(top)).toBeCloseTo((1.5 / 15) * 100);
+    expect(parseFloat(left)).toBeCloseTo((1.5 / 25) * 100);
+    expect(parseFloat(top)).toBeCloseTo((1.5 / 21) * 100);
   });
 });
 
