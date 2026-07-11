@@ -25,6 +25,11 @@ const MAP_HEIGHT = MAIN_MAP.grid.length;
 // 서버에 등록된 실제 맵 ID. 함정/발자국 API는 mapId 단위로 데이터를 구분한다.
 const MAP_ID = 'map-1';
 
+// 지금이 백엔드 없는 로컬 정적 프리뷰(npx serve dist/client)인지 판단하는 기준. 실제 devvit
+// 웹뷰(배포/playtest)는 절대 localhost로 안 뜨므로, 에러 종류를 추측하는 것보다 훨씬 확실한
+// 신호다(2026-07-12, attemptInstall의 에러 처리를 상황별로 나누기 위해 도입 — 임소리 확인).
+const IS_LOCAL_PREVIEW = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+
 const TILE_SIZE = 64; // 타일 한 칸의 픽셀 크기 (정사각형 한 변의 길이)
 
 // 통로 폭(px). 칸 전체(TILE_SIZE)를 통로로 채우면 사방이 넓게 뚫린 팩맨 게임판처럼
@@ -166,9 +171,21 @@ const VISION_RADIUS = 2;
 // 한 칸 이동에 걸리는 기본 시간(ms).
 const BASE_MOVE_DURATION = 150;
 
+// 벽에 부딪혔을 때 넛지 트윈 하나가 걸리는 시간(ms, bumpIntoWall 참고).
+const WALL_BUMP_DURATION = 70;
+
+// 벽을 계속 누르고 있을 때 넛지를 다시 재생하는 최소 간격(ms) — 매 프레임 재생하면 흔들림처럼
+// 보이므로 "퉁, 퉁" 끊어지는 느낌이 나도록 제한한다.
+const WALL_BUMP_COOLDOWN_MS = 150;
+
 // 슬라이드 함정에 걸려 미끄러질 때, 한 칸당 걸리는 시간(ms).
 // 기본 이동보다 짧게 줘서 "제어권을 잃고 빠르게 밀려나는" 느낌을 냄.
 const SLIDE_STEP_DURATION = 80;
+
+// 슬라이드 중 카메라 흔들림 — 몇 칸을 미끄러질지 미리 알 수 없어 넉넉한 길이로 걸어두고
+// slideStep이 멈추는 지점에서 shakeEffect.reset()으로 조기 종료한다(applySlideTrap 참고).
+const SLIDE_SHAKE_DURATION = 2000;
+const SLIDE_SHAKE_INTENSITY = 0.008;
 
 // 발자국을 한 칸마다 즉시 서버로 보내지 않고 이 주기(ms)마다 모아서 한 번에 보낸다.
 // trap.trigger/item.pickup과 겹쳐 매 칸마다 요청이 늘어나는 걸 줄이기 위함
@@ -247,10 +264,16 @@ const ITEM_LABELS: Record<ItemType, string> = {
   detector: 'Trap Detector',
 };
 
-// items.md 초안: 반경 3칸 내 함정을 5초간 표시(수치는 ⚠️ 가정치, 플레이테스트로 확정 예정).
+// items.md 초안: 반경 3칸 내 함정을 표시(수치는 ⚠️ 가정치, 플레이테스트로 확정 예정).
 // 반경(DETECTOR_REVEAL_RADIUS=3)은 서버가 이미 적용해서 revealedTraps로 필터링해 보내주므로
-// 클라이언트는 "얼마나 오래 화면에 보여줄지"만 관리하면 된다.
-const DETECTOR_REVEAL_DISPLAY_MS = 5000;
+// 클라이언트는 "얼마나 오래 화면에 보여줄지"만 관리하면 된다. 5초는 너무 길다는 피드백으로
+// 2026-07-11 임소리 확인 후 3초로 축소.
+const DETECTOR_REVEAL_DISPLAY_MS = 3000;
+
+// 스캔 펄스 이펙트(applyDetectorItem)가 퍼지는 반지름(칸 단위). 서버의 정확한
+// DETECTOR_REVEAL_RADIUS 값은 클라이언트로 안 넘어오므로(필터링된 결과만 옴), 순수 연출용으로
+// 여기 값을 서버 상수와 수동으로 맞춰둔다 — 서버 값이 바뀌면 같이 확인할 것.
+const DETECTOR_SCAN_RADIUS_TILES = 3;
 
 // items.md: 손전등은 시야 반경 2→4칸, 8초. 원래는 "주웠다가 원할 때 쓰는" 아이템이지만
 // 인벤토리/사용 버튼 UI가 아직 없어서, 이번엔 임시로 줍는 즉시 자동 발동시킨다
@@ -340,6 +363,16 @@ class MazeScene extends Phaser.Scene {
   // 바꾸기 직전에 이 트윈을 멈춰서 막는다.
   private walkBobTween?: Phaser.Tweens.Tween;
 
+  // 벽에 부딪혔을 때 짧게 튕기는 넛지 트윈(bumpIntoWall 참고). 방향키를 벽 쪽으로 계속 누르고
+  // 있으면 update()가 매 프레임 tryMove를 호출하는데, 그때마다 새 트윈을 만들지 않고 이미
+  // 있으면 멈춘 뒤 원위치로 되돌리고 새로 시작한다(위치가 밀려 쌓이는 것 방지).
+  private wallBumpTween?: Phaser.Tweens.Tween;
+
+  // wallBumpTween을 마지막으로 발동한 시각(this.time.now 기준 ms). 벽을 계속 누르고 있을 때
+  // 매 프레임(약 16ms마다) 재생하면 너무 잦아 흔들림처럼 보이므로, 최소 간격을 두고 "퉁, 퉁"
+  // 끊어지는 느낌으로 제한한다.
+  private lastWallBumpAt = 0;
+
   // 지속시간이 있는 함정 효과(시야차단/역방향/리스폰)별로 "언제 끝나는지"(this.time.now 기준
   // ms)를 기억해두는 표. 예전엔 단순 카운터(토큰) 하나로 "마지막에 뭘 걸었는지"만 추적했는데,
   // 그러면 서로 다른 함정을 연달아 밟았을 때 나중에 건 효과가 먼저 끝나버려도 그 타이머가
@@ -378,6 +411,13 @@ class MazeScene extends Phaser.Scene {
   // trap.trigger(인접 타일만 조회 가능)를 통해서만 알려주므로 클라이언트에 절대 미리 내려주지
   // 않는다 — 여기서 다른 유저 함정까지 렌더링하면 함정 위치를 미리 알아내는 치트가 된다.
   private myTraps: TrapInstance[] = [];
+
+  // "x,y" 형태로 기록해두는, 내가 직접 설치한 함정의 좌표 집합. 실서버에서는 trap.trigger가
+  // installerId로 자기 함정을 걸러주지만(trpc.ts), 백엔드 없는 로컬 프리뷰의 reportPosition
+  // 폴백은 myTraps 배열만 보고 "칸이 일치하면 무조건 hit"으로 판정해서 자기 함정에 자기가
+  // 걸리는 버그가 있었다(2026-07-11 임소리 발견) — 실제 게임 규칙(설치자 본인은 회피)을
+  // 로컬 폴백에서도 재현하려고 별도로 추적한다.
+  private selfInstalledTrapKeys = new Set<string>();
 
   // trap.trigger 호출이 dispatch된 순서대로만 네트워크로 나가도록 강제하는 큐.
   // (연속 이동 중 여러 trap.trigger가 동시에 in-flight 상태가 되면 응답 순서가
@@ -426,7 +466,7 @@ class MazeScene extends Phaser.Scene {
   private hasShield = false;
 
   // 보유 중인 "함정 설치" 아이템이 랜덤으로 정해준 함정 종류. null이면 아무것도 안 들고
-  // 있는 상태 — Z를 눌러도 아무 일 없음. 설치 성공하면 다시 null로 돌아감(1회성 소모,
+  // 있는 상태 — Ctrl을 눌러도 아무 일 없음. 설치 성공하면 다시 null로 돌아감(1회성 소모,
   // 실패하면 그대로 유지 — 다른 칸에서 재시도 가능).
   private heldTrapType: TrapType | null = null;
 
@@ -444,8 +484,29 @@ class MazeScene extends Phaser.Scene {
   // 있었다. 손전등은 함정이 아니라 activeTrapEffects에는 안 들어가므로 별도 필드로 관리.
   private flashlightExpireAt = 0;
 
+  // 손전등이 켜져있는 동안 캐릭터를 감싸는 은은한 글로우. 픽업 순간의 버스트(1회성)와 별개로,
+  // "지금 효과가 지속 중"임을 계속 보여주기 위한 것 — update()에서 매 프레임 캐릭터 위치로
+  // 따라가도록 동기화한다. 지속시간이 끝나면(applyFlashlightItem 참고) 파괴하고 null로 되돌림.
+  private flashlightGlow: Phaser.GameObjects.Arc | null = null;
+
+  // 쉴드를 보유(hasShield)하고 있는 동안 캐릭터를 감싸는 얇은 링. 소모되는 순간
+  // (checkTrapTrigger에서 showShieldBlockEffect 재생 시) 같이 파괴한다.
+  private shieldRing: Phaser.GameObjects.Arc | null = null;
+
+  // 함정 설치권(heldTrapType)을 보유하고 있는 동안 캐릭터 머리 위에 떠서 "지금 함정을
+  // 들고 있다"는 것만 보여주는 아이콘. 처음엔 함정 종류별로 색을 다르게 줬었는데, 어떤 색이
+  // 어떤 함정인지 플레이어가 알 방법이 없어 의미 없는 구분이라는 피드백(2026-07-11 임소리)으로
+  // 종류 무관하게 항상 같은 모양을 쓰도록 변경 — Text(이모지)라 Arc가 아니라 Text 타입.
+  // 설치 성공 시(attemptInstall) 파괴한다.
+  private heldTrapIcon: Phaser.GameObjects.Text | null = null;
+
   // 역방향 함정에 걸린 상태인지 여부. true면 방향키 입력을 반대로 뒤집어서 처리함.
   private isReversed = false;
+
+  // 역방향 효과가 지속되는 동안 머리 위에서 계속 뱅글뱅글 도는 경고 아이콘. 처음 걸릴 때
+  // 반짝이는 틴트만으로는 "지금 조작이 반대"라는 걸 계속 잊기 쉬워서(2026-07-11 임소리 피드백),
+  // 지속시간 내내 눈에 띄게 유지한다. applyReverseTrap의 onExpire에서 파괴.
+  private reverseIcon: Phaser.GameObjects.Text | null = null;
 
   // 골인 지점 깃발 마커(깃대+천 메쉬 컨테이너). 안개 상태에 맞춰 밝기가 같이 조정됨
   // (다른 타일들과 동일하게 탐색해야 보임).
@@ -591,10 +652,10 @@ class MazeScene extends Phaser.Scene {
     // 이후 update()에서 this.cursors.left/right/up/down 으로 눌림 여부를 확인할 수 있음.
     this.cursors = this.input.keyboard!.createCursorKeys();
 
-    // 함정 설치 키(Z). 방향키(this.cursors)는 "누르는 동안 계속" 반응해야 하는 연속 입력이라
-    // update()에서 매 프레임 폴링하지만, 설치는 "딱 한 번만" 반응해야 하는 단발성 액션이라
-    // keydown 이벤트로 처리한다(이 파일에서 첫 이벤트 기반 키 입력).
-    this.input.keyboard!.on('keydown-Z', () => void this.attemptInstall());
+    // 함정 설치 키(Ctrl — 2026-07-11 임소리 요청으로 Z에서 변경). 방향키(this.cursors)는
+    // "누르는 동안 계속" 반응해야 하는 연속 입력이라 update()에서 매 프레임 폴링하지만,
+    // 설치는 "딱 한 번만" 반응해야 하는 단발성 액션이라 keydown 이벤트로 처리한다.
+    this.input.keyboard!.on('keydown-CTRL', () => void this.attemptInstall());
 
     // 게임 시작하자마자 시작 지점 기준으로 시야(안개)부터 계산해서 보여줌
     this.updateFog();
@@ -677,6 +738,14 @@ class MazeScene extends Phaser.Scene {
     try {
       const state = await trpc.map.getState.query({ mapId: MAP_ID });
       this.myTraps = state.myTraps;
+      // state.myTraps는 서버가 실제로 확인해준 "내가 설치한 함정" 목록이라(trapInstallerKey
+      // 기준) 이전 세션에 설치해둔 것도 포함될 수 있다. selfInstalledTrapKeys는 지금까지
+      // handleInstallSuccess가 호출된 적 있는 것만 기록해서, 새로고침 등으로 여기서 처음
+      // 불러온 기존 함정은 빠져있었다 — reportPosition의 로컬 폴백이 그런 함정도 다시 "내
+      // 함정"으로 인식하도록 여기서 한 번에 채워준다(2026-07-11 발견/수정).
+      for (const trap of state.myTraps) {
+        this.selfInstalledTrapKeys.add(`${trap.x},${trap.y}`);
+      }
       footprints = state.footprints;
       this.remainingItems = state.items;
     } catch (err) {
@@ -844,6 +913,11 @@ class MazeScene extends Phaser.Scene {
     // 깃발 펄럭임은 골인 여부/이동 여부와 무관하게 항상 갱신
     this.updateGoalFlagWave(delta);
 
+    // 보유/지속 중인 아이템 이펙트(손전등 글로우, 쉴드 링, 함정 보유 아이콘)도 골인 여부와
+    // 무관하게 캐릭터 위치를 계속 따라가야 자연스럽다 — 이동은 트윈으로 매 프레임 좌표가
+    // 바뀌므로, 이동 완료 시점이 아니라 여기서 매 프레임 동기화한다.
+    this.syncHeldItemEffects();
+
     // 골인했으면 더 이상 입력을 받지 않음 (테스트용 종료 처리)
     if (this.hasFinished) return;
 
@@ -862,6 +936,22 @@ class MazeScene extends Phaser.Scene {
     }
 
     this.tryMove(dx, dy);
+  }
+
+  // 보유/지속 중인 아이템·함정 이펙트를 캐릭터의 실제 화면 좌표로 옮긴다. 없으면(옵셔널
+  // 체이닝) 아무 일도 안 하므로 매 프레임 불러도 비용이 거의 없다.
+  private syncHeldItemEffects() {
+    this.flashlightGlow?.setPosition(this.playerImg.x, this.playerImg.y);
+    this.shieldRing?.setPosition(this.playerImg.x, this.playerImg.y);
+
+    // 함정 설치 보유 아이콘과 역방향 경고 아이콘은 둘 다 머리 위 같은 자리를 쓰는데, 동시에
+    // 뜨면(설치권을 들고 있는 채로 역방향 함정을 밟는 등) 겹쳐서 하나가 안 보이는 문제가
+    // 있었다(2026-07-11 임소리 발견) — 둘 다 떠 있을 때만 좌우로 나눠 배치하고, 하나만 있으면
+    // 원래대로 정중앙에 둔다.
+    const headIconY = this.playerImg.y - TILE_SIZE * 0.55;
+    const headIconOffsetX = this.heldTrapIcon && this.reverseIcon ? TILE_SIZE * 0.22 : 0;
+    this.heldTrapIcon?.setPosition(this.playerImg.x - headIconOffsetX, headIconY);
+    this.reverseIcon?.setPosition(this.playerImg.x + headIconOffsetX, headIconY);
   }
 
   // 지금 눌려있는 방향키를 -1/0/1 형태의 방향값으로 바꿔주는 함수. 아무 키도 안 눌렸으면 null.
@@ -905,14 +995,49 @@ class MazeScene extends Phaser.Scene {
     });
   }
 
+  // 벽(또는 맵 끝) 쪽으로 이동을 시도했다가 막혔을 때, 그 방향으로 살짝 튕겼다 돌아오는
+  // 넛지 이펙트 — "눌렀는데 반응이 없다"는 느낌을 줄이기 위한 조작감 폴리싱(2026-07-11).
+  // 방향키를 벽 쪽으로 계속 누르고 있으면 update()가 매 프레임 이 함수를 부르므로, 쿨다운으로
+  // 너무 잦은 재생을 막는다. 기준 위치는 항상 현재 그리드 칸의 고정 픽셀 좌표라, 반복 호출돼도
+  // 위치가 밀려 쌓이지 않는다.
+  private bumpIntoWall(dx: number, dy: number) {
+    if (this.time.now - this.lastWallBumpAt < WALL_BUMP_COOLDOWN_MS) return;
+    this.lastWallBumpAt = this.time.now;
+
+    const baseX = this.playerGridX * TILE_SIZE + TILE_SIZE / 2;
+    const baseY = this.playerGridY * TILE_SIZE + TILE_SIZE / 2;
+
+    this.wallBumpTween?.stop();
+    this.playerImg.setPosition(baseX, baseY); // stop()이 트윈 중간값을 남길 수 있어 먼저 원위치로
+
+    this.wallBumpTween = this.tweens.add({
+      targets: this.playerImg,
+      x: baseX + dx * TILE_SIZE * 0.15,
+      y: baseY + dy * TILE_SIZE * 0.15,
+      duration: WALL_BUMP_DURATION,
+      yoyo: true,
+      ease: 'Quad.easeOut',
+    });
+  }
+
   // 한 칸 이동을 시도하는 함수.
   // dx, dy는 "어느 방향으로 한 칸 움직이려 하는지" (-1, 0, 1 중 하나씩)
   private tryMove(dx: number, dy: number) {
     const targetX = this.playerGridX + dx;
     const targetY = this.playerGridY + dy;
 
-    // 맵 범위 밖이거나 벽이면 이동 취소
-    if (!this.isWalkable(targetX, targetY)) return;
+    // 맵 범위 밖이거나 벽이면 이동 취소 — 예전엔 아무 반응 없이 조용히 무시했는데, "눌렀는데
+    // 왜 안 움직이지"라는 느낌을 줄여보려고 살짝 부딪히는 느낌의 넛지를 추가했다(2026-07-11,
+    // 조작감 폴리싱).
+    if (!this.isWalkable(targetX, targetY)) {
+      this.bumpIntoWall(dx, dy);
+      return;
+    }
+
+    // 직전에 벽 넛지가 아직 돌아오는 중이었다면 멈춘다 — 안 멈추면 넛지 트윈과 지금 시작하는
+    // 실제 이동 트윈이 같은 playerImg.x/y를 동시에 건드려서 서로 싸우다 캐릭터가 잠깐
+    // 튀어보이는 문제가 있었음(2026-07-11 발견).
+    this.wallBumpTween?.stop();
 
     this.isMoving = true;
     this.playerGridX = targetX;
@@ -922,11 +1047,14 @@ class MazeScene extends Phaser.Scene {
 
     // tween(트윈) = 값을 순간이동이 아니라 "서서히" 바꿔주는 Phaser 기능.
     // 여기서는 캐릭터의 실제 화면 좌표(x, y)를 목표 지점까지 BASE_MOVE_DURATION(ms) 동안 부드럽게 이동시킴.
+    // ease를 Sine.easeOut으로 줘서 도착 직전에 살짝 감속하는 느낌을 냄(2026-07-11 조작감 폴리싱
+    // — 기존엔 ease 지정이 없어 등속(Linear)이라 뚝뚝 끊기는 인상이 있었음).
     this.tweens.add({
       targets: this.playerImg,
       x: targetX * TILE_SIZE + TILE_SIZE / 2,
       y: targetY * TILE_SIZE + TILE_SIZE / 2,
       duration: BASE_MOVE_DURATION,
+      ease: 'Sine.easeOut',
       onComplete: () => {
         // 주의: 여기서 isMoving을 바로 false로 풀면 안 됨 — checkTrapTrigger가 서버 응답을
         // 기다리는 동안(비동기) 방향키 입력이 다시 받아들여져서, 리스폰 함정처럼 위치를
@@ -964,7 +1092,13 @@ class MazeScene extends Phaser.Scene {
     } catch (err) {
       console.error('trap.trigger 실패 — 로컬 함정 목록으로 직접 판정', err);
       const localTrap = this.myTraps.find((t) => t.x === x && t.y === y);
-      return localTrap ? { hit: true, type: localTrap.type } : { hit: false };
+      if (!localTrap) return { hit: false };
+
+      // 실서버의 "설치자 본인은 회피"(trpc.ts trap.trigger, installerId 비교)를 로컬 폴백에서도
+      // 재현 — selfInstalledTrapKeys 참고.
+      if (this.selfInstalledTrapKeys.has(`${x},${y}`)) return { hit: false };
+
+      return { hit: true, type: localTrap.type };
     }
   }
 
@@ -986,6 +1120,8 @@ class MazeScene extends Phaser.Scene {
     if (this.hasShield) {
       this.hasShield = false;
       this.showShieldBlockEffect();
+      this.shieldRing?.destroy();
+      this.shieldRing = null;
       this.isMoving = false;
       return;
     }
@@ -1110,10 +1246,13 @@ class MazeScene extends Phaser.Scene {
     } catch (err) {
       console.error('item.pickup 실패 — 로컬 아이템 목록으로 직접 판정', err);
       const localItem = this.remainingItems.find((item) => item.x === x && item.y === y);
+
       // revealedTraps: undefined로 명시 — 백엔드 없는 로컬 폴백에선 다른 유저 함정을 알 방법이
       // 없어(revealNearbyTraps는 서버 전용 로직) 탐지기를 주워도 아무것도 안 밝혀지는 게
       // 맞는 동작. 필드 자체를 넣어두는 이유는 실제 서버 응답(ItemPickupOutput)과 반환 타입
       // 형태를 통일해 호출부에서 옵셔널 체이닝 없이 그대로 접근할 수 있게 하기 위함.
+      // (2026-07-11: 로컬 테스트용으로 반경 근처에 가짜 함정 좌표를 만들어 보여주는 시도를
+      // 했었으나, 맵 경계 밖으로 나갈 수 있는 등 임의성이 커서 제거하고 원래 방식으로 되돌림)
       return localItem
         ? { picked: true, type: localItem.type, revealedTraps: undefined }
         : { picked: false, type: undefined, revealedTraps: undefined };
@@ -1175,12 +1314,73 @@ class MazeScene extends Phaser.Scene {
       .setOrigin(0.5)
       .setDepth(20);
 
+    // 예전엔 뜨자마자 바로 알파도 같이 줄어들어서 다 읽기 전에 흐려지기 시작했다(2026-07-11
+    // 임소리 피드백). holdMs 동안은 알파를 그대로 유지해 읽을 시간을 확보하고, 그 뒤 fadeMs
+    // 동안만 사라지게 y 이동/알파 트윈을 분리했다.
+    const holdMs = 900;
+    const fadeMs = 600;
+
     this.tweens.add({
       targets: label,
       y: label.y - TILE_SIZE * 0.5,
+      duration: holdMs + fadeMs,
+    });
+
+    this.tweens.add({
+      targets: label,
       alpha: 0,
-      duration: 900,
+      delay: holdMs,
+      duration: fadeMs,
       onComplete: () => label.destroy(),
+    });
+  }
+
+  // 픽업/설치/함정 발동 시 짧게 퍼졌다 사라지는 원형 이펙트 공통 헬퍼. 손전등 버스트, 쉴드 팝,
+  // 탐지기 스캔 펄스, 함정 설치 쿵, 리스폰 소멸/생성 이펙트가 전부 "원을 만들고 커지거나
+  // 작아지며 사라진다"는 같은 모양이라 하나로 뽑았다(2026-07-12, 코드 리뷰 피드백 반영 —
+  // 예전엔 이 6곳이 거의 같은 코드를 조금씩 다르게 복붙하고 있었음). 옵션은 필요한 것만
+  // 넘기면 되고 나머지는 기본값을 쓴다.
+  //
+  // endScale이냐 endRadius냐: 기본은 setScale로 통째로 확대/축소하는 endScale인데, 이러면
+  // 테두리(strokeWidth)도 같이 두꺼워진다(원 전체가 그 비율로 커지므로) — 대부분의 이펙트는
+  // 배율이 1.6~2배라 티가 안 나지만, 탐지기 스캔 펄스처럼 배율이 훨씬 크면(0.2칸→3칸, 15배)
+  // 얇던 링이 두꺼운 원반처럼 보여버린다(2026-07-12 리뷰에서 발견). 이런 경우 endRadius를
+  // 대신 지정하면 실제 반지름(geometry)만 늘어나고 테두리 두께는 그대로 유지된다.
+  private spawnPulseEffect(
+    x: number,
+    y: number,
+    opts: {
+      radius: number;
+      color: number;
+      fillAlpha?: number; // 기본 0(테두리만 있는 링 모양) — 채워진 원이면 지정
+      strokeWidth?: number; // 지정하면 테두리도 그림
+      strokeColor?: number; // 기본값: color와 동일
+      strokeAlpha?: number; // 기본 0.9
+      startScale?: number; // 기본 1(원래 크기에서 시작)
+      startAlpha?: number; // 기본 1
+      endScale?: number; // endRadius와 둘 중 하나만 지정(둘 다 안 주면 크기 변화 없음)
+      endRadius?: number; // 테두리 두께를 유지하며 반지름 자체를 늘리고 싶을 때
+      endAlpha?: number; // 기본 0
+      duration: number;
+      depth?: number; // 기본 9(캐릭터 depth 10 바로 아래)
+      additive?: boolean; // true면 가산 블렌드(겹칠수록 밝아지는 빛 느낌)
+    }
+  ) {
+    const circle = this.add.circle(x, y, opts.radius, opts.color, opts.fillAlpha ?? 0);
+    if (opts.strokeWidth) {
+      circle.setStrokeStyle(opts.strokeWidth, opts.strokeColor ?? opts.color, opts.strokeAlpha ?? 0.9);
+    }
+    if (opts.additive) circle.setBlendMode(Phaser.BlendModes.ADD);
+    circle.setDepth(opts.depth ?? 9);
+    if (opts.startScale !== undefined) circle.setScale(opts.startScale);
+    if (opts.startAlpha !== undefined) circle.setAlpha(opts.startAlpha);
+
+    this.tweens.add({
+      targets: circle,
+      ...(opts.endRadius !== undefined ? { radius: opts.endRadius } : { scale: opts.endScale ?? 1 }),
+      alpha: opts.endAlpha ?? 0,
+      duration: opts.duration,
+      onComplete: () => circle.destroy(),
     });
   }
 
@@ -1188,16 +1388,15 @@ class MazeScene extends Phaser.Scene {
   // 원이 커지면서 투명해지는 트윈으로 "보호막이 퍼졌다 사라지는" 느낌을 냄.
   private showShieldBlockEffect() {
     this.playSfx('shieldBlock');
-    const ring = this.add.circle(this.playerImg.x, this.playerImg.y, TILE_SIZE * 0.35, 0xbfffff, 0.5);
-    ring.setStrokeStyle(3, 0xffffff, 0.9);
-    ring.setDepth(15);
-
-    this.tweens.add({
-      targets: ring,
-      scale: 2,
-      alpha: 0,
+    this.spawnPulseEffect(this.playerImg.x, this.playerImg.y, {
+      radius: TILE_SIZE * 0.35,
+      color: 0xbfffff,
+      fillAlpha: 0.5,
+      strokeWidth: 3,
+      strokeColor: 0xffffff,
+      endScale: 2,
       duration: 500,
-      onComplete: () => ring.destroy(),
+      depth: 15,
     });
   }
 
@@ -1214,6 +1413,31 @@ class MazeScene extends Phaser.Scene {
     this.currentVisionRadius = FLASHLIGHT_VISION_RADIUS;
     this.updateFog();
 
+    // 픽업 순간 훅 퍼지는 버스트 — "빛이 확 켜졌다"는 느낌. 가산 블렌드(ADD)로 빛이 겹칠수록
+    // 더 밝아지게 해서 반짝이는 인상을 준다.
+    this.spawnPulseEffect(this.playerImg.x, this.playerImg.y, {
+      radius: TILE_SIZE * 0.3,
+      color: ITEM_COLORS.flashlight,
+      fillAlpha: 0.6,
+      additive: true,
+      endScale: 3,
+      duration: 400,
+    });
+
+    // 지속시간 내내 캐릭터를 은은하게 감싸는 글로우 — "지금 손전등이 켜져있다"를 계속 보여줌.
+    // 재트리거(아래 만료 타이머 갱신)여도 이미 떠있는 글로우는 재사용하고 새로 만들지 않는다.
+    if (!this.flashlightGlow) {
+      this.flashlightGlow = this.add.circle(
+        this.playerImg.x,
+        this.playerImg.y,
+        TILE_SIZE * 0.9,
+        ITEM_COLORS.flashlight,
+        0.18
+      );
+      this.flashlightGlow.setBlendMode(Phaser.BlendModes.ADD);
+      this.flashlightGlow.setDepth(9);
+    }
+
     // 지속시간이 끝나기 전에 손전등을 한 번 더 주우면(맵에 여러 개 스폰될 수 있음), 먼저
     // 걸린 타이머는 자기가 만료 시각을 갱신할 때 저장해둔 값과 지금 값이 다르면(=더 최신
     // 손전등이 그 사이 갱신했으면) 아무것도 하지 않는다 — applyBlindTrap/applyReverseTrap과
@@ -1224,6 +1448,8 @@ class MazeScene extends Phaser.Scene {
       if (this.flashlightExpireAt === expireAt) {
         this.currentVisionRadius = VISION_RADIUS;
         this.updateFog();
+        this.flashlightGlow?.destroy();
+        this.flashlightGlow = null;
       }
     });
   }
@@ -1235,14 +1461,37 @@ class MazeScene extends Phaser.Scene {
     this.showFloatingLabel(`${ITEM_LABELS.shield} acquired!`);
     this.hasShield = true;
     this.flashPlayer(ITEM_COLORS.shield);
+
+    // 픽업 순간 짧은 팝 — showShieldBlockEffect(소모될 때 터지는 큰 링)보다 작고 빠르게 해서
+    // "장착됐다"와 "막아줬다"를 구분되게 한다.
+    this.spawnPulseEffect(this.playerImg.x, this.playerImg.y, {
+      radius: TILE_SIZE * 0.25,
+      color: 0xbfffff,
+      fillAlpha: 0.7,
+      strokeWidth: 2,
+      strokeColor: 0xffffff,
+      endScale: 1.6,
+      duration: 300,
+    });
+
+    // 보유 중임을 계속 보여주는 얇은 링. 이미 보유 중(재트리거)이면 새로 만들지 않는다.
+    if (!this.shieldRing) {
+      this.shieldRing = this.add.circle(this.playerImg.x, this.playerImg.y, TILE_SIZE * 0.38, 0x000000, 0);
+      this.shieldRing.setStrokeStyle(2, 0xbfffff, 0.8);
+      this.shieldRing.setDepth(9);
+    }
   }
 
-  // 함정 탐지기 — items.md 초안: 반경 3칸 내 함정을 5초간 표시. 반경 필터링은 서버
+  // 함정 탐지기 — items.md 초안: 반경 3칸 내 함정을 표시. 반경 필터링은 서버
   // (revealNearbyTraps, DETECTOR_REVEAL_RADIUS)가 이미 끝낸 결과를 넘겨받으므로, 여기서는
   // "받은 좌표에 마커를 얼마나 오래 보여줄지"만 담당한다. myTraps(내가 설치한 함정)와 달리
   // 다른 유저의 함정이라 renderTrapMarkers 계열과 완전히 분리된 배열(revealedTrapMarkers)로
   // 관리 — 표시 시간이 끝나면 흔적 없이 사라져야 하고, 그 사이 실제 함정 판정(trap.trigger)
   // 로직에는 전혀 관여하지 않는 순수 시각 효과다.
+  //
+  // 2026-07-11: "보유했다가 X키로 확인"하는 방식을 잠깐 시도했다가(pendingDetectorReveal +
+  // useDetector로 분리) 임소리가 다시 "밟는 즉시 자동 공개"로 되돌리기로 확정 — 픽업과 공개를
+  // 다시 이 함수 하나로 합침.
   private applyDetectorItem(revealedTraps: TrapInstance[]) {
     // 공용 픽업음(itemPickup) 대신 detectorScan만 재생 — playSfx는 "이벤트 효과음끼리 겹치면
     // 최신 것만 들리게" 직전 소리를 끊는데, 둘을 곧바로 이어서 틀면 itemPickup이 시작하자마자
@@ -1250,6 +1499,19 @@ class MazeScene extends Phaser.Scene {
     this.showFloatingLabel(`${ITEM_LABELS.detector} acquired!`);
     this.flashPlayer(ITEM_COLORS.detector);
     this.playSfx('detectorScan');
+
+    // 탐지 반경만큼 훅 퍼지는 스캔 펄스 — "지금 이 범위를 스캔했다"를 시각적으로 보여준다.
+    // endRadius 사용(endScale 아님) — 배율이 15배(0.2칸→3칸)라 스케일로 키우면 테두리까지
+    // 15배 두꺼워져서 "얇은 링"이 아니라 "두꺼운 원반"처럼 보이는 문제가 있었다(2026-07-12).
+    this.spawnPulseEffect(this.playerImg.x, this.playerImg.y, {
+      radius: TILE_SIZE * 0.2,
+      color: ITEM_COLORS.detector,
+      strokeWidth: 3,
+      strokeAlpha: 0.8,
+      startAlpha: 0.8,
+      endRadius: TILE_SIZE * DETECTOR_SCAN_RADIUS_TILES,
+      duration: 500,
+    });
 
     this.clearRevealedTrapMarkers();
     const token = ++this.detectorRevealToken;
@@ -1276,8 +1538,8 @@ class MazeScene extends Phaser.Scene {
     }
 
     this.time.delayedCall(DETECTOR_REVEAL_DISPLAY_MS, () => {
-      // 그 사이 탐지기를 한 번 더 주웠다면(맵당 스폰이 1곳뿐이라 실제로는 드묾) 이 타이머는
-      // 오래된 것이니 새로 표시된 마커를 건드리지 않는다 — 최신 타이머가 알아서 지운다.
+      // 그 사이 탐지기를 한 번 더 써서(재사용) 이 타이머는 오래된 것이 됐다면, 새로 표시된
+      // 마커를 건드리지 않는다 — 최신 타이머가 알아서 지운다.
       if (this.detectorRevealToken === token) this.clearRevealedTrapMarkers();
     });
   }
@@ -1314,15 +1576,24 @@ class MazeScene extends Phaser.Scene {
 
   // 함정 설치 — items.md: 즉시 소모(1회성). 어떤 함정을 설치하게 될지는 줍는 순간 랜덤으로
   // 정해진다(뽑기형 — 플레이어가 종류를 고르지 않음, 2026-07-09 확인). 실제 서버 호출은
-  // Z키를 눌렀을 때 attemptInstall()에서 처리.
+  // Ctrl키를 눌렀을 때 attemptInstall()에서 처리.
   private applyTrapInstallItem() {
     this.playSfx('itemPickup');
     this.heldTrapType = TRAP_TYPES[Math.floor(Math.random() * TRAP_TYPES.length)]!;
     this.flashPlayer(ITEM_COLORS.trapInstall);
     this.showFloatingLabel(`${ITEM_LABELS.trapInstall} acquired! (${TRAP_LABELS[this.heldTrapType]})`);
+
+    // "함정을 들고 있다"는 것만 보여주는 아이콘(종류 무관, 위 필드 주석 참고) — 설치
+    // (attemptInstall) 전까지 머리 위에 떠 있는다. 이전에 들고 있던 게 있었다면 먼저 지우고
+    // 새로 만든다.
+    this.heldTrapIcon?.destroy();
+    this.heldTrapIcon = this.add
+      .text(this.playerImg.x, this.playerImg.y - TILE_SIZE * 0.55, '🪤', { fontSize: '18px' })
+      .setOrigin(0.5)
+      .setDepth(11); // 캐릭터(depth 10) 위에 떠 보이게
   }
 
-  // Z키를 눌렀을 때 호출됨. 보유 중인 함정 설치권(heldTrapType)이 있을 때만 지금 서 있는
+  // Ctrl키를 눌렀을 때 호출됨. 보유 중인 함정 설치권(heldTrapType)이 있을 때만 지금 서 있는
   // 칸에 설치를 시도한다 — 이 게임엔 "다른 칸을 조준"하는 입력 수단이 없어서 항상 현재
   // 위치에 설치하는 게 유일하게 말이 되는 선택.
   private async attemptInstall() {
@@ -1345,11 +1616,7 @@ class MazeScene extends Phaser.Scene {
       this.myTraps = result.myTraps;
 
       if (result.success) {
-        this.playSfx('trapInstallSuccess');
-        this.heldTrapType = null; // 성공해야 소모(1회성)
-        this.renderInstalledTrapMarker({ x: this.playerGridX, y: this.playerGridY, type });
-        this.updateFog();
-        this.showFloatingLabel(`Trap placed! (${TRAP_LABELS[type]})`);
+        this.handleInstallSuccess(type);
         return;
       }
 
@@ -1360,10 +1627,53 @@ class MazeScene extends Phaser.Scene {
         : INSTALL_FAILURE_MESSAGES.RETRY;
       this.showFloatingLabel(message);
     } catch (err) {
-      console.error('trap.install 실패', err);
+      // 2026-07-12: 에러가 나면 무조건 "로컬이라 그렇겠지"하고 성공 처리하던 걸, IS_LOCAL_PREVIEW로
+      // 실제 환경을 확인해서 나누도록 수정(임소리 지적 — 실배포에서 진짜 네트워크 에러가 나도
+      // 똑같이 성공한 척 하면 서버엔 안 남았는데 클라만 설치된 것처럼 보이는 위험이 있었음).
+      if (!IS_LOCAL_PREVIEW) {
+        // 실서버가 있는 환경(devvit playtest/배포)에서 진짜로 실패한 경우 — 성공한 척하지 않고
+        // 정직하게 실패로 안내한다. heldTrapType은 그대로 유지되니(위 catch 진입 전 소모 안 함)
+        // 다른 칸에서, 또는 같은 칸에서 다시 시도 가능.
+        console.error('trap.install 실패(실서버 환경)', err);
+        this.playSfx('trapInstallFail');
+        this.showFloatingLabel(INSTALL_FAILURE_MESSAGES.RETRY);
+      } else {
+        // 백엔드 없는 로컬 프리뷰용 폴백 — loadServerState/reportPosition/reportItemPickup과
+        // 동일한 패턴. 개수 제한/타일 점유 같은 실패 판정은 서버 전용 로직(Redis 기반)이라
+        // 로컬에서 재현할 수 없으므로, 여기선 항상 성공한 것으로 처리한다.
+        console.error('trap.install 실패 — 로컬 프리뷰용 즉시 성공 처리로 대체', err);
+        this.myTraps = [...this.myTraps, { x: this.playerGridX, y: this.playerGridY, type }];
+        this.handleInstallSuccess(type);
+      }
     } finally {
       this.isInstalling = false;
     }
+  }
+
+  // 함정 설치 성공 시 공통으로 처리하는 상태 변경 + 이펙트. attemptInstall의 서버 성공
+  // 분기와 로컬 폴백 분기가 동일하게 재사용한다.
+  private handleInstallSuccess(type: TrapType) {
+    this.playSfx('trapInstallSuccess');
+    this.heldTrapType = null; // 성공해야 소모(1회성)
+    this.heldTrapIcon?.destroy();
+    this.heldTrapIcon = null;
+    // 로컬 폴백(reportPosition)이 "설치자 본인은 회피"를 재현할 수 있도록 기록 — selfInstalledTrapKeys 참고.
+    this.selfInstalledTrapKeys.add(`${this.playerGridX},${this.playerGridY}`);
+    this.renderInstalledTrapMarker({ x: this.playerGridX, y: this.playerGridY, type });
+    this.updateFog();
+    this.showFloatingLabel(`Trap placed! (${TRAP_LABELS[type]})`);
+
+    // 설치 순간 "쿵" 내려놓는 느낌의 짧은 펄스 — 설치된 칸에서 함정 색으로 한 번 퍼짐.
+    const cx = this.playerGridX * TILE_SIZE + TILE_SIZE / 2;
+    const cy = this.playerGridY * TILE_SIZE + TILE_SIZE / 2;
+    this.spawnPulseEffect(cx, cy, {
+      radius: TILE_SIZE * 0.15,
+      color: TRAP_COLORS[type],
+      fillAlpha: 0.7,
+      endScale: 3,
+      duration: 350,
+      depth: 11,
+    });
   }
 
   // 1. 슬라이드 함정.
@@ -1377,6 +1687,12 @@ class MazeScene extends Phaser.Scene {
     this.isSliding = true; // 미끄러지는 동안엔 다른 함정 효과보다 슬라이드 이미지를 우선 표시
     this.refreshPlayerTrapVisual();
     this.isMoving = true; // 미끄러지는 동안은 방향키 입력을 무시하게 잠가둠
+
+    // 미끄러지는 동안 화면이 살짝 흔들려서 "통제 불능/어질어질"한 느낌을 준다. 몇 칸을
+    // 미끄러질지 미리 알 수 없어서 넉넉한 길이로 걸어두고, slideStep이 멈추는 두 지점(방향키
+    // 이탈/벽 충돌)에서 shakeEffect.reset()으로 조기 종료한다.
+    this.cameras.main.shake(SLIDE_SHAKE_DURATION, SLIDE_SHAKE_INTENSITY);
+
     this.slideStep(dx, dy);
   }
 
@@ -1388,6 +1704,7 @@ class MazeScene extends Phaser.Scene {
     if (pressed && (pressed.dx !== dx || pressed.dy !== dy)) {
       this.isMoving = false;
       this.isSliding = false;
+      this.cameras.main.shakeEffect.reset(); // 조기 탈출 — 흔들림도 바로 멈춤
       this.refreshPlayerTrapVisual(); // 슬라이드 탈출 — 시야차단 등 다른 효과가 아직 활성이면 그걸로, 없으면 평상시 모습으로
       return;
     }
@@ -1399,9 +1716,23 @@ class MazeScene extends Phaser.Scene {
       // 벽(또는 맵 끝)에 부딪혀서 미끄러짐이 끝남 → 다시 방향키 입력을 받을 수 있게 풀어줌
       this.isMoving = false;
       this.isSliding = false;
+      this.cameras.main.shakeEffect.reset(); // 벽에 부딪혀 정지 — 흔들림도 바로 멈춤
       this.refreshPlayerTrapVisual(); // 슬라이드 종료 — 시야차단 등 다른 효과가 아직 활성이면 그걸로, 없으면 평상시 모습으로
       return;
     }
+
+    // 미끄러지기 직전 위치에 옅은 잔상을 남기고 빠르게 사라지게 해서 속도감을 더한다.
+    const ghost = this.add.image(this.playerImg.x, this.playerImg.y, this.playerImg.texture.key);
+    ghost.setFlipX(this.playerImg.flipX);
+    ghost.setDisplaySize(this.playerImg.displayWidth, this.playerImg.displayHeight);
+    ghost.setAlpha(0.35);
+    ghost.setDepth(9); // 캐릭터(depth 10) 바로 아래
+    this.tweens.add({
+      targets: ghost,
+      alpha: 0,
+      duration: 250,
+      onComplete: () => ghost.destroy(),
+    });
 
     this.playerGridX = targetX;
     this.playerGridY = targetY;
@@ -1425,7 +1756,10 @@ class MazeScene extends Phaser.Scene {
         this.queueFootprint(targetX, targetY);
 
         // 미끄러지는 도중에 골인 지점에 닿으면 거기서 바로 멈춤 (계속 미끄러지지 않음)
-        if (this.checkGoalReached(targetX, targetY)) return;
+        if (this.checkGoalReached(targetX, targetY)) {
+          this.cameras.main.shakeEffect.reset();
+          return;
+        }
         this.slideStep(dx, dy); // 같은 방향으로 다음 칸 미끄러짐 시도 (벽이면 위에서 멈춤)
       },
     });
@@ -1438,12 +1772,35 @@ class MazeScene extends Phaser.Scene {
     this.playSfx('trapRespawn');
     this.flashPlayerTrap('respawn', RESPAWN_FLASH_MS);
 
+    // 사라지는 이펙트 — 원래 있던 자리에서 함정 색(보라)으로 작은 원이 확 커지며 흩어짐.
+    this.spawnPulseEffect(this.playerImg.x, this.playerImg.y, {
+      radius: TILE_SIZE * 0.3,
+      color: TRAP_COLORS.respawn,
+      fillAlpha: 0.6,
+      endScale: 2.5,
+      duration: 350,
+      depth: 11,
+    });
+
     this.playerGridX = SPAWN_POSITION.x;
     this.playerGridY = SPAWN_POSITION.y;
     this.playerImg.setPosition(
       SPAWN_POSITION.x * TILE_SIZE + TILE_SIZE / 2,
       SPAWN_POSITION.y * TILE_SIZE + TILE_SIZE / 2
     );
+
+    // 나타나는 이펙트 — 스폰 위치에서 큰 원이 줄어들며 응축되는 느낌(사라지는 쪽과 대비되게
+    // 시작 스케일을 크게 잡고 줄인다)으로 "다시 나타났다"를 표현.
+    this.spawnPulseEffect(this.playerImg.x, this.playerImg.y, {
+      radius: TILE_SIZE * 0.5,
+      color: TRAP_COLORS.respawn,
+      fillAlpha: 0.5,
+      strokeWidth: 3,
+      startScale: 2.5,
+      endScale: 0.2,
+      duration: 400,
+      depth: 11,
+    });
 
     // 지금까지 탐색해서 기억해둔 모든 타일을 다시 'hidden'으로 되돌림 (탐험 진행도 페널티)
     for (let y = 0; y < MAP_HEIGHT; y++) {
@@ -1460,6 +1817,31 @@ class MazeScene extends Phaser.Scene {
   // 5초간 시야 반경이 크게 줄어듦 (이 게임의 시그니처 함정, 블라인드 모드와 직접 시너지).
   private applyBlindTrap() {
     this.playSfx('trapBlind');
+
+    // 손전등 글로우가 떠 있었다면 즉시 꺼준다 — 시야가 실제로는 1칸까지 확 줄어들었는데
+    // "손전등 켜져있다"는 글로우가 그대로 남아있으면 지금 시야 상태와 모순돼 보인다는
+    // 피드백(2026-07-11). 손전등 자체의 지속시간 타이머는 안 건드리고 글로우만 지운다 —
+    // 타이머가 나중에 만료돼도 이미 null이라 아무 일 안 함(flashlightGlow?.destroy()).
+    if (this.flashlightGlow) {
+      this.flashlightGlow.destroy();
+      this.flashlightGlow = null;
+    }
+
+    // 화면이 잠깐 완전히 어두워졌다 걷히는 "눈 감았다 뜨는" 임팩트. 실제 지속 효과(시야 반경
+    // 1칸, 아래)와 별개로 트리거 순간을 강조한다 — 시그니처 함정이라 캐릭터 주변보다 화면
+    // 전체 연출이 어울린다는 판단(2026-07-11). 맵 전체를 덮는 사각형이라 depth를 다른 모든
+    // 요소(말풍선 라벨 20 포함)보다 위로 둔다.
+    const flash = this.add.rectangle(0, 0, MAP_WIDTH * TILE_SIZE, MAP_HEIGHT * TILE_SIZE, 0x000000, 0.92);
+    flash.setOrigin(0, 0);
+    flash.setDepth(25);
+    this.tweens.add({
+      targets: flash,
+      alpha: 0,
+      delay: 150, // 잠깐 완전히 어두운 채로 멈춰서 "눈 감음"을 느끼게 한 뒤 걷힘
+      duration: 600,
+      onComplete: () => flash.destroy(),
+    });
+
     // 지금까지 탐색해서 기억해둔 모든 타일을 다시 'hidden'으로 되돌림 (탐험 진행도 페널티)
     for (let y = 0; y < MAP_HEIGHT; y++) {
       for (let x = 0; x < MAP_WIDTH; x++) {
@@ -1487,9 +1869,34 @@ class MazeScene extends Phaser.Scene {
     this.playSfx('trapReverse');
     this.isReversed = true;
 
+    // 지속시간 내내 머리 위에서 뱅글뱅글 도는 경고 아이콘 — 처음 틴트만으로는 "지금 조작이
+    // 반대"라는 걸 계속 잊기 쉬워서(2026-07-11 임소리 피드백) 추가. 재트리거(이미 떠 있으면)
+    // 시 새로 만들지 않고 재사용.
+    if (!this.reverseIcon) {
+      this.reverseIcon = this.add
+        .text(this.playerImg.x, this.playerImg.y - TILE_SIZE * 0.55, '⇄', {
+          fontSize: '20px',
+          color: '#ff8800', // TRAP_COLORS.reverse와 동일
+        })
+        .setOrigin(0.5)
+        .setDepth(11); // 캐릭터(depth 10) 위에 떠 보이게
+      this.tweens.add({
+        targets: this.reverseIcon,
+        angle: 360,
+        duration: 800,
+        repeat: -1,
+        ease: 'Linear',
+      });
+    }
+
     // applyBlindTrap과 동일한 이유로 실제 효과 복원을 onExpire로 넘긴다.
     this.flashPlayerTrap('reverse', REVERSE_DURATION_MS, () => {
       this.isReversed = false;
+      if (this.reverseIcon) {
+        this.tweens.killTweensOf(this.reverseIcon);
+        this.reverseIcon.destroy();
+        this.reverseIcon = null;
+      }
     });
   }
 
@@ -1527,28 +1934,53 @@ class MazeScene extends Phaser.Scene {
   // 안개(시야) 상태를 다시 계산하는 함수.
   // vision-system.md 규칙: 기본 시야 2칸 안쪽은 밝게, 지나간 타일은 안개가 다시 덮이지 않고 유지.
   private updateFog() {
-    // 1단계: 모든 칸의 상태(hidden/explored/visible)를 먼저 다 계산해둔다.
-    // 연결 통로(pathConnectors)는 두 칸의 상태를 동시에 참조해야 하는데, 상태 계산과
-    // 화면 반영(paintTile)을 한 루프에서 같이 하면 아직 계산 안 된 이웃 칸을 참조할 수
-    // 있어서, 상태 계산을 먼저 전부 끝낸 뒤 화면 반영은 따로 2단계에서 처리한다.
+    // 1단계: 플레이어 위치에서 시작해 벽이 아닌 칸만 타고(4방향) BFS로 반경만큼 퍼뜨려
+    // "지금 보이는 칸" 집합을 구한다. 예전에는 체비셰프 거리(벽 무시하고 정사각형으로
+    // 퍼짐)를 썼는데, 좁은 통로에서도 옆 통로/방까지 벽을 뚫고 보여서 "손전등"처럼 느껴지는
+    // 문제가 있었다(2026-07-11 임소리 발견). BFS는 실제로 걸어야 갈 수 있는 거리만 세므로
+    // 지나온 통로를 따라서만 시야가 퍼진다.
+    const visibleNow = new Set<string>();
+    const bfsQueue: { x: number; y: number; dist: number }[] = [
+      { x: this.playerGridX, y: this.playerGridY, dist: 0 },
+    ];
+    visibleNow.add(`${this.playerGridX},${this.playerGridY}`);
+    let head = 0;
+    while (head < bfsQueue.length) {
+      const { x, y, dist } = bfsQueue[head]!;
+      head++;
+      if (dist >= this.currentVisionRadius) continue;
+
+      for (const [nx, ny] of [
+        [x, y - 1],
+        [x, y + 1],
+        [x - 1, y],
+        [x + 1, y],
+      ] as const) {
+        const key = `${nx},${ny}`;
+        if (!this.isWalkable(nx, ny) || visibleNow.has(key)) continue;
+        visibleNow.add(key);
+        bfsQueue.push({ x: nx, y: ny, dist: dist + 1 });
+      }
+    }
+
+    // 2단계: 모든 칸의 상태(hidden/explored/visible)를 계산한다. 연결 통로(pathConnectors)는
+    // 두 칸의 상태를 동시에 참조해야 하는데, 상태 계산과 화면 반영(paintTile)을 한 루프에서
+    // 같이 하면 아직 계산 안 된 이웃 칸을 참조할 수 있어서, 상태 계산을 먼저 전부 끝낸 뒤
+    // 화면 반영은 따로 3단계에서 처리한다.
     for (let y = 0; y < MAP_HEIGHT; y++) {
       for (let x = 0; x < MAP_WIDTH; x++) {
-        // 체비셰프 거리(Chebyshev distance): 가로/세로/대각선 이동을 동일하게 1칸으로 치는 거리 계산 방식.
-        // 원형보다 정사각형에 가깝게 시야가 퍼지지만, 그리드 게임에서 흔히 쓰는 단순한 방식.
-        const distance = Math.max(Math.abs(x - this.playerGridX), Math.abs(y - this.playerGridY));
-
-        if (distance <= this.currentVisionRadius) {
+        if (visibleNow.has(`${x},${y}`)) {
           // 지금 시야 범위 안 → 밝게 표시
           this.tileStates[y]![x] = 'visible';
         } else if (this.tileStates[y]![x] !== 'hidden') {
           // 시야 밖이지만 예전에 한 번이라도 밝혀진 적 있음 → "지나간 길"로 기억, 어둡게 유지
           this.tileStates[y]![x] = 'explored';
         }
-        // 그 외의 경우(distance도 밖이고 한 번도 안 가봄)는 계속 'hidden' 그대로 둠
+        // 그 외의 경우(BFS로도 못 닿았고 한 번도 안 가봄)는 계속 'hidden' 그대로 둠
       }
     }
 
-    // 2단계: 계산이 끝난 상태를 바탕으로 실제 도형 밝기를 반영한다.
+    // 3단계: 계산이 끝난 상태를 바탕으로 실제 도형 밝기를 반영한다.
     for (let y = 0; y < MAP_HEIGHT; y++) {
       for (let x = 0; x < MAP_WIDTH; x++) {
         this.paintTile(x, y);
