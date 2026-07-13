@@ -6,7 +6,6 @@ import { createRoot } from 'react-dom/client';
 import { getMazeMap } from '../shared/maps';
 import { buildRockWallTileDataUri } from './mazePattern';
 import { computeClothWaveX } from './goalFlagWave';
-import { TRPCClientError } from '@trpc/client';
 import { trpc } from './trpcClient';
 import { SequentialDispatcher } from './sequentialDispatcher';
 import { LOADOUT_STORAGE_KEY } from './loadout';
@@ -1230,33 +1229,27 @@ class MazeScene extends Phaser.Scene {
     this.updateFog();
   }
 
-  // err가 "백엔드 자체가 없어서(정적 프리뷰 등) 요청이 아예 도달 못 한 것"이 아니라 "서버가
-  // 실제로 받아서 정당하게 거부한 것"인지 구분한다. tRPC는 서버가 응답한 에러일 때만
-  // TRPCClientError.data가 채워지고(진짜 TRPCError를 파싱한 것), 네트워크 자체가 끊겨 응답을
-  // 못 받았을 때는 data가 없다 — 실서버 QA(2026-07-13/14, "아이템/함정이 안 보이거나 밟아도
-  // 안 먹힌다")로 발견된 버그의 원인이 바로 이 구분이 없었던 것: 조작감 개선(PR #41)으로
-  // 다음 이동이 trap.trigger/item.pickup 응답을 안 기다리고 바로 진행되다 보니, 실제 네트워크
-  // 지연이 있는 배포 환경에서는 위치 앵커가 아직 갱신되기 전에 다음 칸 요청이 도착해 서버가
-  // 정당하게 INVALID_MOVE로 거부하는 일이 로컬보다 훨씬 잦다. 이걸 "백엔드 없음" 폴백과
-  // 똑같이 처리해버리면, item.pickup 쪽은 로컬 remainingItems 캐시와 우연히 겹치면 가짜로
-  // "주웠다"고 마커를 지워버리고(실제로는 서버 보드에 그대로 남아있음), trap.trigger 쪽은
-  // 스폰형 함정(myTraps에 없음)을 조용히 "함정 없음"으로 삼켜버린다.
-  private isServerRejection(err: unknown): boolean {
-    return err instanceof TRPCClientError && err.data != null;
-  }
-
   // trap.trigger를 호출해 서버 쪽 위치 앵커를 동기화하고, 함정에 걸렸는지 응답을 받는다.
-  // 정말 백엔드 자체가 없을 때만(예: 백엔드 없는 정적 프리뷰) loadServerState와 동일하게 로컬
-  // myTraps 목록으로 직접 판정해 폴백한다 — 그래야 로컬 프리뷰에서도 함정을 "밟으면 실제로
-  // 발동"한다. 서버가 실제로 거부한 경우는 아래 isServerRejection 참고 — 폴백하지 않는다.
+  // 정말 백엔드 자체가 없을 때만(IS_LOCAL_PREVIEW — 로컬 정적 프리뷰) loadServerState와
+  // 동일하게 로컬 myTraps 목록으로 직접 판정해 폴백한다 — 그래야 로컬 프리뷰에서도 함정을
+  // "밟으면 실제로 발동"한다. attemptInstall/applyLoadout/reportRunFinish와 같은 패턴
+  // (IS_LOCAL_PREVIEW로 실서버/로컬을 구분)으로 통일 — 처음엔 에러 모양(TRPCClientError.data
+  // 유무)으로 "서버가 진짜 거부한 건지"를 구분했었는데, 그러면 실서버에서 응답 자체가 아예
+  // 안 온 진짜 통신 장애(네트워크 오류 등, .data가 안 채워짐)까지 "백엔드 없음"으로 오판해
+  // 여전히 로컬 폴백을 타버리는 구멍이 있었다(2026-07-14 리뷰에서 발견) — IS_LOCAL_PREVIEW는
+  // 에러 종류와 무관하게 "지금 실서버인가"만 보므로 이 구멍이 없다. 실서버(IS_LOCAL_PREVIEW가
+  // 아님)에서 trap.trigger가 실패하면 — 위치 앵커 레이스로 인한 정당한 INVALID_MOVE든, 진짜
+  // 네트워크 장애든 — 폴백하지 않고 "이번 칸은 판정 실패"로 안전하게 처리한다. 폴백을 타면
+  // 스폰형 함정(설치자가 없어 myTraps엔 없음)을 조용히 "함정 없음"으로 삼켜버리는 문제가
+  // 있었다(실서버 QA 2026-07-13/14, "함정이 안 보이거나 밟아도 안 먹힌다").
   private async reportPosition(x: number, y: number) {
     try {
       return await this.trapDispatcher.enqueue(() =>
         trpc.trap.trigger.mutate({ mapId: MAP_ID, x, y })
       );
     } catch (err) {
-      if (this.isServerRejection(err)) {
-        console.error('trap.trigger 서버 거부(로컬 폴백 안 함, 이번 칸은 판정 실패로 처리)', err);
+      if (!IS_LOCAL_PREVIEW) {
+        console.error('trap.trigger 실패(실서버 환경) — 로컬 폴백 안 함, 이번 칸은 판정 실패로 처리', err);
         return { hit: false };
       }
 
@@ -1390,11 +1383,12 @@ class MazeScene extends Phaser.Scene {
     try {
       return await trpc.item.pickup.mutate({ mapId: MAP_ID, x, y });
     } catch (err) {
-      if (this.isServerRejection(err)) {
-        // reportPosition의 isServerRejection 주석 참고 — 서버가 실제로 거부한 걸 로컬
-        // 폴백으로 감싸면, 서버 보드엔 그대로 남아있는 박스를 클라이언트가 가짜로 "주웠다"고
-        // 판단해 마커를 지워버리는 영구적인 클라/서버 상태 불일치가 생긴다.
-        console.error('item.pickup 서버 거부(로컬 폴백 안 함, 이번 칸은 픽업 실패로 처리)', err);
+      if (!IS_LOCAL_PREVIEW) {
+        // reportPosition 주석 참고 — 실서버에서 나는 에러는(위치 앵커 레이스로 인한 정당한
+        // 거부든, 진짜 네트워크 장애든) 로컬 폴백으로 감싸지 않는다. 감싸버리면 서버 보드엔
+        // 그대로 남아있는 박스를 클라이언트가 가짜로 "주웠다"고 판단해 마커를 지워버리는
+        // 영구적인 클라/서버 상태 불일치가 생긴다.
+        console.error('item.pickup 실패(실서버 환경) — 로컬 폴백 안 함, 이번 칸은 픽업 실패로 처리', err);
         return { picked: false };
       }
 
