@@ -524,6 +524,44 @@ describe('item.pickup 함정 탐지기 충전 + item.useDetector 라이브 스�
     expect(await caller.item.claimLoadout({ mapId: 'map-1', loadoutId: 'flashlight' })).toEqual({ granted: true });
     await expect(caller.item.useDetector({ mapId: 'map-1' })).rejects.toThrow('NO_CHARGE');
   });
+
+  it('충전 1개로 useDetector를 동시에 2번 호출하면 하나만 성공하고 나머지는 NO_CHARGE로 거부된다(레이스 컨디션 회귀)', async () => {
+    const caller = createCaller({ userId: 'user-race' });
+    await caller.map.getState({ mapId: 'map-1' });
+
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(2.5 / 8); // 결과를 detector로 고정
+    for (let x = 2; x <= 5; x++) {
+      await caller.item.pickup({ mapId: 'map-1', x, y: 1 });
+    }
+    for (let y = 2; y < 12; y++) {
+      await caller.item.pickup({ mapId: 'map-1', x: 5, y });
+    }
+    await caller.item.pickup({ mapId: 'map-1', x: 5, y: 12 }); // 충전 1회 획득
+    randomSpy.mockRestore();
+
+    const results = await Promise.allSettled([
+      caller.item.useDetector({ mapId: 'map-1' }),
+      caller.item.useDetector({ mapId: 'map-1' }),
+    ]);
+
+    const fulfilled = results.filter((r) => r.status === 'fulfilled');
+    const rejected = results.filter((r) => r.status === 'rejected');
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason.message).toContain('NO_CHARGE');
+  });
+
+  it('충전 차감 후 위치 조회 등 후속 단계가 실패하면 충전을 롤백한다(NO_SESSION 회귀)', async () => {
+    const caller = createCaller({ userId: 'user-rollback' });
+    // map.getState를 호출하지 않아 위치 앵커가 없는 상태 — claimLoadout은 위치 앵커 없이도 충전을 준다.
+    await caller.item.claimLoadout({ mapId: 'map-1', loadoutId: 'trapDetector' });
+
+    await expect(caller.item.useDetector({ mapId: 'map-1' })).rejects.toThrow('NO_SESSION');
+
+    // 롤백이 안 됐다면 세션을 정상적으로 연 뒤에도 NO_CHARGE로 거부됐을 것이다.
+    await caller.map.getState({ mapId: 'map-1' });
+    await caller.item.useDetector({ mapId: 'map-1' });
+  });
 });
 
 describe('item.pickup 미스터리 박스 결과 8종 (Math.random 모킹)', () => {

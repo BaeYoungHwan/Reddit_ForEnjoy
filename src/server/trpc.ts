@@ -367,15 +367,29 @@ export const appRouter = t.router({
       const posKey = positionAnchorKey(mapId, date, ctx.userId);
       const chargeKey = detectorChargeKey(mapId, date, ctx.userId);
 
-      const [position, charges] = await Promise.all([readPositionAnchor(posKey), redis.get(chargeKey)]);
-
-      if (!charges || Number(charges) <= 0) {
+      // GET으로 읽고 JS에서 검사한 뒤 별도로 차감하면 동시 요청 사이에 TOCTOU 레이스가 생겨
+      // 충전 1개로 2회 이상 발동시킬 수 있다(오라클 방지 설계 무력화). INCRBY 자체가 원자적/
+      // 전순서이므로 "먼저 차감 → 결과가 음수면 그 차감이 무허가였다는 뜻이니 롤백" 순서로
+      // 바꾸면 별도 트랜잭션 없이 동시 요청에서도 정확히 남은 충전 수만큼만 성공한다.
+      // 위치 조회는 차감과 병렬로 묶지 않는다 — 병렬로 묶으면 위치 조회 실패(NO_SESSION 등)
+      // 시 Promise.all이 즉시 reject해 아래 롤백 분기를 못 타면서도 incrBy(-1)는 이미 발사돼
+      // 실행되므로, 아무 효과도 없이 충전만 사라지는 문제가 생긴다. 차감을 먼저 확정한 뒤
+      // 위치 조회/스캔을 수행하고, 그 이후 어떤 단계든 실패하면 실제로 발동되지 않았으므로
+      // 충전을 반드시 복구한다.
+      const remaining = await redis.incrBy(chargeKey, -1);
+      if (remaining < 0) {
+        await redis.incrBy(chargeKey, 1); // 롤백 — 충전 없음
         throw new TRPCError({ code: 'BAD_REQUEST', message: 'NO_CHARGE' });
       }
-      await redis.incrBy(chargeKey, -1);
 
-      const revealedTraps = await revealNearbyTraps(mapId, date, position, ctx.userId);
-      return { revealedTraps };
+      try {
+        const position = await readPositionAnchor(posKey);
+        const revealedTraps = await revealNearbyTraps(mapId, date, position, ctx.userId);
+        return { revealedTraps };
+      } catch (err) {
+        await redis.incrBy(chargeKey, 1); // 롤백 — 실제로 발동되지 않았음
+        throw err;
+      }
     }),
   }),
 
