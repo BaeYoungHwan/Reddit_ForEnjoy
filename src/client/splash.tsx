@@ -326,15 +326,20 @@ const Menu = ({
   </>
 );
 
-// How to Play 화면의 방향키/아이템 데모가 공유하는 4분할 순환 클래스(index.css htp-q1~q4) —
-// 같은 배열을 아이콘 강조에 재사용해서 "몇 번째 항목인지"와 "어떤 애니메이션을 쓸지"가 항상
-// 짝이 맞게 한다. 아이콘/키는 흐림(0.35)↔밝음(1)이라 계속 옅게라도 보여도 괜찮지만, 캡션
-// 텍스트는 같은 자리에 4개가 겹쳐 있어서 흐림 상태로 두면 안 보여야 할 글자까지 겹쳐서
-// 뭉개져 보인다(2026-07-13 발견) — 텍스트는 완전히 꺼지는 -solo 버전을 따로 쓴다.
+// How to Play 화면의 방향키/아이템 데모가 공유하는 4분할 순환 애니메이션(index.css htp-q1~q4).
+// ITEM_DEMO 등 임의 길이의 목록에 걸 때는 배열을 직접 인덱싱하지 않고 quarterAnim()을 거친다 —
+// 4개보다 항목이 늘어나도 (예전처럼 QUARTER_ANIMS[4] === undefined로 애니메이션이 조용히
+// 사라지는 대신) 나머지 연산으로 앞의 4개 구간을 순환 재사용한다.
 const QUARTER_ANIMS = ['htp-q1', 'htp-q2', 'htp-q3', 'htp-q4'] as const;
-const QUARTER_ANIMS_SOLO = ['htp-q1-solo', 'htp-q2-solo', 'htp-q3-solo', 'htp-q4-solo'] as const;
+type QuarterAnim = (typeof QUARTER_ANIMS)[number];
+const quarterAnim = (i: number): QuarterAnim => QUARTER_ANIMS[i % QUARTER_ANIMS.length]!;
 
-const ArrowKey = ({ label, anim }: { label: string; anim: string }) => (
+// 캡션 텍스트처럼 같은 자리에 여러 개가 절대 위치로 겹쳐 있는 요소는 쉬는 동안 흐림(0.35)이
+// 아니라 완전히 꺼져야(0) 안 보여야 할 글자까지 겹쳐 뭉개지는 걸 막을 수 있다(2026-07-13
+// 발견) — 키프레임을 따로 두지 않고 --htp-rest-opacity 커스텀 프로퍼티로만 오버라이드한다.
+type RestOpacityStyle = CSSProperties & { '--htp-rest-opacity'?: number };
+
+const ArrowKey = ({ label, anim }: { label: string; anim: QuarterAnim }) => (
   <span
     className="flex items-center justify-center w-8 h-8 rounded-lg bg-slate-800 border-2 border-slate-600 text-slate-200 font-mono text-sm"
     style={{ animation: `${anim} 4s steps(1) infinite` }}
@@ -435,25 +440,31 @@ const HowToPlay = ({ onContinue }: { onContinue: () => void }) => {
             <span
               key={it.label}
               className={`flex items-center justify-center w-10 h-10 rounded-xl border-2 p-1.5 ${it.iconAccent}`}
-              style={{ animation: `${QUARTER_ANIMS[i]} 8s steps(1) infinite` }}
+              style={{ animation: `${quarterAnim(i)} 8s steps(1) infinite` }}
               aria-hidden
             >
               <img src={it.iconSrc} alt="" className="w-full h-full object-contain" />
             </span>
           ))}
         </div>
-        {/* 캡션은 -solo 애니메이션(완전히 꺼짐/켜짐)을 써야 한다 — 4개가 같은 자리에
-            겹쳐 있어서, 아이콘처럼 흐림(0.35)으로 두면 안 보여야 할 글자까지 겹쳐 보인다. */}
+        {/* 4개가 같은 자리에 절대 위치로 겹쳐 있어서, 아이콘처럼 쉬는 동안 0.35로 두면 안
+            보여야 할 글자까지 겹쳐 보인다 — --htp-rest-opacity: 0으로 완전히 끈다. */}
         <div className="relative h-8 w-full">
-          {ITEM_DEMO.map((it, i) => (
-            <p
-              key={it.label}
-              className="absolute inset-0 text-xs text-slate-300 text-center"
-              style={{ animation: `${QUARTER_ANIMS_SOLO[i]} 8s steps(1) infinite` }}
-            >
-              <span className="font-semibold text-white">{it.label}:</span> {it.description}
-            </p>
-          ))}
+          {ITEM_DEMO.map((it, i) => {
+            const captionStyle: RestOpacityStyle = {
+              animation: `${quarterAnim(i)} 8s steps(1) infinite`,
+              '--htp-rest-opacity': 0,
+            };
+            return (
+              <p
+                key={it.label}
+                className="absolute inset-0 text-xs text-slate-300 text-center"
+                style={captionStyle}
+              >
+                <span className="font-semibold text-white">{it.label}:</span> {it.description}
+              </p>
+            );
+          })}
         </div>
       </div>
 
