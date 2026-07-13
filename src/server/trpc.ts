@@ -3,11 +3,13 @@ import { z } from 'zod';
 import { context, reddit, redis } from '@devvit/web/server';
 import type { T2 } from '@devvit/shared-types/tid.js';
 import {
+  detectorChargeKey,
   footprintKey,
   getKstDateString,
   itemBoardKey,
   itemSeededKey,
   leaderboardKey,
+  loadoutClaimedKey,
   parseTile,
   positionAnchorKey,
   tileMember,
@@ -312,13 +314,60 @@ export const appRouter = t.router({
           return { picked: true as const, outcome: 'trap' as const, type: rolled.type };
         }
 
+        // 탐지기: 반경 계산은 더 이상 픽업 시점에 하지 않는다(Z 발동 시점 라이브 스캔으로
+        // 통일 — useDetector 참고). 여기서는 "충전 1회 획득"만 기록한다.
         if (rolled.type === 'detector') {
-          const revealedTraps = await revealNearbyTraps(mapId, date, { x, y }, ctx.userId);
-          return { picked: true as const, outcome: 'item' as const, type: rolled.type, revealedTraps };
+          await redis.incrBy(detectorChargeKey(mapId, date, ctx.userId), 1);
         }
 
         return { picked: true as const, outcome: 'item' as const, type: rolled.type };
       }),
+
+    // 로드아웃 지급은 클라이언트 로컬(localStorage)에서만 처리돼 서버가 몰랐다 — 탐지기는
+    // 1회성을 서버가 강제해야 하는 민감 정보라, 게임 시작 시 이 mutation으로 서버에도 알린다.
+    // 쉴드/손전등은 서버 개입이 필요 없어(이미 100% 클라이언트 신뢰 방식) 그대로 통과시킨다.
+    claimLoadout: protectedProcedure
+      .input(z.object({ mapId: z.string().min(1), loadoutId: z.enum(['trapDetector', 'shield', 'flashlight']) }))
+      .mutation(async ({ ctx, input }) => {
+        const { mapId, loadoutId } = input;
+        if (loadoutId !== 'trapDetector') {
+          return { granted: true as const };
+        }
+
+        const date = getKstDateString();
+        const claimKey = loadoutClaimedKey(mapId, date, ctx.userId);
+        const firstClaim = await redis.set(claimKey, '1', {
+          nx: true,
+          expiration: new Date(Date.now() + DATA_SAFETY_TTL_SECONDS * 1000),
+        });
+        if (!firstClaim) {
+          // 이미 이번 세션/하루에 클레임을 마쳤음 — 재호출(새로고침 등)로 충전이 중복 쌓이지 않게 막는다.
+          return { granted: false as const };
+        }
+
+        await redis.incrBy(detectorChargeKey(mapId, date, ctx.userId), 1);
+        return { granted: true as const };
+      }),
+
+    // 함정 탐지기 발동(Z 시점 라이브 스캔) — 로드아웃/미스터리 박스 두 경로 공통 창구.
+    // x, y를 입력받지 않는다: 매 이동(trap.trigger)마다 갱신돼온 위치 앵커를 그대로 신뢰해도
+    // 안전하다(assertAdjacent가 매번 인접 타일만 허용해왔으므로 항상 최신 실좌표).
+    useDetector: protectedProcedure.input(mapIdSchema).mutation(async ({ ctx, input }) => {
+      const { mapId } = input;
+      const date = getKstDateString();
+      const posKey = positionAnchorKey(mapId, date, ctx.userId);
+      const chargeKey = detectorChargeKey(mapId, date, ctx.userId);
+
+      const [position, charges] = await Promise.all([readPositionAnchor(posKey), redis.get(chargeKey)]);
+
+      if (!charges || Number(charges) <= 0) {
+        throw new TRPCError({ code: 'BAD_REQUEST', message: 'NO_CHARGE' });
+      }
+      await redis.incrBy(chargeKey, -1);
+
+      const revealedTraps = await revealNearbyTraps(mapId, date, position, ctx.userId);
+      return { revealedTraps };
+    }),
   }),
 
   run: t.router({
