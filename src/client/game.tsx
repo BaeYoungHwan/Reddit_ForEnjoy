@@ -13,6 +13,7 @@ import { resolveTrapEncounters } from './trapResolution';
 import type {
   ItemPickupOutput,
   Position,
+  RunFinishOutput,
   TrapInstallOutput,
   TrapInstance,
   TrapTriggerOutput,
