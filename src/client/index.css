@@ -4,6 +4,8 @@
 @theme {
   --font-display: 'Jua', sans-serif;
   --animate-glow-pulse: glow-pulse 2.2s ease-in-out infinite;
+  --animate-glow-pulse-gold: glow-pulse-gold 2.2s ease-in-out infinite;
+  --animate-row-in: row-in 0.4s ease-out backwards;
 }
 
 @keyframes glow-pulse {
@@ -14,6 +16,114 @@
   50% {
     box-shadow: 0 0 46px rgba(255, 92, 51, 0.75);
   }
+}
+
+/* 리더보드 1위 시상대 전용 — 금색 글로우 펄스(glow-pulse와 같은 패턴, 색만 금색으로). */
+@keyframes glow-pulse-gold {
+  0%,
+  100% {
+    box-shadow: 0 0 22px rgba(252, 211, 77, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 40px rgba(252, 211, 77, 0.7);
+  }
+}
+
+/* 리더보드 순위 항목이 위에서 살짝 떠오르며 나타나는 입장 애니메이션. 항목마다
+   animation-delay만 다르게 줘서 위에서 아래로 순서대로 나타나는 것처럼 보이게 한다. */
+@keyframes row-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/*
+ * How to Play 팝업(splash.tsx HowToPlay)의 4분할 순환 애니메이션. 방향키 데모(4방향)와
+ * 아이템 슬롯 데모(아이콘+캡션)가 이 4개 키프레임을 공유한다 — 퍼센티지만 재사용하고
+ * animation-duration을 데모마다 다르게(방향키는 짧게, 아이템은 읽을 시간 필요해 길게)
+ * 줘서 같은 모양을 다른 속도로 쓴다. htp-q1~q4는 각각 전체 주기의 1/4씩만 "활성(밝음)"
+ * 상태이고 나머지는 --htp-rest-opacity(기본 0.35)로 쉰다 — 4개를 같은 요소들에 순서대로
+ * 걸면 하나씩 차례로 밝아진다.
+ *
+ * 아이템 데모의 캡션 텍스트처럼 같은 자리에 4개가 절대 위치로 겹쳐 있는 경우, 쉬는 동안
+ * 0.35로 두면 안 보여야 할 글자까지 겹쳐서 뭉개져 보인다(2026-07-13 발견) — 그런 요소엔
+ * 인라인 style로 `--htp-rest-opacity: 0`만 주면 같은 키프레임을 완전히 꺼지는 버전으로
+ * 재사용할 수 있다(키프레임을 q/q-solo 두 벌로 중복시키지 않기 위한 장치).
+ */
+@keyframes htp-q1 {
+  0%, 20% { opacity: 1; }
+  25%, 100% { opacity: var(--htp-rest-opacity, 0.35); }
+}
+@keyframes htp-q2 {
+  0%, 24% { opacity: var(--htp-rest-opacity, 0.35); }
+  25%, 45% { opacity: 1; }
+  50%, 100% { opacity: var(--htp-rest-opacity, 0.35); }
+}
+@keyframes htp-q3 {
+  0%, 49% { opacity: var(--htp-rest-opacity, 0.35); }
+  50%, 70% { opacity: 1; }
+  75%, 100% { opacity: var(--htp-rest-opacity, 0.35); }
+}
+@keyframes htp-q4 {
+  0%, 74% { opacity: var(--htp-rest-opacity, 0.35); }
+  75%, 95% { opacity: 1; }
+  100% { opacity: var(--htp-rest-opacity, 0.35); }
+}
+
+/* 방향키 데모의 캐릭터 — 활성 구간 중간에 그 방향으로 살짝 튕겼다가 중앙으로 돌아온다.
+   다른 htp-* 애니메이션과 통일해 steps(1)로 재생 — 부드럽게 보간하는 것보다 구간마다
+   뚝뚝 끊기는 편이 더 낫다는 피드백(2026-07-13). */
+@keyframes htp-character {
+  0%, 3% { transform: translate(0, 0) scaleX(1); }
+  12% { transform: translate(0, -14px) scaleX(1); }
+  22%, 28% { transform: translate(0, 0) scaleX(1); }
+  37% { transform: translate(0, 14px) scaleX(1); }
+  47%, 53% { transform: translate(0, 0) scaleX(1); }
+  62% { transform: translate(-14px, 0) scaleX(-1); }
+  72%, 78% { transform: translate(0, 0) scaleX(-1); }
+  87% { transform: translate(14px, 0) scaleX(1); }
+  97%, 100% { transform: translate(0, 0) scaleX(1); }
+}
+
+/*
+ * 아이템 데모의 X(전환)/Z(사용) 키 힌트 — Z가 각 구간이 끝나기 직전에 먼저 짧게 반짝이고
+ * (해당 아이템을 "사용"), 그 다음 구간 경계에서 X가 반짝인다(다음 아이템으로 "전환"),
+ * 둘 사이에 빈 구간을 둬서 겹쳐 보이지 않게 한다.
+ *
+ * steps(1)은 각 스탑에 선언된 값이 "그 지점부터 다음 스탑이 나오기 전까지" 그대로 유지된다
+ * — 그래서 같은 값을 가진 스탑을 앞뒤로 겹쳐 쓰면(예: `20%, 24% { opacity: 1 }`) 실제 켜짐
+ * 구간이 다음으로 값이 바뀌는 스탑까지 늘어난다. 예전엔 이 중복 스탑 때문에 Z가 실제로는
+ * 20~29% 구간, X가 25~33% 구간에 켜져 있어서 25~29%에 둘이 동시에 깜빡였다(2026-07-14
+ * 발견). 그래서 여기선 값이 바뀌는 지점마다 스탑을 딱 하나씩만 둔다 — on 스탑과 off 스탑의
+ * 쌍이 곧 실제 켜짐 구간이다.
+ */
+@keyframes htp-x-tap {
+  0% { opacity: 1; }
+  4% { opacity: 0.35; }
+  25% { opacity: 1; }
+  29% { opacity: 0.35; }
+  50% { opacity: 1; }
+  54% { opacity: 0.35; }
+  75% { opacity: 1; }
+  79% { opacity: 0.35; }
+  100% { opacity: 0.35; }
+}
+@keyframes htp-z-tap {
+  0% { opacity: 0.35; }
+  17% { opacity: 1; }
+  21% { opacity: 0.35; }
+  42% { opacity: 1; }
+  46% { opacity: 0.35; }
+  67% { opacity: 1; }
+  71% { opacity: 0.35; }
+  92% { opacity: 1; }
+  96% { opacity: 0.35; }
+  100% { opacity: 0.35; }
 }
 
 /*

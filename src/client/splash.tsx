@@ -3,6 +3,7 @@ import './index.css';
 import { context, requestExpandedMode } from '@devvit/web/client';
 import {
   StrictMode,
+  useEffect,
   useState,
   type CSSProperties,
   type MouseEvent,
@@ -10,6 +11,7 @@ import {
 } from 'react';
 import { createRoot } from 'react-dom/client';
 import { useLeaderboard } from './hooks/useLeaderboard';
+import { useMyUserId } from './hooks/useMyUserId';
 import { angleBetween, buildMazeBackground, findPath, tileToPercent } from './mazePattern';
 import { formatClearTime } from './format';
 import { getMazeMap } from '../shared/maps';
@@ -57,7 +59,7 @@ const FOOTPRINTS = WALK_TILES.map((tile, i) => {
   };
 });
 
-type View = 'menu' | 'loadout' | 'leaderboard';
+type View = 'menu' | 'howToPlay' | 'loadout' | 'leaderboard';
 
 // LoadoutId/LOADOUT_STORAGE_KEY는 ./loadout.ts로 옮겨서 game.tsx와 공유한다(2026-07-10 —
 // 처음엔 여기 로컬로 정의했었는데, game.tsx가 이 값을 전혀 안 읽어서 로드아웃 선택이 실제
@@ -285,10 +287,10 @@ const LogoTitle = ({ size = 'text-4xl' }: { size?: string }) => (
 
 const Menu = ({
   onShowLeaderboard,
-  onShowLoadout,
+  onPlay,
 }: {
   onShowLeaderboard: () => void;
-  onShowLoadout: () => void;
+  onPlay: () => void;
 }) => (
   <>
     <HudButton
@@ -311,7 +313,7 @@ const Menu = ({
     <PlayButton
       onClick={() => {
         playUiClickSound();
-        onShowLoadout();
+        onPlay();
       }}
     />
     {context?.username ? (
@@ -324,6 +326,156 @@ const Menu = ({
     ) : null}
   </>
 );
+
+// How to Play 화면의 방향키/아이템 데모가 공유하는 4분할 순환 애니메이션(index.css htp-q1~q4).
+// ITEM_DEMO 등 임의 길이의 목록에 걸 때는 배열을 직접 인덱싱하지 않고 quarterAnim()을 거친다 —
+// 4개보다 항목이 늘어나도 (예전처럼 QUARTER_ANIMS[4] === undefined로 애니메이션이 조용히
+// 사라지는 대신) 나머지 연산으로 앞의 4개 구간을 순환 재사용한다.
+const QUARTER_ANIMS = ['htp-q1', 'htp-q2', 'htp-q3', 'htp-q4'] as const;
+type QuarterAnim = (typeof QUARTER_ANIMS)[number];
+const quarterAnim = (i: number): QuarterAnim => QUARTER_ANIMS[i % QUARTER_ANIMS.length]!;
+
+// 캡션 텍스트처럼 같은 자리에 여러 개가 절대 위치로 겹쳐 있는 요소는 쉬는 동안 흐림(0.35)이
+// 아니라 완전히 꺼져야(0) 안 보여야 할 글자까지 겹쳐 뭉개지는 걸 막을 수 있다(2026-07-13
+// 발견) — 키프레임을 따로 두지 않고 --htp-rest-opacity 커스텀 프로퍼티로만 오버라이드한다.
+type RestOpacityStyle = CSSProperties & { '--htp-rest-opacity'?: number };
+
+const ArrowKey = ({ label, anim }: { label: string; anim: QuarterAnim }) => (
+  <span
+    className="flex items-center justify-center w-8 h-8 rounded-lg bg-slate-800 border-2 border-slate-600 text-slate-200 font-mono text-sm"
+    style={{ animation: `${anim} 4s steps(1) infinite` }}
+    aria-hidden
+  >
+    {label}
+  </span>
+);
+
+// 실제 인벤토리 슬롯에 들어가는 3종(함정 설치/탐지기/손전등)은 Z로 발동, 쉴드는 즉시 무장이라
+// Z가 필요 없음 — 그래도 임소리 요청대로 데모 순환에는 4종 다 넣고, 쉴드 캡션에서 그 차이를
+// 명확히 설명한다("no button needed"). 아이콘은 game.tsx 인벤토리 슬롯 UI와 완전히 같은
+// png(public/sprites/ItemSlot-*.png)를 재사용 — 자체 SVG로 그리면 실제 게임 화면과 따로 놀아서
+// "이 그림을 실제로 어디서 보게 되는지" 연결이 안 될 수 있다는 피드백(2026-07-13)으로 교체.
+const ITEM_DEMO: { label: string; description: string; iconSrc: string; iconAccent: string }[] = [
+  {
+    label: 'Trap Kit',
+    description: 'places a trap on your tile',
+    iconSrc: '/sprites/ItemSlot-bomb.png',
+    iconAccent: 'border-rose-400 bg-rose-500/10',
+  },
+  {
+    label: 'Trap Detector',
+    description: 'reveals nearby traps',
+    iconSrc: '/sprites/ItemSlot-detector.png',
+    iconAccent: 'border-emerald-400 bg-emerald-500/10',
+  },
+  {
+    label: 'Flashlight',
+    description: 'lets you see farther for a while',
+    iconSrc: '/sprites/ItemSlot-flashlight.png',
+    iconAccent: 'border-amber-400 bg-amber-500/10',
+  },
+  {
+    label: 'Trap Shield',
+    description: 'equips instantly — no button needed',
+    iconSrc: '/sprites/ItemSlot-shield.png',
+    iconAccent: 'border-cyan-400 bg-cyan-500/10',
+  },
+];
+
+// PLAY를 누르면 로드아웃보다 먼저 뜨는 조작법 안내. 매번(첫 방문뿐 아니라 매판) 표시하기로
+// 함(임소리 결정) — 대신 아무 키나 누르면 바로 넘어가게 해서 이미 아는 사람은 빠르게 스킵
+// 가능. 방향키/아이템 데모는 전부 CSS 애니메이션(index.css htp-* 키프레임)이라 Phaser나 JS
+// 타이머 없이 팝업이 떠 있는 동안 계속 반복 재생된다.
+const HowToPlay = ({ onContinue }: { onContinue: () => void }) => {
+  useEffect(() => {
+    // keydown이 아니라 window 전역에 건다 — 팝업 안 특정 버튼에 포커스가 가 있을 필요 없이
+    // 정말 "아무 키나" 눌러도 반응해야 하기 때문.
+    const handleKeyDown = () => onContinue();
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onContinue]);
+
+  return (
+    <div className="w-full flex flex-col gap-4">
+      <h1 className="font-display text-lg tracking-wide text-white text-center">How to Play</h1>
+
+      <div className="flex flex-col items-center gap-2">
+        <p className="text-xs text-slate-400">Move with the arrow keys</p>
+        <div className="relative w-full h-20 rounded-2xl bg-slate-800/60 border border-slate-700 overflow-hidden flex items-center justify-center">
+          <img
+            src="/sprites/Character-normal.png"
+            alt=""
+            className="w-9 h-9 object-contain"
+            style={{ animation: 'htp-character 4s steps(1) infinite' }}
+          />
+        </div>
+        <div className="flex flex-col items-center gap-1">
+          <ArrowKey label="↑" anim="htp-q1" />
+          <div className="flex gap-1">
+            <ArrowKey label="←" anim="htp-q3" />
+            <ArrowKey label="↓" anim="htp-q2" />
+            <ArrowKey label="→" anim="htp-q4" />
+          </div>
+        </div>
+      </div>
+
+      <div className="flex flex-col items-center gap-2">
+        <p className="text-xs text-slate-400 flex items-center gap-1">
+          <span
+            className="font-mono bg-slate-800 border-2 border-slate-600 rounded px-1.5"
+            style={{ animation: 'htp-z-tap 8s steps(1) infinite' }}
+          >
+            Z
+          </span>
+          use item
+          <span
+            className="font-mono bg-slate-800 border-2 border-slate-600 rounded px-1.5 ml-2"
+            style={{ animation: 'htp-x-tap 8s steps(1) infinite' }}
+          >
+            X
+          </span>
+          switch slot
+        </p>
+        <div className="flex gap-2">
+          {ITEM_DEMO.map((it, i) => (
+            <span
+              key={it.label}
+              className={`flex items-center justify-center w-10 h-10 rounded-xl border-2 p-1.5 ${it.iconAccent}`}
+              style={{ animation: `${quarterAnim(i)} 8s steps(1) infinite` }}
+              aria-hidden
+            >
+              <img src={it.iconSrc} alt="" className="w-full h-full object-contain" />
+            </span>
+          ))}
+        </div>
+        {/* 4개가 같은 자리에 절대 위치로 겹쳐 있어서, 아이콘처럼 쉬는 동안 0.35로 두면 안
+            보여야 할 글자까지 겹쳐 보인다 — --htp-rest-opacity: 0으로 완전히 끈다. */}
+        <div className="relative h-8 w-full">
+          {ITEM_DEMO.map((it, i) => {
+            const captionStyle: RestOpacityStyle = {
+              animation: `${quarterAnim(i)} 8s steps(1) infinite`,
+              '--htp-rest-opacity': 0,
+            };
+            return (
+              <p
+                key={it.label}
+                className="absolute inset-0 text-xs text-slate-300 text-center"
+                style={captionStyle}
+              >
+                <span className="font-semibold text-white">{it.label}:</span> {it.description}
+              </p>
+            );
+          })}
+        </div>
+      </div>
+
+      <p className="text-[11px] text-slate-500 text-center border-t border-slate-800 pt-3">
+        Ranked by fewest steps to the goal.
+      </p>
+      <p className="text-xs text-slate-400 text-center animate-pulse">Press any key to continue</p>
+    </div>
+  );
+};
 
 // 게임 시작 전 아이템 로드아웃(3종 중 1개) 선택 화면. PLAY를 누르면 바로 게임으로 가지 않고
 // 여기를 먼저 거친다 — 선택 결과는 localStorage에 저장해뒀다가 game.tsx가 읽어간다(별도
@@ -417,29 +569,105 @@ const Loadout = ({ onBack }: { onBack: () => void }) => {
   );
 };
 
-const PODIUM_MEDAL: Record<number, string> = { 1: '🥇', 2: '🥈', 3: '🥉' };
+const PODIUM_MEDAL: Record<number, string> = { 2: '🥈', 3: '🥉' };
 const PODIUM_HEIGHT: Record<number, string> = { 1: 'h-24', 2: 'h-16', 3: 'h-12' };
 const PODIUM_ORDER = [2, 1, 3];
 
-const PodiumSlot = ({ place, entry }: { place: number; entry: LeaderboardEntry | undefined }) => (
-  <div className="flex flex-col items-center gap-1 w-20">
-    <span className="text-xl">{PODIUM_MEDAL[place]}</span>
-    <span className="text-xs text-slate-300 truncate w-full text-center">{entry?.username ?? '-'}</span>
-    <span className="font-mono text-[10px] text-amber-300 [text-shadow:0_0_6px_rgba(252,211,77,0.5)]">
-      {entry ? formatClearTime(entry.clearTimeMs) : '--:--'}
-    </span>
+const YouBadge = () => (
+  <span className="absolute -top-2 px-1.5 py-0.5 rounded-full bg-sky-500 text-white text-[9px] font-black tracking-wide shadow-[0_0_8px_rgba(56,189,248,0.7)]">
+    YOU
+  </span>
+);
+
+const PodiumSlot = ({
+  place,
+  entry,
+  isMe,
+}: {
+  place: number;
+  entry: LeaderboardEntry | undefined;
+  isMe: boolean;
+}) => {
+  const isFirst = place === 1;
+  return (
     <div
-      className={`w-full ${PODIUM_HEIGHT[place]} bg-gradient-to-b from-slate-700 to-slate-800 rounded-t-lg border-t-2 border-slate-600 shadow-[inset_0_2px_2px_rgba(255,255,255,0.08)] flex items-start justify-center pt-1`}
+      className={`relative flex flex-col items-center gap-1 w-20 animate-row-in ${isFirst ? 'z-10' : ''}`}
+      style={{ animationDelay: `${(place - 1) * 90}ms` }}
     >
-      <span className="font-display text-lg text-slate-300">{place}</span>
+      {isMe && entry ? <YouBadge /> : null}
+      {isFirst ? (
+        <div className="flex items-center justify-center w-11 h-11 rounded-full bg-gradient-to-b from-amber-300 to-amber-600 border-2 border-amber-200 text-2xl animate-glow-pulse-gold">
+          🏆
+        </div>
+      ) : (
+        <span className="text-xl">{PODIUM_MEDAL[place]}</span>
+      )}
+      <span
+        className={`text-xs truncate w-full text-center ${isMe ? 'text-sky-300 font-bold' : 'text-slate-300'}`}
+      >
+        {entry?.username ?? '-'}
+      </span>
+      <span className="font-mono text-[10px] text-amber-300 [text-shadow:0_0_6px_rgba(252,211,77,0.5)]">
+        {entry ? `${entry.steps} steps` : '--'}
+      </span>
+      <div
+        className={`w-full ${PODIUM_HEIGHT[place]} rounded-t-lg border-t-2 shadow-[inset_0_2px_2px_rgba(255,255,255,0.08)] flex items-start justify-center pt-1 ${
+          isMe
+            ? 'bg-gradient-to-b from-sky-800 to-sky-900 border-sky-400'
+            : 'bg-gradient-to-b from-slate-700 to-slate-800 border-slate-600'
+        }`}
+      >
+        <span className="font-display text-lg text-slate-300">{place}</span>
+      </div>
+    </div>
+  );
+};
+
+const LEADERBOARD_TOP_N = 5;
+
+const LeaderboardRow = ({
+  entry,
+  isMe,
+  delayMs,
+}: {
+  entry: LeaderboardEntry;
+  isMe: boolean;
+  delayMs: number;
+}) => (
+  <div
+    className={`relative flex items-center gap-3 rounded-xl px-3 py-2 animate-row-in ${
+      isMe ? 'bg-sky-900/50 border border-sky-500/60' : 'bg-slate-800/50'
+    }`}
+    style={{ animationDelay: `${delayMs}ms` }}
+  >
+    <RankBadge rank={entry.rank} />
+    <span className={`text-sm font-medium truncate flex-1 ${isMe ? 'text-sky-300 font-bold' : 'text-slate-200'}`}>
+      {entry.username}
+    </span>
+    {isMe ? (
+      <span className="px-1.5 py-0.5 rounded-full bg-sky-500 text-white text-[9px] font-black tracking-wide shrink-0">
+        YOU
+      </span>
+    ) : null}
+    <div className="flex flex-col items-end">
+      <span className="font-mono text-xs text-amber-300 bg-black/40 border border-slate-700 rounded-md px-2 py-1 [text-shadow:0_0_6px_rgba(252,211,77,0.5)]">
+        {entry.steps} steps
+      </span>
+      <span className="font-mono text-[10px] text-slate-500 mt-0.5">{formatClearTime(entry.clearTimeMs)}</span>
     </div>
   </div>
 );
 
 const Leaderboard = ({ onBack }: { onBack: () => void }) => {
   const { entries, loading, error, reload } = useLeaderboard(DEFAULT_MAP_ID);
-  const podiumEntries = entries.slice(0, 3);
-  const restEntries = entries.slice(3);
+  const myUserId = useMyUserId();
+  // 랭킹은 1~5위권만 보여준다. 내 기록이 5위 밖이면(=myEntryBelowTop) 구분선과 함께
+  // 목록 맨 아래에 따로 붙여, 내가 몇 등인지는 순위가 안 잘려도 항상 볼 수 있게 한다.
+  const topEntries = entries.slice(0, LEADERBOARD_TOP_N);
+  const podiumEntries = topEntries.slice(0, 3);
+  const restEntries = topEntries.slice(3);
+  const myEntry = entries.find((entry) => entry.userId === myUserId);
+  const myEntryBelowTop = myEntry && myEntry.rank > LEADERBOARD_TOP_N ? myEntry : null;
 
   return (
     <div className="w-full flex flex-col gap-4">
@@ -457,7 +685,18 @@ const Leaderboard = ({ onBack }: { onBack: () => void }) => {
         <h1 className="font-display text-lg tracking-wide text-white">Today&apos;s Leaderboard</h1>
       </div>
 
-      <div className="flex flex-col gap-3 min-h-[160px] justify-center">
+      <div className="relative flex flex-col gap-3 min-h-[160px] justify-center">
+        {/* 순위표 전체를 게임다운 느낌으로 — 시상대 위쪽엔 은은한 금빛 스포트라이트,
+            패널 전체엔 아주 옅은 대각선 패턴을 깔아 단조로운 카드 UI를 탈피한다. */}
+        <div
+          aria-hidden
+          className="pointer-events-none absolute -inset-4 -z-10"
+          style={{
+            background:
+              'radial-gradient(ellipse 140% 55% at 50% 0%, rgba(252,211,77,0.16), transparent 70%), repeating-linear-gradient(135deg, rgba(255,255,255,0.035) 0px, rgba(255,255,255,0.035) 2px, transparent 2px, transparent 14px)',
+          }}
+        />
+
         {loading ? <p className="text-sm text-slate-500 text-center">Loading...</p> : null}
         {error ? (
           <div className="flex flex-col items-center gap-2">
@@ -483,22 +722,32 @@ const Leaderboard = ({ onBack }: { onBack: () => void }) => {
         {!loading && !error && podiumEntries.length > 0 ? (
           <div className="flex items-end justify-center gap-2">
             {PODIUM_ORDER.map((place) => (
-              <PodiumSlot key={place} place={place} entry={podiumEntries[place - 1]} />
+              <PodiumSlot
+                key={place}
+                place={place}
+                entry={podiumEntries[place - 1]}
+                isMe={podiumEntries[place - 1]?.userId === myUserId}
+              />
             ))}
           </div>
         ) : null}
 
         {restEntries.length > 0 ? (
           <div className="flex flex-col gap-1.5">
-            {restEntries.map((entry) => (
-              <div key={entry.userId} className="flex items-center gap-3 bg-slate-800/50 rounded-xl px-3 py-2">
-                <RankBadge rank={entry.rank} />
-                <span className="text-slate-200 text-sm font-medium truncate flex-1">{entry.username}</span>
-                <span className="font-mono text-xs text-amber-300 bg-black/40 border border-slate-700 rounded-md px-2 py-1 [text-shadow:0_0_6px_rgba(252,211,77,0.5)]">
-                  {formatClearTime(entry.clearTimeMs)}
-                </span>
-              </div>
+            {restEntries.map((entry, i) => (
+              <LeaderboardRow key={entry.userId} entry={entry} isMe={entry.userId === myUserId} delayMs={i * 60} />
             ))}
+          </div>
+        ) : null}
+
+        {myEntryBelowTop ? (
+          <div className="flex flex-col gap-1.5">
+            <div aria-hidden className="flex items-center gap-2 px-1 text-slate-600">
+              <span className="flex-1 border-t border-slate-700" />
+              <span className="text-xs">⋯</span>
+              <span className="flex-1 border-t border-slate-700" />
+            </div>
+            <LeaderboardRow entry={myEntryBelowTop} isMe delayMs={restEntries.length * 60} />
           </div>
         ) : null}
       </div>
@@ -515,7 +764,9 @@ export const Splash = () => {
       <div className="relative z-10 w-full max-w-sm">
         <RivetPanel>
           {view === 'menu' ? (
-            <Menu onShowLeaderboard={() => setView('leaderboard')} onShowLoadout={() => setView('loadout')} />
+            <Menu onShowLeaderboard={() => setView('leaderboard')} onPlay={() => setView('howToPlay')} />
+          ) : view === 'howToPlay' ? (
+            <HowToPlay onContinue={() => setView('loadout')} />
           ) : view === 'loadout' ? (
             <Loadout onBack={() => setView('menu')} />
           ) : (
