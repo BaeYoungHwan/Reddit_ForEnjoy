@@ -458,7 +458,7 @@ const HowToPlay = ({ onContinue }: { onContinue: () => void }) => {
       </div>
 
       <p className="text-[11px] text-slate-500 text-center border-t border-slate-800 pt-3">
-        Ranked by fewest footprints to the goal.
+        Ranked by fewest steps to the goal.
       </p>
       <p className="text-xs text-slate-400 text-center animate-pulse">Press any key to continue</p>
     </div>
