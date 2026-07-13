@@ -2036,15 +2036,28 @@ class MazeScene extends Phaser.Scene {
   // 골인 시 서버에 클리어 기록을 보내 리더보드에 반영한다. 2026-07-13까지 이 호출 자체가
   // 없어서(테스트 단계 상태로 남아있었음) 실제로 골인해도 리더보드에 기록이 전혀 안 남고
   // 있던 문제 수정 — 서버 run.finish는 이미 완전히 구현돼 있었음(docs/wbs.md 전체 블로커 참고).
+  //
+  // 2026-07-13 추가 수정: 실배포 환경에서 완주해도 리더보드에 기록이 안 남는다는 재현 보고를
+  // 받았는데, 실패해도 무조건 조용히 넘어가게 짜여있어서 원인을 전혀 알 수 없었음(attemptInstall이
+  // 이미 겪은 것과 같은 문제 — IS_LOCAL_PREVIEW 구분 없이 실배포 실패까지 로컬 프리뷰처럼
+  // 처리하면 진단 자체가 불가능해짐). 실배포(=IS_LOCAL_PREVIEW가 아닌 환경)에서 실패하면
+  // 화면에 실패 안내를 띄우고 에러 메시지를 콘솔에 남겨서, 최소한 무슨 에러인지 눈으로
+  // 확인할 수 있게 함.
   private async reportRunFinish(goalText: Phaser.GameObjects.Text) {
     const clearTimeMs = Date.now() - this.runStartTime;
     try {
       const result: RunFinishOutput = await trpc.run.finish.mutate({ mapId: MAP_ID, clearTimeMs });
       goalText.setText(`🎉 GOAL!\nRank #${result.rank}${result.isNewRecord ? '  New Record!' : ''}`);
     } catch (err) {
-      // 백엔드 없는 로컬 프리뷰 등에서는 실패가 정상 동작 — 다른 mutation들(reportPosition/
-      // reportItemPickup)과 동일한 패턴. 리더보드 반영은 실제 devvit 환경에서만 검증 가능.
-      console.error('run.finish 실패 — 로컬 프리뷰에서는 정상(리더보드 미반영)', err);
+      if (IS_LOCAL_PREVIEW) {
+        // 백엔드 없는 로컬 프리뷰에서는 실패가 정상 동작 — 다른 mutation들(reportPosition/
+        // reportItemPickup)과 동일한 패턴.
+        console.error('run.finish 실패 — 로컬 프리뷰에서는 정상(리더보드 미반영)', err);
+        return;
+      }
+      // 실배포 환경에서 진짜로 실패한 경우 — 조용히 넘어가지 않고 화면에도 알린다.
+      console.error('run.finish 실패(실서버 환경) — 리더보드에 기록 안 남음', err);
+      goalText.setText('🎉 GOAL!\nFailed to save record');
     }
   }
 
