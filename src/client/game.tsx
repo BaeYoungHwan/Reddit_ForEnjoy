@@ -41,6 +41,13 @@ const IS_LOCAL_PREVIEW = window.location.hostname === 'localhost' || window.loca
 
 const TILE_SIZE = 64; // 타일 한 칸의 픽셀 크기 (정사각형 한 변의 길이)
 
+// 카메라가 캐릭터를 따라다니는 뷰포트 크기(칸 단위, 2026-07-13 도입) — 예전엔 맵 전체(가로
+// MAP_WIDTH칸)가 논리 해상도였는데, 그러면 항상 맵 전체가 한 화면에 다 보여서 카메라가
+// 움직일 필요가 없었다. 이 값이 작을수록 확대되어 보인다. 맵 가로세로 비율(25:21)과 비슷하게
+// 맞춰서 화면 비율이 크게 안 어긋나게 함.
+const CAMERA_VIEWPORT_TILES_X = 13;
+const CAMERA_VIEWPORT_TILES_Y = 11;
+
 // 통로 폭(px). 칸 전체(TILE_SIZE)를 통로로 채우면 사방이 넓게 뚫린 팩맨 게임판처럼
 // 보인다는 피드백 반영 — 칸보다 훨씬 좁은 길만 밝혀서, 어둠(칸의 나머지 공간 = 벽)
 // 속에 좁은 길이 나 있는 실제 미로에 가깝게 만듦.
@@ -169,6 +176,43 @@ const PLAYER_TRAP_TEXTURE_KEYS: Record<TrapType, string> = {
   reverse: 'player-character-reverse',
 };
 const PLAYER_DETECTOR_TEXTURE_KEY = 'player-character-detector'; // 위 주석 참고 — 아직 미사용
+
+// 2026-07-13: 아이템 전체를 "즉시 발동" → "보유 후 Z로 사용"으로 전환하면서 도입한 인벤토리
+// 슬롯 UI. 아이콘은 종류별로 송원호님이 준 png(public/sprites/ItemSlot-*.png, 함정 설치만
+// 폭탄 아이콘이라 파일명이 다름)를 그대로 씀.
+const ITEM_SLOT_TEXTURE_KEYS: Record<ItemType, string> = {
+  flashlight: 'item-slot-flashlight',
+  shield: 'item-slot-shield',
+  detector: 'item-slot-detector',
+  trapInstall: 'item-slot-bomb',
+};
+
+// 슬롯 라벨 — 말풍선 토스트(ITEM_LABELS)와 달리 슬롯 폭이 좁아 더 짧은 이름을 따로 둔다.
+const ITEM_SLOT_LABELS: Record<ItemType, string> = {
+  flashlight: 'Flash',
+  shield: 'Shield',
+  trapInstall: 'Trap Kit',
+  detector: 'Detector',
+};
+
+// 슬롯 배경 색상(2026-07-13 재작업) — 처음엔 맵 벽과 같은 절차적 암반 텍스처를 그대로
+// 재사용했는데, 오히려 벽이랑 구분이 안 돼서 "슬롯 박스처럼 안 보인다"는 피드백을 받음.
+// 벽(따뜻한 갈색 톤, mazePattern.ts 기본값)과 다른 차가운 슬레이트/금속 톤을 써서 "맵 안에
+// 파묻힌 UI"가 아니라 "화면에 붙어있는 금속 소켓"으로 확실히 구분되게 한다.
+const ITEM_SLOT_FRAME_COLOR = 0x2a2e35; // 소켓 프레임 기본색(차가운 슬레이트)
+const ITEM_SLOT_FRAME_LIGHT = 0x5c6270; // 베벨 밝은 변(위/왼쪽)
+const ITEM_SLOT_FRAME_DARK = 0x141519; // 베벨 어두운 변(아래/오른쪽)
+const ITEM_SLOT_SOCKET_COLOR = 0x0d0e11; // 안쪽으로 파인 소켓(항상 어둡게)
+
+// 2026-07-13 재작업: 4칸을 항상 다 그려두고 빈 칸은 "닫힌 박스"로 표시하던 방식 대신, 실제로
+// 들고 있는 아이템 개수만큼만 박스를 동적으로 만들고 없애는 방식으로 변경(피드백: "먹을 때마다
+// 박스가 생기는 구조가 더 좋을 것 같다"). ITEM_SLOT_MAX는 화면에 보여줄 고정 칸 수가 아니라
+// "이 이상은 못 든다"는 상한일 뿐 — 로드아웃 1개 + 맵당 고정 미스터리 박스 스폰 3곳이 한
+// 판에서 아이템을 획득할 수 있는 이론적 최댓값과 정확히 일치해서 이 값으로 정함.
+const ITEM_SLOT_MAX = 4;
+const ITEM_SLOT_SIZE = 44; // 2026-07-13: 60 → 44로 축소(피드백)
+const ITEM_SLOT_GAP = 6;
+const ITEM_SLOT_MARGIN = 12;
 // 리스폰은 순간이동이라 별도 "효과 지속시간"이 없지만, 표정이 바뀌는 게 눈에 잘 안 보일
 // 정도로 짧다는 피드백을 받아 리스폰만 따로 더 길게 유지되는 시간을 둔다.
 const RESPAWN_FLASH_MS = 1600;
@@ -200,6 +244,13 @@ const SLIDE_SHAKE_INTENSITY = 0.008;
 // trap.trigger/item.pickup과 겹쳐 매 칸마다 요청이 늘어나는 걸 줄이기 위함
 // (PR #31 리뷰 반영 — 렉 문제가 있는 상황에서 요청 수를 더 늘리면 안 된다는 피드백).
 const FOOTPRINT_FLUSH_INTERVAL_MS = 2000;
+
+// 다른 유저 발자국을 지나온 칸 전부가 아니라 이 비율만큼만 화면에 표시한다(렌더링 시점
+// 필터링 — 서버엔 그대로 다 기록됨). 전부 다 보이면 누적된 경로가 사실상 정답 그리기가
+// 돼버려서 도입(2026-07-13). 좌표 기반 결정론적 해시가 아니라 매 세션 Math.random()으로
+// 뽑는다 — 볼 때마다 살짝 다르게 보이는 쪽이 안개/미스터리 박스가 주는 "불확실성" 컨셉과
+// 더 잘 맞는다고 판단(임소리 결정).
+const FOOTPRINT_DISPLAY_RATIO = 0.3;
 
 // 캐릭터 시작 위치 (map-1의 실제 시작 칸 S). 리스폰 함정이 여길 기준으로 되돌림.
 const SPAWN_POSITION = MAIN_MAP.start;
@@ -267,10 +318,13 @@ type ItemEncounter =
   | { kind: 'item'; type: ItemType; revealedTraps?: TrapInstance[] | undefined }
   | { kind: 'trap'; type: TrapType };
 
-// 실제 미스터리 박스는 픽업 전까지 타입을 알 수 없으므로 종류 무관하게 이 색 하나로 통일해서
-// 그린다(renderItemMarkers 참고) — ITEM_COLORS는 픽업 "이후" 이펙트(flashPlayer 등)와 로컬
-// 폴백(TEMP_ITEMS) 전용으로 남겨둔다.
-const MYSTERY_BOX_COLOR = 0xe0c3ff; // 연보라 — 손전등/쉴드/함정탐지기/함정설치 어디에도 안 겹치는 색
+// 인벤토리 슬롯 하나에 들어가는 데이터(2026-07-13 도입). 쉴드는 즉시무장 예외라 여기 안
+// 들어간다 — type은 flashlight/detector/trapInstall 중 하나. revealedTraps(탐지기 전용):
+// 오라클 방지 설계상 반경 계산은 "실제로 주운 자리" 기준으로 픽업 시점에만 할 수 있어서,
+// 나중에 Z로 쓸 때가 아니라 여기 담는 시점(addHeldItem 호출 시점)에 서버가 이미 계산해준
+// 값을 미리 저장해둔다. trapType(함정 설치 전용): items.md 스펙("줍는 순간 함정 종류 랜덤
+// 결정")을 지키기 위해 Z를 누른 시점이 아니라 습득 시점에 미리 뽑아서 저장해둔다.
+type HeldItem = { type: ItemType; revealedTraps?: TrapInstance[]; trapType?: TrapType };
 
 const ITEM_COLORS: Record<ItemType, number> = {
   flashlight: 0xfff59d, // 옅은 노랑
@@ -476,7 +530,7 @@ class MazeScene extends Phaser.Scene {
 
   // 아이템 마커 도형(별 모양 — 함정 마커는 박스 모양이라 헷갈리지 않게 구분). 함정 마커와
   // 동일하게 안개 상태에 맞춰 밝기 조정됨.
-  private itemRects: (Phaser.GameObjects.Star | undefined)[][] = [];
+  private itemRects: (Phaser.GameObjects.Container | undefined)[][] = [];
 
   // 함정 탐지기(detector)로 반경 내 "다른 유저" 함정을 잠깐 공개할 때 쓰는 임시 마커.
   // this.myTraps(내가 설치한 함정, 항상 표시)와 달리 일정 시간 후 사라져야 하고, 안개(fog)와
@@ -496,11 +550,6 @@ class MazeScene extends Phaser.Scene {
 
   // 쉴드 보유 여부. true면 다음 함정 발동을 무효화하고 자동으로 false가 됨(1회성 소모).
   private hasShield = false;
-
-  // 보유 중인 "함정 설치" 아이템이 랜덤으로 정해준 함정 종류. null이면 아무것도 안 들고
-  // 있는 상태 — Ctrl을 눌러도 아무 일 없음. 설치 성공하면 다시 null로 돌아감(1회성 소모,
-  // 실패하면 그대로 유지 — 다른 칸에서 재시도 가능).
-  private heldTrapType: TrapType | null = null;
 
   // trap.install 요청이 응답 오기 전에 Z를 연타해서 중복 요청이 동시에 나가는 것을 막는
   // 잠금 플래그. isMoving과 같은 목적이지만 "이동 애니메이션"이 아니라 "네트워크 요청 1건"을
@@ -525,12 +574,29 @@ class MazeScene extends Phaser.Scene {
   // (resolveArrival에서 showShieldBlockEffect 재생 시) 같이 파괴한다.
   private shieldRing: Phaser.GameObjects.Arc | null = null;
 
-  // 함정 설치권(heldTrapType)을 보유하고 있는 동안 캐릭터 머리 위에 떠서 "지금 함정을
-  // 들고 있다"는 것만 보여주는 아이콘. 처음엔 함정 종류별로 색을 다르게 줬었는데, 어떤 색이
-  // 어떤 함정인지 플레이어가 알 방법이 없어 의미 없는 구분이라는 피드백(2026-07-11 임소리)으로
-  // 종류 무관하게 항상 같은 모양을 쓰도록 변경 — Text(이모지)라 Arc가 아니라 Text 타입.
-  // 설치 성공 시(attemptInstall) 파괴한다.
-  private heldTrapIcon: Phaser.GameObjects.Text | null = null;
+  // 2026-07-13: 쉴드는 밟는 즉시 발동이라 슬롯 UI에도 안 뜨는데, 그러면 "지금 쉴드 보유
+  // 중"이라는 걸 알기 어렵다는 피드백 — 얇은 링(shieldRing)보다 눈에 띄게, 머리 위에 쉴드
+  // 아이콘(슬롯 UI와 같은 png)을 띄워서 명확히 보여준다. 함정을 막아 소모되는 순간 원래
+  // 모습으로 되돌린다(위 shieldRing과 생명주기 동일).
+  private shieldIcon: Phaser.GameObjects.Image | null = null;
+
+  // 2026-07-13 재작업: 4칸 고정 배열(null로 빈칸 표현) 대신, 실제로 들고 있는 아이템만큼만
+  // 자라고 줄어드는 배열로 변경 — "먹을 때마다 박스가 생기는 구조가 더 좋을 것 같다"는
+  // 피드백으로 빈 슬롯 개념 자체를 없앰(ITEM_SLOT_MAX에 도달하면 addHeldItem이 획득을 거부).
+  private heldItems: HeldItem[] = [];
+  // X로 순환하는 "지금 선택된 아이템" 인덱스. heldItems가 비어있으면 의미 없음
+  // (useSelectedItem/cycleSelectedSlot이 각자 방어).
+  private selectedSlotIndex = 0;
+  // 아래 4개는 heldItems와 길이가 항상 같다 — refreshItemSlotsUI가 호출될 때마다 전부 지우고
+  // heldItems 개수만큼 다시 만든다(최대 4개뿐이라 매번 다시 그려도 비용 미미).
+  private itemSlotBgs: Phaser.GameObjects.Graphics[] = [];
+  private itemSlotBorders: Phaser.GameObjects.Rectangle[] = [];
+  // 아이콘 뒤에 까는 종류별 색 글로우(가산 블렌드) — 밋밋한 png 아이콘에 광택을 더해달라는
+  // 피드백(2026-07-13). ITEM_COLORS(기존 픽업 이펙트에도 쓰는 종류별 색)를 그대로 재사용.
+  private itemSlotGlows: Phaser.GameObjects.Arc[] = [];
+  private itemSlotIcons: Phaser.GameObjects.Image[] = [];
+  // 슬롯 이름표(영문) — 아이콘만으론 뭔지 안 보일 수 있다는 피드백(2026-07-13)으로 추가.
+  private itemSlotLabels: Phaser.GameObjects.Text[] = [];
 
   // 역방향 함정에 걸린 상태인지 여부. true면 방향키 입력을 반대로 뒤집어서 처리함.
   private isReversed = false;
@@ -578,6 +644,10 @@ class MazeScene extends Phaser.Scene {
     this.load.image(PLAYER_TRAP_TEXTURE_KEYS.blind, '/sprites/Character-blind.png');
     this.load.image(PLAYER_TRAP_TEXTURE_KEYS.reverse, '/sprites/Character-reverse.png');
     this.load.image(PLAYER_DETECTOR_TEXTURE_KEY, '/sprites/Character-detector.png');
+    this.load.image(ITEM_SLOT_TEXTURE_KEYS.flashlight, '/sprites/ItemSlot-flashlight.png');
+    this.load.image(ITEM_SLOT_TEXTURE_KEYS.shield, '/sprites/ItemSlot-shield.png');
+    this.load.image(ITEM_SLOT_TEXTURE_KEYS.detector, '/sprites/ItemSlot-detector.png');
+    this.load.image(ITEM_SLOT_TEXTURE_KEYS.trapInstall, '/sprites/ItemSlot-bomb.png');
     (Object.keys(SFX_PATHS) as SfxKey[]).forEach((key) => this.load.audio(key, SFX_PATHS[key]));
   }
 
@@ -691,14 +761,28 @@ class MazeScene extends Phaser.Scene {
     this.playerBaseScaleY = this.playerImg.scaleY;
     this.playerImg.setDepth(10); // depth(그리기 순서)를 높여서 타일 위에 캐릭터가 보이게 함
 
+    // 카메라가 캐릭터를 따라다니게 한다(2026-07-13 도입). setBounds로 맵 바깥은 스크롤이
+    // 안 되게 막아서, 맵 가장자리에서도 화면 밖(빈 공간)이 보이지 않게 한다. startFollow의
+    // lerp(0.1, 0.1)는 카메라가 캐릭터를 순간이동하듯 따라가지 않고 살짝 지연되며 부드럽게
+    // 쫓아가게 하는 값 — 너무 낮으면(0에 가까우면) 카메라가 못 따라와 보이고, 너무 높으면
+    // (1에 가까우면) 예전처럼 카메라가 딱 붙어 뚝뚝 끊겨 보인다.
+    this.cameras.main.setBounds(0, 0, MAP_WIDTH * TILE_SIZE, MAP_HEIGHT * TILE_SIZE);
+    this.cameras.main.startFollow(this.playerImg, true, 0.1, 0.1);
+
     // 키보드의 방향키 입력을 받을 수 있도록 설정.
     // 이후 update()에서 this.cursors.left/right/up/down 으로 눌림 여부를 확인할 수 있음.
     this.cursors = this.input.keyboard!.createCursorKeys();
 
-    // 함정 설치 키(Ctrl — 2026-07-11 임소리 요청으로 Z에서 변경). 방향키(this.cursors)는
-    // "누르는 동안 계속" 반응해야 하는 연속 입력이라 update()에서 매 프레임 폴링하지만,
-    // 설치는 "딱 한 번만" 반응해야 하는 단발성 액션이라 keydown 이벤트로 처리한다.
-    this.input.keyboard!.on('keydown-CTRL', () => void this.attemptInstall());
+    // 아이템 슬롯 UI(우측 하단 고정, 2026-07-13 도입). 화면 좌표 기준 고정(setScrollFactor(0))
+    // 이라 카메라가 캐릭터를 따라다녀도 항상 같은 자리에 보인다. 박스 자체는 refreshItemSlotsUI가
+    // heldItems 개수만큼 동적으로 만들고 지운다("먹을 때마다 박스가 생기는 구조", 2026-07-13
+    // 피드백) — 지금은 heldItems가 비어있어 호출해도 아무것도 안 생긴다.
+    this.refreshItemSlotsUI();
+
+    // 아이템 사용/슬롯 전환 키. 방향키(this.cursors)와 달리 "누르는 동안 계속"이 아니라
+    // "딱 한 번" 반응해야 하는 단발성 입력이라 keydown 이벤트로 처리한다.
+    this.input.keyboard!.on('keydown-Z', () => this.useSelectedItem());
+    this.input.keyboard!.on('keydown-X', () => this.cycleSelectedSlot());
 
     // 게임 시작하자마자 시작 지점 기준으로 시야(안개)부터 계산해서 보여줌
     this.updateFog();
@@ -830,50 +914,51 @@ class MazeScene extends Phaser.Scene {
     this.renderItemMarkers();
   }
 
-  // this.remainingItems를 화면에 별 모양 마커로 그린다(함정 마커는 박스 모양이라 구분됨).
-  // renderTrapMarkers()와 동일하게 loadServerState()에서 서버 응답을 받은 뒤 한 번 호출한다.
-  // 미스터리 박스라 타입을 모르므로(item.type은 로컬 폴백에서만 존재) 항상 같은 색으로 그린다.
+  // 함정/아이템 스폰 마커(박스 + 위아래로 통통 뜨는 물음표) 공용 생성 헬퍼. 2026-07-13:
+  // 아이템:함정 확률이 반반인 미스터리 박스 도입으로 랜덤 스폰이 뭐가 나올지 밟기 전엔 알 수
+  // 없어졌으므로, 예전에 "아이템=별 모양"으로 따로 구분해 그리던 걸 없애고 설치형 함정
+  // 마커와 완전히 같은 모양으로 통일했다(임소리 피드백 — 확률이 반반으로 정해졌으니 시각적
+  // 구분도 없애는 게 맞다고 판단).
+  private buildMysteryBoxMarker(cx: number, cy: number): Phaser.GameObjects.Container {
+    // 박스는 고정, 물음표만 따로 애니메이션을 걸어야 해서 두 이미지를 각각 만든 뒤
+    // 컨테이너로 묶는다 — 컨테이너에 setAlpha를 하면 두 이미지가 함께 밝기 조정된다.
+    const boxImg = this.add.image(0, 0, ITEM_BOX_TEXTURE_KEY).setDisplaySize(ITEM_MARKER_SIZE, ITEM_MARKER_SIZE);
+    const markImg = this.add.image(0, 0, ITEM_MARK_TEXTURE_KEY).setDisplaySize(ITEM_MARKER_SIZE, ITEM_MARKER_SIZE);
+
+    const marker = this.add.container(cx, cy, [boxImg, markImg]);
+    marker.setDepth(6); // 타일(기본 depth 0)보다 위, 캐릭터(depth 10)보다 아래
+
+    // 물음표만 위아래로 살짝 통통 뜨는 애니메이션 (박스는 움직이지 않음)
+    this.tweens.add({
+      targets: markImg,
+      y: markImg.y - ITEM_MARK_BOB_PX,
+      duration: ITEM_MARK_BOB_MS,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.easeInOut',
+    });
+
+    return marker;
+  }
+
+  // this.remainingItems(미스터리 박스 스폰)를 화면에 마커로 그린다. renderTrapMarkers()와
+  // 동일하게 loadServerState()에서 서버 응답을 받은 뒤 한 번 호출한다.
   private renderItemMarkers() {
     for (const item of this.remainingItems) {
-      const marker = this.add.star(
-        item.x * TILE_SIZE + TILE_SIZE / 2,
-        item.y * TILE_SIZE + TILE_SIZE / 2,
-        5,
-        TILE_SIZE * 0.12,
-        TILE_SIZE * 0.24,
-        item.type ? ITEM_COLORS[item.type] : MYSTERY_BOX_COLOR
-      );
-      marker.setDepth(6);
-      this.itemRects[item.y]![item.x] = marker;
+      const cx = item.x * TILE_SIZE + TILE_SIZE / 2;
+      const cy = item.y * TILE_SIZE + TILE_SIZE / 2;
+      this.itemRects[item.y]![item.x] = this.buildMysteryBoxMarker(cx, cy);
     }
     this.updateFog();
   }
 
-  // this.myTraps를 화면에 마커(박스 + 위아래로 통통 뜨는 물음표)로 그린다.
+  // this.myTraps(내가 설치한 함정)를 화면에 마커로 그린다.
   // 안개 상태를 바로 반영하기 위해 마지막에 updateFog도 호출.
   private renderTrapMarkers() {
     for (const trap of this.myTraps) {
       const cx = trap.x * TILE_SIZE + TILE_SIZE / 2;
       const cy = trap.y * TILE_SIZE + TILE_SIZE / 2;
-
-      // 박스는 고정, 물음표만 따로 애니메이션을 걸어야 해서 두 이미지를 각각 만든 뒤
-      // 컨테이너로 묶는다 — 컨테이너에 setAlpha를 하면 두 이미지가 함께 밝기 조정된다.
-      const boxImg = this.add.image(0, 0, ITEM_BOX_TEXTURE_KEY).setDisplaySize(ITEM_MARKER_SIZE, ITEM_MARKER_SIZE);
-      const markImg = this.add.image(0, 0, ITEM_MARK_TEXTURE_KEY).setDisplaySize(ITEM_MARKER_SIZE, ITEM_MARKER_SIZE);
-
-      const marker = this.add.container(cx, cy, [boxImg, markImg]);
-      marker.setDepth(6); // 타일(기본 depth 0)보다 위, 캐릭터(depth 10)보다 아래
-      this.trapRects[trap.y]![trap.x] = marker;
-
-      // 물음표만 위아래로 살짝 통통 뜨는 애니메이션 (박스는 움직이지 않음)
-      this.tweens.add({
-        targets: markImg,
-        y: markImg.y - ITEM_MARK_BOB_PX,
-        duration: ITEM_MARK_BOB_MS,
-        yoyo: true,
-        repeat: -1,
-        ease: 'Sine.easeInOut',
-      });
+      this.trapRects[trap.y]![trap.x] = this.buildMysteryBoxMarker(cx, cy);
     }
     this.updateFog();
   }
@@ -883,6 +968,7 @@ class MazeScene extends Phaser.Scene {
   private renderFootprintMarkers(footprints: Position[]) {
     for (const tile of footprints) {
       if (this.footprintRects[tile.y]?.[tile.x]) continue; // 같은 칸에 중복 표시 방지
+      if (Math.random() >= FOOTPRINT_DISPLAY_RATIO) continue; // 전체 경로가 다 보이지 않도록 일부만 랜덤 표시
       const marker = this.add.image(
         tile.x * TILE_SIZE + TILE_SIZE / 2,
         tile.y * TILE_SIZE + TILE_SIZE / 2,
@@ -990,13 +1076,13 @@ class MazeScene extends Phaser.Scene {
     this.flashlightGlow?.setPosition(this.playerImg.x, this.playerImg.y);
     this.shieldRing?.setPosition(this.playerImg.x, this.playerImg.y);
 
-    // 함정 설치 보유 아이콘과 역방향 경고 아이콘은 둘 다 머리 위 같은 자리를 쓰는데, 동시에
-    // 뜨면(설치권을 들고 있는 채로 역방향 함정을 밟는 등) 겹쳐서 하나가 안 보이는 문제가
-    // 있었다(2026-07-11 임소리 발견) — 둘 다 떠 있을 때만 좌우로 나눠 배치하고, 하나만 있으면
-    // 원래대로 정중앙에 둔다.
+    // 쉴드 아이콘과 역방향 경고 아이콘은 머리 위 같은 자리를 쓰는데, 동시에 뜰 수 있다(예:
+    // 역방향 효과가 아직 지속 중일 때 쉴드를 새로 주움) — 둘 다 떠 있을 때만 좌우로 나눠
+    // 배치하고, 하나만 있으면 정중앙에 둔다(2026-07-11 임소리가 heldTrapIcon/reverseIcon
+    // 쌍에 적용했던 것과 동일한 패턴, 2026-07-13 shieldIcon으로 대상만 교체).
     const headIconY = this.playerImg.y - TILE_SIZE * 0.55;
-    const headIconOffsetX = this.heldTrapIcon && this.reverseIcon ? TILE_SIZE * 0.22 : 0;
-    this.heldTrapIcon?.setPosition(this.playerImg.x - headIconOffsetX, headIconY);
+    const headIconOffsetX = this.shieldIcon && this.reverseIcon ? TILE_SIZE * 0.22 : 0;
+    this.shieldIcon?.setPosition(this.playerImg.x - headIconOffsetX, headIconY);
     this.reverseIcon?.setPosition(this.playerImg.x + headIconOffsetX, headIconY);
   }
 
@@ -1288,6 +1374,11 @@ class MazeScene extends Phaser.Scene {
   // 주기적으로 처리 — trap.trigger/item.pickup과 매 칸 겹쳐서 요청이 늘어나는 걸 막기 위함.
   private queueFootprint(x: number, y: number) {
     this.pendingFootprints.push({ x, y });
+
+    // 방금 도착한 칸에 다른 유저 발자국 마커가 떠 있었다면 지운다(2026-07-13) — 이미 직접
+    // 밟아서 안개도 걷힌 칸이라 "누가 여기 지나갔다"는 표시가 더 이상 새로운 정보가 아님.
+    this.footprintRects[y]?.[x]?.destroy();
+    if (this.footprintRects[y]) this.footprintRects[y]![x] = undefined;
   }
 
   // pendingFootprints에 쌓인 좌표를 한 번의 요청으로 서버에 기록한다(map.getState가 다음
@@ -1338,6 +1429,8 @@ class MazeScene extends Phaser.Scene {
   // 이동이 진행 중일 수 있다. respawn/slow처럼 위치·트윈에 개입하는 효과는 각자
   // (applyRespawnTrap/applySlideTrap) killTweensOf로 진행 중인 이동을 이기고 스스로 상태를
   // 정리한다.
+  // 2026-07-13(임소리): 아이템 적용부는 즉시 발동 대신 인벤토리 슬롯에 채우는 방식(addHeldItem)
+  // 으로 바꿈 — 쉴드만 예외(반응형이라 즉시 무장이 항상 이득, applyShieldItem 직접 호출 유지).
   private async resolveArrival(x: number, y: number, dx: number, dy: number) {
     // 이번 이동 "시작 시점"의 쉴드 보유 스냅샷 — 이 판정 도중 새로 주운 쉴드(아래 outcome:'item'
     // && type:'shield')가 같은 이동의 함정 판정에 소급 적용되지 않게 한다.
@@ -1358,6 +1451,8 @@ class MazeScene extends Phaser.Scene {
       this.showShieldBlockEffect();
       this.shieldRing?.destroy();
       this.shieldRing = null;
+      this.shieldIcon?.destroy();
+      this.shieldIcon = null;
     }
 
     // 슬라이드보다 순간 효과(respawn/blind/reverse)를 먼저 적용한다 — respawn이 위치 자체를
@@ -1371,14 +1466,29 @@ class MazeScene extends Phaser.Scene {
     }
 
     if (itemEncounter.kind === 'item') {
-      if (itemEncounter.type === 'flashlight') this.applyFlashlightItem();
-      else if (itemEncounter.type === 'shield') this.applyShieldItem();
-      // 로컬 폴백(reportItemPickup의 catch, TEMP_ITEMS 기반)에서만 나오는 클라이언트 전용
-      // 값이라 마지막 else로 잡는다. 'detector'를 명시적으로 분기하지 않으면 이 else가 실수로
-      // 삼켜서 applyTrapInstallItem이 잘못 호출되는 버그가 있었음(2026-07-10 발견 — 실제 서버
-      // 함정 탐지기 픽업이 함정 설치 아이템으로 오판정되던 문제).
-      else if (itemEncounter.type === 'detector') this.applyDetectorItem(itemEncounter.revealedTraps ?? []);
-      else this.applyTrapInstallItem();
+      // 서버(shared/game-types.ts ItemType)는 'trapInstall'을 반환할 일이 없다 — 로컬 폴백
+      // (reportItemPickup의 catch, TEMP_ITEMS 기반)에서만 나오는 클라이언트 전용 값이라 마지막
+      // else로 잡는다. 'detector'를 명시적으로 분기하지 않으면 이 else가 실수로 삼켜서 함정
+      // 설치 아이템으로 오판정되는 버그가 있었음(2026-07-10 발견).
+      if (itemEncounter.type === 'detector') {
+        // 반경 계산은 서버가 이 픽업 시점(오라클 방지용 위치 검증을 이미 거친 이벤트)에 미리
+        // 해준 것 — Z로 나중에 쓸 때가 아니라 지금 그대로 저장해둔다(HeldItem 주석 참고).
+        this.addHeldItem({ type: 'detector', revealedTraps: itemEncounter.revealedTraps ?? [] });
+      } else if (itemEncounter.type === 'shield') {
+        // 함정이 안 보이는 게임이라 "언제 쓸지" 고를 방법이 없다 — 슬롯에 미루지 않고 줍는
+        // 즉시 무장(applyLoadout과 동일한 이유).
+        this.applyShieldItem();
+      } else if (itemEncounter.type === 'flashlight') {
+        this.addHeldItem({ type: itemEncounter.type });
+      } else {
+        // items.md 스펙: 함정 종류는 "줍는 순간" 랜덤 결정 — Z로 쓰는 시점이 아니라 여기서
+        // 뽑아둔다. 슬롯(Z)에 넣되, Z를 누르면 "장전"이 아니라 그 즉시 그 자리에 바로 설치까지
+        // 끝나도록 함(attemptInstall 참고) — 조작키를 Z/X 두 개로 통일하기 위해 Ctrl을 없앰.
+        this.addHeldItem({
+          type: 'trapInstall',
+          trapType: TRAP_TYPES[Math.floor(Math.random() * TRAP_TYPES.length)]!,
+        });
+      }
     }
 
     if (resolution.effectsToApply.includes('slow')) {
@@ -1493,7 +1603,7 @@ class MazeScene extends Phaser.Scene {
   // 의도한 단순화 — 팀 플레이테스트 피드백 있으면 재검토.
   private applyFlashlightItem() {
     this.playSfx('itemPickup');
-    this.showFloatingLabel(`${ITEM_LABELS.flashlight} acquired!`);
+    this.showFloatingLabel(`${ITEM_LABELS.flashlight} activated!`);
     this.flashPlayer(ITEM_COLORS.flashlight);
     this.currentVisionRadius = FLASHLIGHT_VISION_RADIUS;
     this.updateFog();
@@ -1565,6 +1675,15 @@ class MazeScene extends Phaser.Scene {
       this.shieldRing.setStrokeStyle(2, 0xbfffff, 0.8);
       this.shieldRing.setDepth(9);
     }
+
+    // 머리 위 쉴드 아이콘 — 슬롯 UI와 같은 png를 재사용. 이미 떠 있으면(재트리거) 새로
+    // 만들지 않는다.
+    if (!this.shieldIcon) {
+      this.shieldIcon = this.add
+        .image(this.playerImg.x, this.playerImg.y - TILE_SIZE * 0.55, ITEM_SLOT_TEXTURE_KEYS.shield)
+        .setDisplaySize(TILE_SIZE * 0.4, TILE_SIZE * 0.4)
+        .setDepth(11); // 캐릭터(depth 10) 위에 떠 보이게
+    }
   }
 
   // 함정 탐지기 — items.md 초안: 반경 3칸 내 함정을 표시. 반경 필터링은 서버
@@ -1581,7 +1700,7 @@ class MazeScene extends Phaser.Scene {
     // 공용 픽업음(itemPickup) 대신 detectorScan만 재생 — playSfx는 "이벤트 효과음끼리 겹치면
     // 최신 것만 들리게" 직전 소리를 끊는데, 둘을 곧바로 이어서 틀면 itemPickup이 시작하자마자
     // detectorScan한테 끊겨서 실제로는 절대 안 들리는 죽은 호출이 되므로 아예 하나만 남긴다.
-    this.showFloatingLabel(`${ITEM_LABELS.detector} acquired!`);
+    this.showFloatingLabel(`${ITEM_LABELS.detector} activated!`);
     this.flashPlayer(ITEM_COLORS.detector);
     this.playSfx('detectorScan');
 
@@ -1637,11 +1756,177 @@ class MazeScene extends Phaser.Scene {
     this.revealedTrapMarkers = [];
   }
 
-  // 스플래시 로드아웃 화면(splash.tsx)에서 고른 아이템을 게임 시작 시 즉시 지급한다. 별도
-  // 웹뷰라 React state로 못 넘기고 localStorage로 넘겨받는다(loadout.ts 참고 — 예전엔 이
-  // 값을 아무도 안 읽어서 로드아웃 선택이 실제 게임에 전혀 반영이 안 됐음, PR #33 리뷰로
+  // 슬롯 소켓 하나를 그린다(2026-07-13 재작업) — 바깥 베벨 프레임(위/왼쪽 밝게, 아래/오른쪽
+  // 어둡게, "안으로 파인 소켓"처럼 보이게 하는 흔한 UI 베벨 기법) + 안쪽 어두운 소켓. 맵 벽의
+  // 절차적 암반 텍스처(buildRockWallTileSvg)와 일부러 다른 차가운 톤을 써서, 맵 안에 파묻힌
+  // 벽처럼 보이지 않고 화면에 붙어있는 금속 소켓으로 읽히게 한다.
+  private buildItemSlotSocket(x: number, y: number): Phaser.GameObjects.Graphics {
+    const half = ITEM_SLOT_SIZE / 2;
+    const inset = 6;
+    const g = this.add.graphics({ x, y }).setScrollFactor(0).setDepth(30);
+
+    g.fillStyle(ITEM_SLOT_FRAME_COLOR, 1);
+    g.fillRect(-half, -half, ITEM_SLOT_SIZE, ITEM_SLOT_SIZE);
+
+    g.lineStyle(3, ITEM_SLOT_FRAME_LIGHT, 1);
+    g.beginPath();
+    g.moveTo(-half + 1.5, half - 1.5);
+    g.lineTo(-half + 1.5, -half + 1.5);
+    g.lineTo(half - 1.5, -half + 1.5);
+    g.strokePath();
+
+    g.lineStyle(3, ITEM_SLOT_FRAME_DARK, 1);
+    g.beginPath();
+    g.moveTo(half - 1.5, -half + 1.5);
+    g.lineTo(half - 1.5, half - 1.5);
+    g.lineTo(-half + 1.5, half - 1.5);
+    g.strokePath();
+
+    g.fillStyle(ITEM_SLOT_SOCKET_COLOR, 1);
+    g.fillRect(-half + inset, -half + inset, ITEM_SLOT_SIZE - inset * 2, ITEM_SLOT_SIZE - inset * 2);
+
+    return g;
+  }
+
+  // heldItems가 바뀔 때마다(습득/사용/전환) 호출해 슬롯 UI를 통째로 다시 그린다. 2026-07-13
+  // 재작업: 4칸을 항상 그려두고 내용물만 바꾸던 방식 대신, heldItems 길이만큼만 박스를 새로
+  // 만든다("먹을 때마다 박스가 생기는 구조" 피드백) — 최대 4개뿐이라 매번 전부 destroy 후
+  // 다시 만들어도 비용 미미. 화면 우측 하단에서 왼쪽으로 채워나간다.
+  private refreshItemSlotsUI() {
+    this.itemSlotBgs.forEach((g) => g.destroy());
+    this.itemSlotBorders.forEach((r) => r.destroy());
+    this.itemSlotGlows.forEach((g) => g.destroy());
+    this.itemSlotIcons.forEach((i) => i.destroy());
+    this.itemSlotLabels.forEach((l) => l.destroy());
+    this.itemSlotBgs = [];
+    this.itemSlotBorders = [];
+    this.itemSlotGlows = [];
+    this.itemSlotIcons = [];
+    this.itemSlotLabels = [];
+
+    const viewportWidth = CAMERA_VIEWPORT_TILES_X * TILE_SIZE;
+    const viewportHeight = CAMERA_VIEWPORT_TILES_Y * TILE_SIZE;
+    const slotY = viewportHeight - ITEM_SLOT_MARGIN - ITEM_SLOT_SIZE / 2;
+    const count = this.heldItems.length;
+
+    this.heldItems.forEach((item, i) => {
+      const slotX =
+        viewportWidth - ITEM_SLOT_MARGIN - ITEM_SLOT_SIZE / 2 - (count - 1 - i) * (ITEM_SLOT_SIZE + ITEM_SLOT_GAP);
+      const selected = i === this.selectedSlotIndex;
+
+      this.itemSlotBgs.push(this.buildItemSlotSocket(slotX, slotY));
+      this.itemSlotBorders.push(
+        this.add
+          .rectangle(slotX, slotY, ITEM_SLOT_SIZE, ITEM_SLOT_SIZE, 0x000000, 0)
+          .setStrokeStyle(selected ? 3 : 2, selected ? 0xffe066 : 0xffffff, selected ? 0.95 : 0.5)
+          .setScrollFactor(0)
+          .setDepth(32)
+      );
+      // 종류별 색 글로우(가산 블렌드) — 아이콘 자체가 밋밋한 png라 뒤에서 은은하게 빛나게
+      // 해서 광택을 더한다(2026-07-13 피드백: "글로우 효과 주고 싶다").
+      this.itemSlotGlows.push(
+        this.add
+          .circle(slotX, slotY - 2, ITEM_SLOT_SIZE * 0.34, ITEM_COLORS[item.type], 0.55)
+          .setBlendMode(Phaser.BlendModes.ADD)
+          .setScrollFactor(0)
+          .setDepth(30.5)
+      );
+      this.itemSlotIcons.push(
+        this.add
+          .image(slotX, slotY - 2, ITEM_SLOT_TEXTURE_KEYS[item.type])
+          .setDisplaySize(ITEM_SLOT_SIZE * 0.58, ITEM_SLOT_SIZE * 0.58)
+          .setScrollFactor(0)
+          .setDepth(31)
+      );
+      this.itemSlotLabels.push(
+        this.add
+          .text(slotX, slotY + ITEM_SLOT_SIZE / 2 - 7, ITEM_SLOT_LABELS[item.type], {
+            fontSize: '8px',
+            color: '#ffffff',
+            fontStyle: 'bold',
+            backgroundColor: '#00000099',
+            padding: { x: 2, y: 1 },
+          })
+          .setOrigin(0.5)
+          .setScrollFactor(0)
+          .setDepth(33)
+      );
+    });
+  }
+
+  // 아이템을 인벤토리에 채운다(로드아웃 지급/미스터리 박스 픽업 공용 진입점, 2026-07-13 도입).
+  // 예전처럼 즉시 효과를 적용하지 않고 보유만 해서, Z를 눌렀을 때(useSelectedItem) 원하는
+  // 타이밍에 쓸 수 있게 한다. ITEM_SLOT_MAX에 도달했으면(로드아웃 1 + 맵당 스폰 3곳을 전부
+  // 아이템으로 얻어야 하는 이론적 상한 케이스) 획득에 실패한 것으로 처리 — 상한을 늘리는
+  // 대신 알림만 띄운다.
+  private addHeldItem(item: HeldItem) {
+    if (this.heldItems.length >= ITEM_SLOT_MAX) {
+      this.showFloatingLabel('Inventory full!');
+      return;
+    }
+    this.heldItems.push(item);
+    this.showFloatingLabel(`${ITEM_LABELS[item.type]} ready! (Z/X)`);
+    this.refreshItemSlotsUI();
+  }
+
+  // Z키 — 지금 선택된 아이템을 사용(효과 적용)하고 목록에서 제거한다.
+  // 2026-07-13: 조작키를 Z(사용)/X(전환) 두 개로 통일하기로 한 팀 결정에 맞춰, 함정 설치도
+  // 더 이상 별도 Ctrl 키가 없다 — Z를 누르면 그 즉시 지금 서 있는 칸에 설치까지 끝난다
+  // (attemptInstall). 손전등/탐지기는 서버 확인이 필요 없는 순수 로컬 효과라 그 자리에서
+  // 바로 소모하지만, 함정 설치는 서버 응답(비동기)을 기다려야 해서 성공했을 때만 소모된다
+  // (attemptInstall/handleInstallSuccess의 removeHeldItem 호출 참고) — 실패하면 계속 들고
+  // 있다가 다른 칸에서 Z로 재시도할 수 있다.
+  private useSelectedItem() {
+    const item = this.heldItems[this.selectedSlotIndex];
+    if (!item || this.hasFinished) return;
+
+    // 쉴드는 여기 안 옴 — 즉시무장 예외라 애초에 인벤토리에 안 들어간다(applyLoadout/
+    // resolveArrival 참고).
+    if (item.type === 'flashlight') {
+      this.applyFlashlightItem();
+      this.removeHeldItem(item);
+    } else if (item.type === 'detector') {
+      this.applyDetectorItem(item.revealedTraps ?? []);
+      this.removeHeldItem(item);
+    } else {
+      void this.attemptInstall(item);
+    }
+  }
+
+  // heldItems에서 특정 아이템을 제거하고 선택 인덱스/슬롯 UI를 갱신한다(사용 완료 공용 처리
+  // — useSelectedItem의 즉시 소모 케이스와 attemptInstall의 비동기 성공 케이스가 공유).
+  // 인덱스가 아니라 아이템 객체 참조로 찾는다 — 함정 설치는 서버 응답을 기다리는 동안 다른
+  // 슬롯이 먼저 소모돼 인덱스가 밀릴 수 있어서, "그 사이에도 변하지 않는" 객체 자체로
+  // 식별해야 안전하다.
+  private removeHeldItem(item: HeldItem) {
+    const index = this.heldItems.indexOf(item);
+    if (index === -1) return;
+    this.heldItems.splice(index, 1);
+    // 마지막 자리를 쓰고 있었다면(뒤로 당겨질 아이템이 없음) 선택 인덱스가 배열 길이를
+    // 벗어나므로 새 마지막 자리로 당겨준다.
+    if (this.selectedSlotIndex >= this.heldItems.length) {
+      this.selectedSlotIndex = Math.max(0, this.heldItems.length - 1);
+    }
+    this.refreshItemSlotsUI();
+  }
+
+  // X키 — 선택을 다음 아이템으로 옮긴다. 들고 있는 게 없으면 아무 일도 하지 않는다(순환할
+  // 대상 자체가 없음 — 예전처럼 빈 슬롯을 순환 대상에 포함시키던 개념이 없어짐, 2026-07-13).
+  private cycleSelectedSlot() {
+    if (this.heldItems.length === 0) return;
+    this.selectedSlotIndex = (this.selectedSlotIndex + 1) % this.heldItems.length;
+    this.refreshItemSlotsUI();
+  }
+
+  // 스플래시 로드아웃 화면(splash.tsx)에서 고른 아이템을 게임 시작 시 인벤토리에 지급한다.
+  // 별도 웹뷰라 React state로 못 넘기고 localStorage로 넘겨받는다(loadout.ts 참고 — 예전엔
+  // 이 값을 아무도 안 읽어서 로드아웃 선택이 실제 게임에 전혀 반영이 안 됐음, PR #33 리뷰로
   // 발견). 값이 없거나 알아볼 수 없으면(예: 스플래시를 거치지 않고 game.html에 바로 진입한
   // 로컬 프리뷰) 아무것도 지급하지 않는다 — "선택 안 하면 빈손으로 시작"이 안전한 기본값.
+  // 2026-07-13: 즉시 발동(applyXItem 직접 호출) 대신 addHeldItem으로 슬롯에 채우도록 변경 —
+  // 단 쉴드는 예외(같은 날 되돌림): 함정이 안 보이는 게임이라 "언제 Z로 쓸지" 판단할 방법이
+  // 없다(임소리 피드백) — 쉴드는 애초에 지속시간도 없이 다음 함정을 맞을 때까지 무기한
+  // 대기하는 반응형이라, 슬롯에 넣고 미루기보다 줍는 즉시 무장해두는 쪽이 항상 이득이다.
   private applyLoadout() {
     let saved: string | null;
     try {
@@ -1650,41 +1935,27 @@ class MazeScene extends Phaser.Scene {
       return; // localStorage 접근이 막힌 환경에서도 게임 자체는 정상 진행되게
     }
 
-    if (saved === 'flashlight') this.applyFlashlightItem();
+    if (saved === 'flashlight') this.addHeldItem({ type: 'flashlight' });
     else if (saved === 'shield') this.applyShieldItem();
     else if (saved === 'trapDetector') {
-      // 함정 탐지기는 아직 서버 API가 없어(docs/wbs.md 블로커 참고) 실제 효과를 줄 수 없다 —
-      // 선택 자체는 존중하되, 조용히 무시하는 대신 지금은 미구현이라는 걸 알려준다.
+      // 함정 탐지기는 반경 계산을 "실제로 주운 자리" 기준으로만 할 수 있는데, 로드아웃 지급은
+      // 픽업 이벤트 자체가 없어 기준 좌표가 없다 — 배영환님과 새 서버 API(현재 위치 기준 스캔)
+      // 논의 중이라 아직 슬롯에 안 채우고 기존처럼 안내만 띄운다.
       this.showFloatingLabel('Trap Detector coming soon');
     }
   }
 
-  // 함정 설치 — items.md: 즉시 소모(1회성). 어떤 함정을 설치하게 될지는 줍는 순간 랜덤으로
-  // 정해진다(뽑기형 — 플레이어가 종류를 고르지 않음, 2026-07-09 확인). 실제 서버 호출은
-  // Ctrl키를 눌렀을 때 attemptInstall()에서 처리.
-  private applyTrapInstallItem() {
-    this.playSfx('itemPickup');
-    this.heldTrapType = TRAP_TYPES[Math.floor(Math.random() * TRAP_TYPES.length)]!;
-    this.flashPlayer(ITEM_COLORS.trapInstall);
-    this.showFloatingLabel(`${ITEM_LABELS.trapInstall} acquired! (${TRAP_LABELS[this.heldTrapType]})`);
+  // Z로 함정 설치 아이템을 사용했을 때(useSelectedItem) 호출됨. 지금 서 있는 칸에 바로
+  // 설치를 시도한다 — 이 게임엔 "다른 칸을 조준"하는 입력 수단이 없어서 항상 현재 위치에
+  // 설치하는 게 유일하게 말이 되는 선택.
+  // 2026-07-13: 원래는 Z(장전)와 별도로 Ctrl(그 자리에 설치) 키가 따로 있었는데, "Z 누른
+  // 자리와 실제 설치 자리가 다르다"는 혼란을 줬고, 애초에 팀이 "아이템 조작키는 Z/X 두 개로
+  // 통일"하기로 정했던 것과도 어긋났다(임소리 지적) — Ctrl을 완전히 없애고, Z 한 번으로 그
+  // 즉시 설치까지 끝나도록 합침.
+  private async attemptInstall(item: HeldItem) {
+    if (this.hasFinished || this.isInstalling) return;
 
-    // "함정을 들고 있다"는 것만 보여주는 아이콘(종류 무관, 위 필드 주석 참고) — 설치
-    // (attemptInstall) 전까지 머리 위에 떠 있는다. 이전에 들고 있던 게 있었다면 먼저 지우고
-    // 새로 만든다.
-    this.heldTrapIcon?.destroy();
-    this.heldTrapIcon = this.add
-      .text(this.playerImg.x, this.playerImg.y - TILE_SIZE * 0.55, '🪤', { fontSize: '18px' })
-      .setOrigin(0.5)
-      .setDepth(11); // 캐릭터(depth 10) 위에 떠 보이게
-  }
-
-  // Ctrl키를 눌렀을 때 호출됨. 보유 중인 함정 설치권(heldTrapType)이 있을 때만 지금 서 있는
-  // 칸에 설치를 시도한다 — 이 게임엔 "다른 칸을 조준"하는 입력 수단이 없어서 항상 현재
-  // 위치에 설치하는 게 유일하게 말이 되는 선택.
-  private async attemptInstall() {
-    if (!this.heldTrapType || this.hasFinished || this.isInstalling) return;
-
-    const type = this.heldTrapType;
+    const type = item.trapType!;
     this.isInstalling = true;
     try {
       // tRPC가 서버의 각 return문에서 리터럴 유니언(성공 케이스엔 reason 필드 자체가 없음)을
@@ -1701,11 +1972,12 @@ class MazeScene extends Phaser.Scene {
       this.myTraps = result.myTraps;
 
       if (result.success) {
-        this.handleInstallSuccess(type);
+        this.handleInstallSuccess(type, item);
         return;
       }
 
-      // 실패(개수 제한/타일 점유 등)면 소모되지 않고 그대로 들고 있음 — 다른 칸에서 재시도 가능.
+      // 실패(개수 제한/타일 점유 등)면 소모되지 않고 그대로 들고 있음 — 다른 칸에서 Z로
+      // 재시도 가능(heldItems에서 안 지웠으므로).
       this.playSfx('trapInstallFail');
       const message = result.reason
         ? INSTALL_FAILURE_MESSAGES[result.reason]
@@ -1717,8 +1989,8 @@ class MazeScene extends Phaser.Scene {
       // 똑같이 성공한 척 하면 서버엔 안 남았는데 클라만 설치된 것처럼 보이는 위험이 있었음).
       if (!IS_LOCAL_PREVIEW) {
         // 실서버가 있는 환경(devvit playtest/배포)에서 진짜로 실패한 경우 — 성공한 척하지 않고
-        // 정직하게 실패로 안내한다. heldTrapType은 그대로 유지되니(위 catch 진입 전 소모 안 함)
-        // 다른 칸에서, 또는 같은 칸에서 다시 시도 가능.
+        // 정직하게 실패로 안내한다. heldItems에서 안 지웠으니 다른 칸에서, 또는 같은 칸에서
+        // 다시 시도 가능.
         console.error('trap.install 실패(실서버 환경)', err);
         this.playSfx('trapInstallFail');
         this.showFloatingLabel(INSTALL_FAILURE_MESSAGES.RETRY);
@@ -1728,7 +2000,7 @@ class MazeScene extends Phaser.Scene {
         // 로컬에서 재현할 수 없으므로, 여기선 항상 성공한 것으로 처리한다.
         console.error('trap.install 실패 — 로컬 프리뷰용 즉시 성공 처리로 대체', err);
         this.myTraps = [...this.myTraps, { x: this.playerGridX, y: this.playerGridY, type }];
-        this.handleInstallSuccess(type);
+        this.handleInstallSuccess(type, item);
       }
     } finally {
       this.isInstalling = false;
@@ -1737,11 +2009,9 @@ class MazeScene extends Phaser.Scene {
 
   // 함정 설치 성공 시 공통으로 처리하는 상태 변경 + 이펙트. attemptInstall의 서버 성공
   // 분기와 로컬 폴백 분기가 동일하게 재사용한다.
-  private handleInstallSuccess(type: TrapType) {
+  private handleInstallSuccess(type: TrapType, item: HeldItem) {
     this.playSfx('trapInstallSuccess');
-    this.heldTrapType = null; // 성공해야 소모(1회성)
-    this.heldTrapIcon?.destroy();
-    this.heldTrapIcon = null;
+    this.removeHeldItem(item); // 성공해야 소모(1회성)
     // 로컬 폴백(reportPosition)이 "설치자 본인은 회피"를 재현할 수 있도록 기록 — selfInstalledTrapKeys 참고.
     this.selfInstalledTrapKeys.add(`${this.playerGridX},${this.playerGridY}`);
     this.renderInstalledTrapMarker({ x: this.playerGridX, y: this.playerGridY, type });
@@ -2018,14 +2288,19 @@ class MazeScene extends Phaser.Scene {
     // 다음 주기적 flush까지 기다리면 마지막 몇 칸이 화면 종료 후로 밀릴 수 있어 바로 전송.
     void this.flushFootprints();
 
+    // 2026-07-13: 카메라가 캐릭터를 따라다니게 되면서, 맵 중앙(world 좌표) 고정 위치에 그리면
+    // 골인 지점이 맵 중앙이 아닐 때 화면(카메라 뷰포트) 밖으로 벗어나 안 보일 수 있다. 뷰포트
+    // 중앙에 항상 고정되도록 setScrollFactor(0)(카메라가 움직여도 화면상 위치 불변)을 쓰고,
+    // 좌표도 world 좌표가 아니라 뷰포트 크기(CAMERA_VIEWPORT_TILES_X/Y) 기준으로 계산한다.
     const goalText = this.add
       .text(
-        (MAP_WIDTH * TILE_SIZE) / 2,
-        (MAP_HEIGHT * TILE_SIZE) / 2,
+        (CAMERA_VIEWPORT_TILES_X * TILE_SIZE) / 2,
+        (CAMERA_VIEWPORT_TILES_Y * TILE_SIZE) / 2,
         '🎉 GOAL!',
         { fontSize: '64px', color: '#ffffff', fontStyle: 'bold', align: 'center' }
       )
       .setOrigin(0.5)
+      .setScrollFactor(0)
       .setDepth(20);
 
     void this.reportRunFinish(goalText);
@@ -2036,15 +2311,28 @@ class MazeScene extends Phaser.Scene {
   // 골인 시 서버에 클리어 기록을 보내 리더보드에 반영한다. 2026-07-13까지 이 호출 자체가
   // 없어서(테스트 단계 상태로 남아있었음) 실제로 골인해도 리더보드에 기록이 전혀 안 남고
   // 있던 문제 수정 — 서버 run.finish는 이미 완전히 구현돼 있었음(docs/wbs.md 전체 블로커 참고).
+  //
+  // 2026-07-13 추가 수정: 실배포 환경에서 완주해도 리더보드에 기록이 안 남는다는 재현 보고를
+  // 받았는데, 실패해도 무조건 조용히 넘어가게 짜여있어서 원인을 전혀 알 수 없었음(attemptInstall이
+  // 이미 겪은 것과 같은 문제 — IS_LOCAL_PREVIEW 구분 없이 실배포 실패까지 로컬 프리뷰처럼
+  // 처리하면 진단 자체가 불가능해짐). 실배포(=IS_LOCAL_PREVIEW가 아닌 환경)에서 실패하면
+  // 화면에 실패 안내를 띄우고 에러 메시지를 콘솔에 남겨서, 최소한 무슨 에러인지 눈으로
+  // 확인할 수 있게 함.
   private async reportRunFinish(goalText: Phaser.GameObjects.Text) {
     const clearTimeMs = Date.now() - this.runStartTime;
     try {
       const result: RunFinishOutput = await trpc.run.finish.mutate({ mapId: MAP_ID, clearTimeMs });
       goalText.setText(`🎉 GOAL!\nRank #${result.rank}${result.isNewRecord ? '  New Record!' : ''}`);
     } catch (err) {
-      // 백엔드 없는 로컬 프리뷰 등에서는 실패가 정상 동작 — 다른 mutation들(reportPosition/
-      // reportItemPickup)과 동일한 패턴. 리더보드 반영은 실제 devvit 환경에서만 검증 가능.
-      console.error('run.finish 실패 — 로컬 프리뷰에서는 정상(리더보드 미반영)', err);
+      if (IS_LOCAL_PREVIEW) {
+        // 백엔드 없는 로컬 프리뷰에서는 실패가 정상 동작 — 다른 mutation들(reportPosition/
+        // reportItemPickup)과 동일한 패턴.
+        console.error('run.finish 실패 — 로컬 프리뷰에서는 정상(리더보드 미반영)', err);
+        return;
+      }
+      // 실배포 환경에서 진짜로 실패한 경우 — 조용히 넘어가지 않고 화면에도 알린다.
+      console.error('run.finish 실패(실서버 환경) — 리더보드에 기록 안 남음', err);
+      goalText.setText('🎉 GOAL!\nFailed to save record');
     }
   }
 
@@ -2153,14 +2441,15 @@ class MazeScene extends Phaser.Scene {
 
 // Phaser 게임 전체 설정.
 // parent는 아래 App 컴포넌트에서 만든 div의 id와 반드시 이름이 같아야 함.
-// 맵(1216x960, map-1 기준)이 실제 화면(특히 모바일 devvit 웹뷰)보다 훨씬 크기 때문에,
 // width/height는 "게임 내부 논리 해상도"로만 쓰고 Scale.FIT으로 화면(부모 요소) 크기에 맞게
-// 비율을 유지한 채 축소해서 보여준다 — 그래야 화면 크기와 무관하게 맵 전체가 한 화면에 들어온다.
+// 비율을 유지한 채 축소해서 보여준다. 2026-07-13: 이 값을 맵 전체 크기 대신 카메라 뷰포트
+// 크기(CAMERA_VIEWPORT_TILES_X/Y)로 바꿈 — 카메라가 캐릭터를 따라다니게 되면서 화면엔 맵의
+// 일부만 보이면 되고, 그래야 캐릭터/타일이 더 크게(확대되어) 보여서 몰입감이 생긴다.
 const phaserConfig: Phaser.Types.Core.GameConfig = {
   type: Phaser.AUTO, // 브라우저가 WebGL을 지원하면 WebGL로, 아니면 자동으로 Canvas 방식으로 그림
   parent: 'phaser-container',
-  width: MAP_WIDTH * TILE_SIZE,
-  height: MAP_HEIGHT * TILE_SIZE,
+  width: CAMERA_VIEWPORT_TILES_X * TILE_SIZE,
+  height: CAMERA_VIEWPORT_TILES_Y * TILE_SIZE,
   backgroundColor: '#000000', // hidden 타일은 투명해서 이 검은 배경이 그대로 "안개"처럼 보임
   scale: {
     mode: Phaser.Scale.FIT,
