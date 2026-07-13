@@ -54,6 +54,17 @@ export function encodeLeaderboardScore(steps: number, clearTimeMs: number): numb
 export const positionAnchorKey = (mapId: string, date: string, userId: string): string =>
   `pos:${mapId}:${date}:${userId}`;
 
+// 함정 탐지기 "충전"(사용 가능 횟수) 카운터 — 미스터리 박스 픽업/로드아웃 클레임이 +1,
+// item.useDetector 성공 시 -1. 1회성을 서버가 강제하기 위한 값이라 클라이언트는 몰라도 된다.
+export const detectorChargeKey = (mapId: string, date: string, userId: string): string =>
+  `detector:charge:${mapId}:${date}:${userId}`;
+
+// 로드아웃으로 지급된 탐지기를 서버에 등록(충전)한 적 있는지 판정하는 1회성 마커.
+// ensureMysteryBoxesSeeded의 SET NX 패턴과 동일 — 같은 유저가 item.claimLoadout을 중복
+// 호출해도(새로고침 등) 충전이 여러 번 쌓이지 않게 막는다.
+export const loadoutClaimedKey = (mapId: string, date: string, userId: string): string =>
+  `loadout:claimed:${mapId}:${date}:${userId}`;
+
 /**
  * 발자국/함정/랭킹/위치앵커는 키 이름에 날짜가 포함돼 자정이 지나면 자동으로 새 키에서
  * 시작하므로(async-delivery.md 2절/8.1) 별도 삭제 로직이 필요 없다. 이 키는 그 자동 리셋이
