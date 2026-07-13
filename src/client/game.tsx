@@ -1526,6 +1526,14 @@ class MazeScene extends Phaser.Scene {
       .setOrigin(0.5)
       .setDepth(20);
 
+    // 맵 가장자리(카메라가 setBounds로 더 이상 따라가지 못하는 지점, 2026-07-13 카메라 추종
+    // 도입)에서는 캐릭터가 화면 중앙이 아니라 가장자리에 붙어 렌더링된다. 말풍선이 캐릭터
+    // 중심으로 그려지면 카메라에 실제로 보이는 영역(worldView) 밖으로 잘려나갈 수 있어,
+    // 항상 화면 안에 들어오도록 x좌표를 clamp한다.
+    const halfLabelWidth = label.displayWidth / 2;
+    const { left, right } = this.cameras.main.worldView;
+    label.x = Phaser.Math.Clamp(label.x, left + halfLabelWidth, right - halfLabelWidth);
+
     // 예전엔 뜨자마자 바로 알파도 같이 줄어들어서 다 읽기 전에 흐려지기 시작했다(2026-07-11
     // 임소리 피드백). holdMs 동안은 알파를 그대로 유지해 읽을 시간을 확보하고, 그 뒤 fadeMs
     // 동안만 사라지게 y 이동/알파 트윈을 분리했다.
