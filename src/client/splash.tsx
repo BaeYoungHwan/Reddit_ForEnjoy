@@ -3,6 +3,7 @@ import './index.css';
 import { context, requestExpandedMode } from '@devvit/web/client';
 import {
   StrictMode,
+  useEffect,
   useState,
   type CSSProperties,
   type MouseEvent,
@@ -57,7 +58,7 @@ const FOOTPRINTS = WALK_TILES.map((tile, i) => {
   };
 });
 
-type View = 'menu' | 'loadout' | 'leaderboard';
+type View = 'menu' | 'howToPlay' | 'loadout' | 'leaderboard';
 
 // LoadoutId/LOADOUT_STORAGE_KEY는 ./loadout.ts로 옮겨서 game.tsx와 공유한다(2026-07-10 —
 // 처음엔 여기 로컬로 정의했었는데, game.tsx가 이 값을 전혀 안 읽어서 로드아웃 선택이 실제
@@ -285,10 +286,10 @@ const LogoTitle = ({ size = 'text-4xl' }: { size?: string }) => (
 
 const Menu = ({
   onShowLeaderboard,
-  onShowLoadout,
+  onPlay,
 }: {
   onShowLeaderboard: () => void;
-  onShowLoadout: () => void;
+  onPlay: () => void;
 }) => (
   <>
     <HudButton
@@ -311,7 +312,7 @@ const Menu = ({
     <PlayButton
       onClick={() => {
         playUiClickSound();
-        onShowLoadout();
+        onPlay();
       }}
     />
     {context?.username ? (
@@ -324,6 +325,145 @@ const Menu = ({
     ) : null}
   </>
 );
+
+// How to Play 화면의 방향키/아이템 데모가 공유하는 4분할 순환 클래스(index.css htp-q1~q4) —
+// 같은 배열을 아이콘 강조에 재사용해서 "몇 번째 항목인지"와 "어떤 애니메이션을 쓸지"가 항상
+// 짝이 맞게 한다. 아이콘/키는 흐림(0.35)↔밝음(1)이라 계속 옅게라도 보여도 괜찮지만, 캡션
+// 텍스트는 같은 자리에 4개가 겹쳐 있어서 흐림 상태로 두면 안 보여야 할 글자까지 겹쳐서
+// 뭉개져 보인다(2026-07-13 발견) — 텍스트는 완전히 꺼지는 -solo 버전을 따로 쓴다.
+const QUARTER_ANIMS = ['htp-q1', 'htp-q2', 'htp-q3', 'htp-q4'] as const;
+const QUARTER_ANIMS_SOLO = ['htp-q1-solo', 'htp-q2-solo', 'htp-q3-solo', 'htp-q4-solo'] as const;
+
+const ArrowKey = ({ label, anim }: { label: string; anim: string }) => (
+  <span
+    className="flex items-center justify-center w-8 h-8 rounded-lg bg-slate-800 border-2 border-slate-600 text-slate-200 font-mono text-sm"
+    style={{ animation: `${anim} 4s steps(1) infinite` }}
+    aria-hidden
+  >
+    {label}
+  </span>
+);
+
+// 실제 인벤토리 슬롯에 들어가는 3종(함정 설치/탐지기/손전등)은 Z로 발동, 쉴드는 즉시 무장이라
+// Z가 필요 없음 — 그래도 임소리 요청대로 데모 순환에는 4종 다 넣고, 쉴드 캡션에서 그 차이를
+// 명확히 설명한다("no button needed"). 아이콘은 game.tsx 인벤토리 슬롯 UI와 완전히 같은
+// png(public/sprites/ItemSlot-*.png)를 재사용 — 자체 SVG로 그리면 실제 게임 화면과 따로 놀아서
+// "이 그림을 실제로 어디서 보게 되는지" 연결이 안 될 수 있다는 피드백(2026-07-13)으로 교체.
+const ITEM_DEMO: { label: string; description: string; iconSrc: string; iconAccent: string }[] = [
+  {
+    label: 'Trap Kit',
+    description: 'places a trap on your tile',
+    iconSrc: '/sprites/ItemSlot-bomb.png',
+    iconAccent: 'border-rose-400 bg-rose-500/10',
+  },
+  {
+    label: 'Trap Detector',
+    description: 'reveals nearby traps',
+    iconSrc: '/sprites/ItemSlot-detector.png',
+    iconAccent: 'border-emerald-400 bg-emerald-500/10',
+  },
+  {
+    label: 'Flashlight',
+    description: 'lets you see farther for a while',
+    iconSrc: '/sprites/ItemSlot-flashlight.png',
+    iconAccent: 'border-amber-400 bg-amber-500/10',
+  },
+  {
+    label: 'Trap Shield',
+    description: 'equips instantly — no button needed',
+    iconSrc: '/sprites/ItemSlot-shield.png',
+    iconAccent: 'border-cyan-400 bg-cyan-500/10',
+  },
+];
+
+// PLAY를 누르면 로드아웃보다 먼저 뜨는 조작법 안내. 매번(첫 방문뿐 아니라 매판) 표시하기로
+// 함(임소리 결정) — 대신 아무 키나 누르면 바로 넘어가게 해서 이미 아는 사람은 빠르게 스킵
+// 가능. 방향키/아이템 데모는 전부 CSS 애니메이션(index.css htp-* 키프레임)이라 Phaser나 JS
+// 타이머 없이 팝업이 떠 있는 동안 계속 반복 재생된다.
+const HowToPlay = ({ onContinue }: { onContinue: () => void }) => {
+  useEffect(() => {
+    // keydown이 아니라 window 전역에 건다 — 팝업 안 특정 버튼에 포커스가 가 있을 필요 없이
+    // 정말 "아무 키나" 눌러도 반응해야 하기 때문.
+    const handleKeyDown = () => onContinue();
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onContinue]);
+
+  return (
+    <div className="w-full flex flex-col gap-4">
+      <h1 className="font-display text-lg tracking-wide text-white text-center">How to Play</h1>
+
+      <div className="flex flex-col items-center gap-2">
+        <p className="text-xs text-slate-400">Move with the arrow keys</p>
+        <div className="relative w-full h-20 rounded-2xl bg-slate-800/60 border border-slate-700 overflow-hidden flex items-center justify-center">
+          <img
+            src="/sprites/Character-normal.png"
+            alt=""
+            className="w-9 h-9 object-contain"
+            style={{ animation: 'htp-character 4s steps(1) infinite' }}
+          />
+        </div>
+        <div className="flex flex-col items-center gap-1">
+          <ArrowKey label="↑" anim="htp-q1" />
+          <div className="flex gap-1">
+            <ArrowKey label="←" anim="htp-q3" />
+            <ArrowKey label="↓" anim="htp-q2" />
+            <ArrowKey label="→" anim="htp-q4" />
+          </div>
+        </div>
+      </div>
+
+      <div className="flex flex-col items-center gap-2">
+        <p className="text-xs text-slate-400 flex items-center gap-1">
+          <span
+            className="font-mono bg-slate-800 border-2 border-slate-600 rounded px-1.5"
+            style={{ animation: 'htp-z-tap 8s steps(1) infinite' }}
+          >
+            Z
+          </span>
+          use item
+          <span
+            className="font-mono bg-slate-800 border-2 border-slate-600 rounded px-1.5 ml-2"
+            style={{ animation: 'htp-x-tap 8s steps(1) infinite' }}
+          >
+            X
+          </span>
+          switch slot
+        </p>
+        <div className="flex gap-2">
+          {ITEM_DEMO.map((it, i) => (
+            <span
+              key={it.label}
+              className={`flex items-center justify-center w-10 h-10 rounded-xl border-2 p-1.5 ${it.iconAccent}`}
+              style={{ animation: `${QUARTER_ANIMS[i]} 8s steps(1) infinite` }}
+              aria-hidden
+            >
+              <img src={it.iconSrc} alt="" className="w-full h-full object-contain" />
+            </span>
+          ))}
+        </div>
+        {/* 캡션은 -solo 애니메이션(완전히 꺼짐/켜짐)을 써야 한다 — 4개가 같은 자리에
+            겹쳐 있어서, 아이콘처럼 흐림(0.35)으로 두면 안 보여야 할 글자까지 겹쳐 보인다. */}
+        <div className="relative h-8 w-full">
+          {ITEM_DEMO.map((it, i) => (
+            <p
+              key={it.label}
+              className="absolute inset-0 text-xs text-slate-300 text-center"
+              style={{ animation: `${QUARTER_ANIMS_SOLO[i]} 8s steps(1) infinite` }}
+            >
+              <span className="font-semibold text-white">{it.label}:</span> {it.description}
+            </p>
+          ))}
+        </div>
+      </div>
+
+      <p className="text-[11px] text-slate-500 text-center border-t border-slate-800 pt-3">
+        Ranked by fewest footprints to the goal.
+      </p>
+      <p className="text-xs text-slate-400 text-center animate-pulse">Press any key to continue</p>
+    </div>
+  );
+};
 
 // 게임 시작 전 아이템 로드아웃(3종 중 1개) 선택 화면. PLAY를 누르면 바로 게임으로 가지 않고
 // 여기를 먼저 거친다 — 선택 결과는 localStorage에 저장해뒀다가 game.tsx가 읽어간다(별도
@@ -515,7 +655,9 @@ export const Splash = () => {
       <div className="relative z-10 w-full max-w-sm">
         <RivetPanel>
           {view === 'menu' ? (
-            <Menu onShowLeaderboard={() => setView('leaderboard')} onShowLoadout={() => setView('loadout')} />
+            <Menu onShowLeaderboard={() => setView('leaderboard')} onPlay={() => setView('howToPlay')} />
+          ) : view === 'howToPlay' ? (
+            <HowToPlay onContinue={() => setView('loadout')} />
           ) : view === 'loadout' ? (
             <Loadout onBack={() => setView('menu')} />
           ) : (
