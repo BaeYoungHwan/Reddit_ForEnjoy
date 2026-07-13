@@ -13,6 +13,7 @@ import { resolveTrapEncounters } from './trapResolution';
 import type {
   ItemPickupOutput,
   Position,
+  RunFinishOutput,
   TrapInstallOutput,
   TrapInstance,
   TrapTriggerOutput,
@@ -1101,16 +1102,19 @@ class MazeScene extends Phaser.Scene {
       duration: BASE_MOVE_DURATION,
       ease: 'Sine.easeOut',
       onComplete: () => {
-        // 주의: 여기서 isMoving을 바로 false로 풀면 안 됨 — 설치형 함정(trap.trigger)과
-        // 미스터리 박스(item.pickup)의 서버 응답을 기다리는 동안(비동기) 방향키 입력이 다시
-        // 받아들여져서, 리스폰 함정처럼 위치를 강제로 되돌리는 효과와 그 사이에 시작된 새
-        // 이동 트윈이 서로 충돌해 캐릭터가 엉뚱한 위치에 멈춰 있다가 다음 키 입력에야 제자리로
-        // 튀는 버그가 있었음. isMoving 해제는 resolveArrival이 두 응답을 모두 받은 뒤 한
-        // 곳에서만 하도록 옮김(슬라이드 함정은 자기가 다시 잠그고 스스로 풂).
         // 발자국 기록은 골인 여부와 무관하게 항상 남긴다.
         this.queueFootprint(targetX, targetY);
 
         if (this.checkGoalReached(targetX, targetY)) return; // 골인했으면 함정 확인 없이 종료
+
+        // 조작감 개선(2026-07-13, docs/wbs.md 72행): 트윈이 끝나면 설치형 함정(trap.trigger)/
+        // 미스터리 박스(item.pickup) 서버 응답을 기다리지 않고 곧바로 다음 입력을 받는다.
+        // 예전엔 resolveArrival이 두 응답을 모두 받은 뒤에야 isMoving을 풀어서, 실배포 환경의
+        // 네트워크 왕복이 매 칸 조작감 지연으로 그대로 이어졌다. 판정이 늦게 도착해 이미 다음
+        // 이동이 진행 중이더라도 안전하도록 applyRespawnTrap/applySlideTrap이 killTweensOf로
+        // 진행 중인 이동을 항상 이기게 처리한다(아래 두 함수 참고) — 슬라이드만 예외적으로
+        // 스스로 다시 isMoving을 잠근다.
+        this.isMoving = false;
 
         // 설치형 함정(trap.trigger)과 미스터리 박스(item.pickup)를 함께 판정한다. dx, dy(눌렀던
         // 방향)는 둘 중 하나(또는 둘 다)가 슬라이드 결과일 때 미끄러질 방향을 정하는 데 필요.
@@ -1325,10 +1329,15 @@ class MazeScene extends Phaser.Scene {
 
   // tryMove가 한 칸 이동을 마친 뒤 호출하는 유일한 판정 지점. 설치형 함정(fetchTrapTrigger)과
   // 미스터리 박스(fetchItemEncounter)를 Promise.all로 병렬 조회한 뒤, 두 응답이 모두 도착한
-  // 다음에야 쉴드 소모/함정 이펙트 적용/isMoving 해제를 한 곳에서 처리한다 — 예전엔 두 함수가
-  // 각자 독립적으로 isMoving과 hasShield를 건드려서, 어느 쪽 응답이 먼저 오느냐에 따라 결과가
-  // 달라지는 레이스가 있었다(2026-07-13 코드 리뷰로 발견). dx, dy는 함정 결과가 슬라이드일 때
-  // 미끄러질 방향.
+  // 다음에야 쉴드 소모/함정 이펙트 적용을 한 곳에서 처리한다 — 예전엔 두 함수가 각자 독립적으로
+  // isMoving과 hasShield를 건드려서, 어느 쪽 응답이 먼저 오느냐에 따라 결과가 달라지는 레이스가
+  // 있었다(2026-07-13 코드 리뷰로 발견). dx, dy는 함정 결과가 슬라이드일 때 미끄러질 방향.
+  //
+  // isMoving은 더 이상 여기서 다루지 않는다(조작감 개선, 2026-07-13) — tryMove의 트윈 완료
+  // 시점에 이미 풀렸고, 이 함수는 그보다 늦게(네트워크 응답 도착 후) 실행되므로 이미 다음
+  // 이동이 진행 중일 수 있다. respawn/slow처럼 위치·트윈에 개입하는 효과는 각자
+  // (applyRespawnTrap/applySlideTrap) killTweensOf로 진행 중인 이동을 이기고 스스로 상태를
+  // 정리한다.
   private async resolveArrival(x: number, y: number, dx: number, dy: number) {
     // 이번 이동 "시작 시점"의 쉴드 보유 스냅샷 — 이 판정 도중 새로 주운 쉴드(아래 outcome:'item'
     // && type:'shield')가 같은 이동의 함정 판정에 소급 적용되지 않게 한다.
@@ -1373,11 +1382,7 @@ class MazeScene extends Phaser.Scene {
     }
 
     if (resolution.effectsToApply.includes('slow')) {
-      this.applySlideTrap(dx, dy); // 슬라이드는 자기가 다시 isMoving = true로 잠그고 끝날 때 스스로 풂
-    } else {
-      // 이번 이동에 대한 isMoving 해제는 오직 이 한 줄뿐 — fetchTrapTrigger/fetchItemEncounter는
-      // 더 이상 isMoving을 건드리지 않는다.
-      this.isMoving = false;
+      this.applySlideTrap(dx, dy); // 슬라이드는 killTweensOf로 진행 중인 이동을 이기고 스스로 다시 잠금
     }
   }
 
@@ -1762,6 +1767,11 @@ class MazeScene extends Phaser.Scene {
   // 효과: 밟으면 방금 누르고 있던 방향으로, 벽에 부딪힐 때까지 자동으로 한 칸씩 계속 미끄러짐.
   // 단, 미끄러지는 도중 "다른" 방향키를 누르면 그 자리에서 탈출 가능 (팀원 피드백 반영).
   private applySlideTrap(dx: number, dy: number) {
+    // 조작감 개선(2026-07-13)으로 isMoving이 트윈 완료 즉시 풀리면서, 이 함수가 실제로
+    // 불릴 땐(네트워크 응답 도착 후) 이미 다음 이동 트윈이 진행 중일 수 있다. 그 트윈을
+    // 먼저 죽여서 슬라이드가 항상 이기게 한다(applyRespawnTrap과 동일한 목적).
+    this.tweens.killTweensOf(this.playerImg);
+
     this.playSfx('trapSlide');
     this.flashPlayer(TRAP_COLORS.slow);
     this.isSliding = true; // 미끄러지는 동안엔 다른 함정 효과보다 슬라이드 이미지를 우선 표시
@@ -1849,6 +1859,12 @@ class MazeScene extends Phaser.Scene {
   // + 플레이테스트 결과 반영: 위치뿐 아니라 지금까지 밝힌 길도 함께 초기화해서 페널티를 더 크게 함
   // (traps.md 원안은 "위치만" 리셋이었으나, 벌칙감이 부족해 시야차단 함정처럼 탐색 기록도 리셋하도록 조정).
   private applyRespawnTrap() {
+    // 조작감 개선(2026-07-13)으로 isMoving이 트윈 완료 즉시 풀리면서, 이 함수가 실제로
+    // 불릴 땐(네트워크 응답 도착 후) 이미 다음 이동 트윈이 진행 중일 수 있다. 그 트윈을
+    // 먼저 죽이지 않으면 아래에서 강제로 맞추는 playerImg 좌표를 트윈이 다음 프레임에
+    // 다시 덮어써서 캐릭터가 엉뚱한 위치에서 튀는 예전 버그가 재발한다.
+    this.tweens.killTweensOf(this.playerImg);
+
     this.playSfx('trapRespawn');
     this.flashPlayerTrap('respawn', RESPAWN_FLASH_MS);
 
@@ -1891,6 +1907,11 @@ class MazeScene extends Phaser.Scene {
 
     // 위치와 시야 상태가 둘 다 바뀌었으니 다시 계산
     this.updateFog();
+
+    // killTweensOf로 죽인 이동 트윈의 onComplete(그 이동의 resolveArrival 호출)는 실행되지
+    // 않으므로, 그 이동이 걸어뒀을 isMoving=true를 여기서 대신 풀어준다. 이미 false였다면
+    // (응답이 늦지 않아 다음 이동이 아직 안 시작된 일반적인 경우) 아무 영향 없는 재설정이다.
+    this.isMoving = false;
   }
 
   // 3. 시야차단 함정 — traps.md/vision-system.md: 지금까지 밝힌 길이 다시 안개로 덮이고,
