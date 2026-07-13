@@ -28,6 +28,9 @@ screenshot*.png
 # 임소리 개인 전용 폴더 (팀과 공유 안 함)
 personal-sori/
 
+# Claude Code 백그라운드 작업용 git worktree (개인 작업공간, 커밋 대상 아님)
+.claude/worktrees/
+
 # OS
 .DS_Store
 Thumbs.db
