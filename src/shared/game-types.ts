@@ -14,6 +14,7 @@ export type ItemType = 'flashlight' | 'shield' | 'detector' | 'trapInstall';
 export type LeaderboardEntry = {
   userId: string;
   username: string;
+  steps: number;
   clearTimeMs: number;
   rank: number;
 };
@@ -51,8 +52,11 @@ export type ItemPickupOutput =
   | { picked: true; outcome: 'item'; type: ItemType; revealedTraps?: TrapInstance[] }
   | { picked: true; outcome: 'trap'; type: TrapType };
 
-export type RunFinishInput = { mapId: string; clearTimeMs: number };
+// 랭킹은 steps(성공 이동 칸 수) 1차, clearTimeMs 2차(동점 타이브레이크) 기준.
+export type RunFinishInput = { mapId: string; steps: number; clearTimeMs: number };
 export type RunFinishOutput = { rank: number; isNewRecord: boolean };
 
 export type LeaderboardGetInput = { mapId: string };
 export type LeaderboardGetOutput = { entries: LeaderboardEntry[] };
+
+export type UserMeOutput = { userId: string };

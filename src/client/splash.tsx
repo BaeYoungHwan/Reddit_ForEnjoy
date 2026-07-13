@@ -11,6 +11,7 @@ import {
 } from 'react';
 import { createRoot } from 'react-dom/client';
 import { useLeaderboard } from './hooks/useLeaderboard';
+import { useMyUserId } from './hooks/useMyUserId';
 import { angleBetween, buildMazeBackground, findPath, tileToPercent } from './mazePattern';
 import { formatClearTime } from './format';
 import { getMazeMap } from '../shared/maps';
@@ -568,29 +569,105 @@ const Loadout = ({ onBack }: { onBack: () => void }) => {
   );
 };
 
-const PODIUM_MEDAL: Record<number, string> = { 1: '🥇', 2: '🥈', 3: '🥉' };
+const PODIUM_MEDAL: Record<number, string> = { 2: '🥈', 3: '🥉' };
 const PODIUM_HEIGHT: Record<number, string> = { 1: 'h-24', 2: 'h-16', 3: 'h-12' };
 const PODIUM_ORDER = [2, 1, 3];
 
-const PodiumSlot = ({ place, entry }: { place: number; entry: LeaderboardEntry | undefined }) => (
-  <div className="flex flex-col items-center gap-1 w-20">
-    <span className="text-xl">{PODIUM_MEDAL[place]}</span>
-    <span className="text-xs text-slate-300 truncate w-full text-center">{entry?.username ?? '-'}</span>
-    <span className="font-mono text-[10px] text-amber-300 [text-shadow:0_0_6px_rgba(252,211,77,0.5)]">
-      {entry ? formatClearTime(entry.clearTimeMs) : '--:--'}
-    </span>
+const YouBadge = () => (
+  <span className="absolute -top-2 px-1.5 py-0.5 rounded-full bg-sky-500 text-white text-[9px] font-black tracking-wide shadow-[0_0_8px_rgba(56,189,248,0.7)]">
+    YOU
+  </span>
+);
+
+const PodiumSlot = ({
+  place,
+  entry,
+  isMe,
+}: {
+  place: number;
+  entry: LeaderboardEntry | undefined;
+  isMe: boolean;
+}) => {
+  const isFirst = place === 1;
+  return (
     <div
-      className={`w-full ${PODIUM_HEIGHT[place]} bg-gradient-to-b from-slate-700 to-slate-800 rounded-t-lg border-t-2 border-slate-600 shadow-[inset_0_2px_2px_rgba(255,255,255,0.08)] flex items-start justify-center pt-1`}
+      className={`relative flex flex-col items-center gap-1 w-20 animate-row-in ${isFirst ? 'z-10' : ''}`}
+      style={{ animationDelay: `${(place - 1) * 90}ms` }}
     >
-      <span className="font-display text-lg text-slate-300">{place}</span>
+      {isMe && entry ? <YouBadge /> : null}
+      {isFirst ? (
+        <div className="flex items-center justify-center w-11 h-11 rounded-full bg-gradient-to-b from-amber-300 to-amber-600 border-2 border-amber-200 text-2xl animate-glow-pulse-gold">
+          🏆
+        </div>
+      ) : (
+        <span className="text-xl">{PODIUM_MEDAL[place]}</span>
+      )}
+      <span
+        className={`text-xs truncate w-full text-center ${isMe ? 'text-sky-300 font-bold' : 'text-slate-300'}`}
+      >
+        {entry?.username ?? '-'}
+      </span>
+      <span className="font-mono text-[10px] text-amber-300 [text-shadow:0_0_6px_rgba(252,211,77,0.5)]">
+        {entry ? `${entry.steps} steps` : '--'}
+      </span>
+      <div
+        className={`w-full ${PODIUM_HEIGHT[place]} rounded-t-lg border-t-2 shadow-[inset_0_2px_2px_rgba(255,255,255,0.08)] flex items-start justify-center pt-1 ${
+          isMe
+            ? 'bg-gradient-to-b from-sky-800 to-sky-900 border-sky-400'
+            : 'bg-gradient-to-b from-slate-700 to-slate-800 border-slate-600'
+        }`}
+      >
+        <span className="font-display text-lg text-slate-300">{place}</span>
+      </div>
+    </div>
+  );
+};
+
+const LEADERBOARD_TOP_N = 5;
+
+const LeaderboardRow = ({
+  entry,
+  isMe,
+  delayMs,
+}: {
+  entry: LeaderboardEntry;
+  isMe: boolean;
+  delayMs: number;
+}) => (
+  <div
+    className={`relative flex items-center gap-3 rounded-xl px-3 py-2 animate-row-in ${
+      isMe ? 'bg-sky-900/50 border border-sky-500/60' : 'bg-slate-800/50'
+    }`}
+    style={{ animationDelay: `${delayMs}ms` }}
+  >
+    <RankBadge rank={entry.rank} />
+    <span className={`text-sm font-medium truncate flex-1 ${isMe ? 'text-sky-300 font-bold' : 'text-slate-200'}`}>
+      {entry.username}
+    </span>
+    {isMe ? (
+      <span className="px-1.5 py-0.5 rounded-full bg-sky-500 text-white text-[9px] font-black tracking-wide shrink-0">
+        YOU
+      </span>
+    ) : null}
+    <div className="flex flex-col items-end">
+      <span className="font-mono text-xs text-amber-300 bg-black/40 border border-slate-700 rounded-md px-2 py-1 [text-shadow:0_0_6px_rgba(252,211,77,0.5)]">
+        {entry.steps} steps
+      </span>
+      <span className="font-mono text-[10px] text-slate-500 mt-0.5">{formatClearTime(entry.clearTimeMs)}</span>
     </div>
   </div>
 );
 
 const Leaderboard = ({ onBack }: { onBack: () => void }) => {
   const { entries, loading, error, reload } = useLeaderboard(DEFAULT_MAP_ID);
-  const podiumEntries = entries.slice(0, 3);
-  const restEntries = entries.slice(3);
+  const myUserId = useMyUserId();
+  // 랭킹은 1~5위권만 보여준다. 내 기록이 5위 밖이면(=myEntryBelowTop) 구분선과 함께
+  // 목록 맨 아래에 따로 붙여, 내가 몇 등인지는 순위가 안 잘려도 항상 볼 수 있게 한다.
+  const topEntries = entries.slice(0, LEADERBOARD_TOP_N);
+  const podiumEntries = topEntries.slice(0, 3);
+  const restEntries = topEntries.slice(3);
+  const myEntry = entries.find((entry) => entry.userId === myUserId);
+  const myEntryBelowTop = myEntry && myEntry.rank > LEADERBOARD_TOP_N ? myEntry : null;
 
   return (
     <div className="w-full flex flex-col gap-4">
@@ -608,7 +685,18 @@ const Leaderboard = ({ onBack }: { onBack: () => void }) => {
         <h1 className="font-display text-lg tracking-wide text-white">Today&apos;s Leaderboard</h1>
       </div>
 
-      <div className="flex flex-col gap-3 min-h-[160px] justify-center">
+      <div className="relative flex flex-col gap-3 min-h-[160px] justify-center">
+        {/* 순위표 전체를 게임다운 느낌으로 — 시상대 위쪽엔 은은한 금빛 스포트라이트,
+            패널 전체엔 아주 옅은 대각선 패턴을 깔아 단조로운 카드 UI를 탈피한다. */}
+        <div
+          aria-hidden
+          className="pointer-events-none absolute -inset-4 -z-10"
+          style={{
+            background:
+              'radial-gradient(ellipse 140% 55% at 50% 0%, rgba(252,211,77,0.16), transparent 70%), repeating-linear-gradient(135deg, rgba(255,255,255,0.035) 0px, rgba(255,255,255,0.035) 2px, transparent 2px, transparent 14px)',
+          }}
+        />
+
         {loading ? <p className="text-sm text-slate-500 text-center">Loading...</p> : null}
         {error ? (
           <div className="flex flex-col items-center gap-2">
@@ -634,22 +722,32 @@ const Leaderboard = ({ onBack }: { onBack: () => void }) => {
         {!loading && !error && podiumEntries.length > 0 ? (
           <div className="flex items-end justify-center gap-2">
             {PODIUM_ORDER.map((place) => (
-              <PodiumSlot key={place} place={place} entry={podiumEntries[place - 1]} />
+              <PodiumSlot
+                key={place}
+                place={place}
+                entry={podiumEntries[place - 1]}
+                isMe={podiumEntries[place - 1]?.userId === myUserId}
+              />
             ))}
           </div>
         ) : null}
 
         {restEntries.length > 0 ? (
           <div className="flex flex-col gap-1.5">
-            {restEntries.map((entry) => (
-              <div key={entry.userId} className="flex items-center gap-3 bg-slate-800/50 rounded-xl px-3 py-2">
-                <RankBadge rank={entry.rank} />
-                <span className="text-slate-200 text-sm font-medium truncate flex-1">{entry.username}</span>
-                <span className="font-mono text-xs text-amber-300 bg-black/40 border border-slate-700 rounded-md px-2 py-1 [text-shadow:0_0_6px_rgba(252,211,77,0.5)]">
-                  {formatClearTime(entry.clearTimeMs)}
-                </span>
-              </div>
+            {restEntries.map((entry, i) => (
+              <LeaderboardRow key={entry.userId} entry={entry} isMe={entry.userId === myUserId} delayMs={i * 60} />
             ))}
+          </div>
+        ) : null}
+
+        {myEntryBelowTop ? (
+          <div className="flex flex-col gap-1.5">
+            <div aria-hidden className="flex items-center gap-2 px-1 text-slate-600">
+              <span className="flex-1 border-t border-slate-700" />
+              <span className="text-xs">⋯</span>
+              <span className="flex-1 border-t border-slate-700" />
+            </div>
+            <LeaderboardRow entry={myEntryBelowTop} isMe delayMs={restEntries.length * 60} />
           </div>
         ) : null}
       </div>

@@ -259,7 +259,7 @@ describe('map.getState 위치 앵커 (8.1 회귀 테스트)', () => {
     const caller = createCaller({ userId: 'user-f' });
     await caller.map.getState({ mapId: 'map-1' });
     await caller.trap.trigger({ mapId: 'map-1', x: 1, y: 0 }); // 앵커: (1,0)
-    await caller.run.finish({ mapId: 'map-1', clearTimeMs: 12345 });
+    await caller.run.finish({ mapId: 'map-1', steps: 10, clearTimeMs: 12345 });
 
     await caller.map.getState({ mapId: 'map-1' }); // 새 런 — 앵커가 (0,0)으로 재초기화됨
 
@@ -526,15 +526,17 @@ describe('leaderboard.get username 매핑', () => {
   it('reddit.getUserById로 조회된 username을 entry에 채운다', async () => {
     mocks.users.set('user-g', { username: 'maze-runner' });
     const caller = createCaller({ userId: 'user-g' });
-    await caller.run.finish({ mapId: 'map-1', clearTimeMs: 5000 });
+    await caller.run.finish({ mapId: 'map-1', steps: 20, clearTimeMs: 5000 });
 
     const { entries } = await caller.leaderboard.get({ mapId: 'map-1' });
-    expect(entries).toEqual([{ userId: 'user-g', username: 'maze-runner', clearTimeMs: 5000, rank: 1 }]);
+    expect(entries).toEqual([
+      { userId: 'user-g', username: 'maze-runner', steps: 20, clearTimeMs: 5000, rank: 1 },
+    ]);
   });
 
   it('탈퇴/정지 등으로 조회가 안 되는 유저는 userId로 폴백한다', async () => {
     const caller = createCaller({ userId: 'user-h' });
-    await caller.run.finish({ mapId: 'map-1', clearTimeMs: 6000 });
+    await caller.run.finish({ mapId: 'map-1', steps: 20, clearTimeMs: 6000 });
 
     const { entries } = await caller.leaderboard.get({ mapId: 'map-1' });
     expect(entries[0]?.username).toBe('user-h');
@@ -546,17 +548,60 @@ describe('leaderboard.get username 매핑', () => {
     mocks.users.set('user-i', { username: 'runner-i' });
     mocks.rejectIds.add('user-j');
 
-    await createCaller({ userId: 'user-i' }).run.finish({ mapId: 'map-1', clearTimeMs: 4000 });
-    await createCaller({ userId: 'user-j' }).run.finish({ mapId: 'map-1', clearTimeMs: 5000 });
+    await createCaller({ userId: 'user-i' }).run.finish({ mapId: 'map-1', steps: 10, clearTimeMs: 4000 });
+    await createCaller({ userId: 'user-j' }).run.finish({ mapId: 'map-1', steps: 20, clearTimeMs: 5000 });
 
     const { entries } = await createCaller({ userId: 'user-i' }).leaderboard.get({ mapId: 'map-1' });
 
     expect(entries).toEqual([
-      { userId: 'user-i', username: 'runner-i', clearTimeMs: 4000, rank: 1 },
-      { userId: 'user-j', username: 'user-j', clearTimeMs: 5000, rank: 2 },
+      { userId: 'user-i', username: 'runner-i', steps: 10, clearTimeMs: 4000, rank: 1 },
+      { userId: 'user-j', username: 'user-j', steps: 20, clearTimeMs: 5000, rank: 2 },
     ]);
     expect(errorSpy).toHaveBeenCalledTimes(1);
 
     errorSpy.mockRestore();
+  });
+
+  it('걸음 수가 랭킹 1차 기준이다 — 시간이 더 걸려도 걸음 수가 적으면 상위', async () => {
+    await createCaller({ userId: 'user-fewer-steps' }).run.finish({
+      mapId: 'map-1',
+      steps: 10,
+      clearTimeMs: 60000,
+    });
+    await createCaller({ userId: 'user-more-steps' }).run.finish({
+      mapId: 'map-1',
+      steps: 20,
+      clearTimeMs: 1000,
+    });
+
+    const { entries } = await createCaller({ userId: 'user-fewer-steps' }).leaderboard.get({
+      mapId: 'map-1',
+    });
+
+    expect(entries.map((e) => e.userId)).toEqual(['user-fewer-steps', 'user-more-steps']);
+  });
+
+  it('걸음 수가 같으면 클리어 시간이 짧은 쪽이 상위(2차 타이브레이크)', async () => {
+    await createCaller({ userId: 'user-slower' }).run.finish({
+      mapId: 'map-1',
+      steps: 15,
+      clearTimeMs: 9000,
+    });
+    await createCaller({ userId: 'user-faster' }).run.finish({
+      mapId: 'map-1',
+      steps: 15,
+      clearTimeMs: 3000,
+    });
+
+    const { entries } = await createCaller({ userId: 'user-faster' }).leaderboard.get({ mapId: 'map-1' });
+
+    expect(entries.map((e) => e.userId)).toEqual(['user-faster', 'user-slower']);
+  });
+});
+
+describe('user.me', () => {
+  it('현재 컨텍스트의 userId를 그대로 반환한다', async () => {
+    const caller = createCaller({ userId: 'user-self' });
+    await expect(caller.user.me()).resolves.toEqual({ userId: 'user-self' });
   });
 });
