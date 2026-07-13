@@ -348,13 +348,15 @@ export const appRouter = t.router({
         const prevScore = await redis.zScore(key, ctx.userId);
         const isNewRecord = prevScore === undefined || score < prevScore;
         if (isNewRecord) {
-          await redis.zAdd(key, { member: ctx.userId, score });
-          await redis.expire(key, DATA_SAFETY_TTL_SECONDS);
           // 스코어는 랭킹 정렬 전용 인코딩 값이라 화면에 표시할 원본 걸음 수/시간은
-          // leaderboardDetailKey에 따로 보관한다 (leaderboard.get 참고).
+          // leaderboardDetailKey에 따로 보관한다(leaderboard.get 참고). 두 키가 원자적 트랜잭션으로
+          // 묶여있지 않아 동시 요청 사이 레이스가 있을 수 있는데, detail을 zAdd보다 먼저 써두면
+          // "zRange가 새 스코어를 보는 시점"엔 detail이 이미 존재할 가능성이 높아져 그 창이 줄어든다.
           const detailKey = leaderboardDetailKey(mapId, date);
           await redis.hSet(detailKey, { [ctx.userId]: JSON.stringify({ steps, clearTimeMs }) });
           await redis.expire(detailKey, DATA_SAFETY_TTL_SECONDS);
+          await redis.zAdd(key, { member: ctx.userId, score });
+          await redis.expire(key, DATA_SAFETY_TTL_SECONDS);
         }
 
         const rank = await redis.zRank(key, ctx.userId);
@@ -384,14 +386,16 @@ export const appRouter = t.router({
           }
           const username = result?.status === 'fulfilled' ? result.value?.username : undefined;
           // detail 해시는 스코어와 별도 쓰기라 이론상 순간적으로 어긋날 수 있어(레이스), 없으면
-          // 0/스코어값으로 방어적으로 폴백한다 — 화면이 깨지는 것보단 낫다.
+          // 0으로 방어적으로 폴백한다. entry.score는 steps*TIME_SLOT_MS+clearTimeMs로 인코딩된
+          // 정렬 전용 값이라 그대로 clearTimeMs 자리에 쓰면 터무니없이 큰 시간이 표시된다 —
+          // 실제로 이 폴백 자체가 버그였던 적이 있어(리뷰에서 발견) 반드시 0으로 폴백해야 한다.
           const rawDetail = details[entry.member];
           const detail = rawDetail ? (JSON.parse(rawDetail) as { steps: number; clearTimeMs: number }) : null;
           return {
             userId: entry.member,
             username: username ?? entry.member,
             steps: detail?.steps ?? 0,
-            clearTimeMs: detail?.clearTimeMs ?? entry.score,
+            clearTimeMs: detail?.clearTimeMs ?? 0,
             rank: index + 1,
           };
         }),
