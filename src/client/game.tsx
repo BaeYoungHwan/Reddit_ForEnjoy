@@ -1,8 +1,9 @@
 import './index.css';
 
 import Phaser from 'phaser';
-import { StrictMode, useEffect } from 'react';
+import { StrictMode, useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { createRoot } from 'react-dom/client';
+import { exitExpandedMode } from '@devvit/web/client';
 import { getMazeMap } from '../shared/maps';
 import { buildRockWallTileDataUri } from './mazePattern';
 import { computeClothWaveX } from './goalFlagWave';
@@ -38,6 +39,11 @@ const MAP_ID = 'map-1';
 // 웹뷰(배포/playtest)는 절대 localhost로 안 뜨므로, 에러 종류를 추측하는 것보다 훨씬 확실한
 // 신호다(2026-07-12, attemptInstall의 에러 처리를 상황별로 나누기 위해 도입 — 임소리 확인).
 const IS_LOCAL_PREVIEW = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+
+// 골인 후 처음 화면(스플래시)으로 돌아갈 방법이 없다는 피드백(2026-07-13) 반영 —
+// Phaser 씬은 DOM 버튼을 직접 못 그려서(캔버스), 순위 공개가 끝났을 때 이 이벤트를
+// window에 쏘고 React(App 컴포넌트)가 받아서 "Back to Menu" 버튼을 캔버스 위에 띄운다.
+const MAZE_FINISHED_EVENT = 'maze:finished';
 
 const TILE_SIZE = 64; // 타일 한 칸의 픽셀 크기 (정사각형 한 변의 길이)
 
@@ -2382,6 +2388,10 @@ class MazeScene extends Phaser.Scene {
         ease: 'Sine.easeOut',
       });
     }
+
+    // 순위 공개까지 끝난 시점에 "처음 화면으로 돌아가기" 버튼을 띄우라고 React 쪽에 알림
+    // (Phaser 캔버스는 DOM 버튼을 못 그리므로 App 컴포넌트가 이 이벤트를 받아 렌더링한다).
+    window.dispatchEvent(new CustomEvent(MAZE_FINISHED_EVENT));
   }
 
   // 골인 시 서버에 클리어 기록을 보내 리더보드에 반영한다. 2026-07-13까지 이 호출 자체가
@@ -2544,7 +2554,31 @@ const phaserConfig: Phaser.Types.Core.GameConfig = {
   scene: [MazeScene],
 };
 
+// 골인 후 순위 공개가 끝나면(MAZE_FINISHED_EVENT) 뜨는 버튼 — 스플래시(초기 화면)로
+// 돌아갈 방법이 없다는 피드백 반영. requestExpandedMode로 게임에 들어왔으므로 그 반대인
+// exitExpandedMode를 호출해 인라인(스플래시) 프레젠테이션으로 되돌아간다.
+const BackToMenuButton = () => (
+  <button
+    className="absolute bottom-8 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 px-5 py-2.5 rounded-full bg-slate-800/90 border-2 border-slate-950 text-slate-100 font-display text-sm shadow-lg cursor-pointer select-none transition active:translate-y-[1px] hover:brightness-110 hover:text-white"
+    onClick={(e: ReactMouseEvent<HTMLButtonElement>) => {
+      try {
+        exitExpandedMode(e.nativeEvent);
+      } catch (err) {
+        // 로컬 프리뷰 등 devvit 런타임 밖에서 game.html에 직접 진입한 경우 실패가 정상
+        // — 다른 mutation들과 동일한 패턴(IS_LOCAL_PREVIEW).
+        console.error('exitExpandedMode 실패 — devvit 환경 밖(로컬 프리뷰 등)에서는 정상', err);
+      }
+    }}
+  >
+    ← Back to Menu
+  </button>
+);
+
 export const App = () => {
+  // 골인 후 순위 공개가 끝났을 때만 true — Phaser 씬(MazeScene.revealRankInfo)이
+  // window에 쏘는 MAZE_FINISHED_EVENT를 받아서 켠다.
+  const [showBackButton, setShowBackButton] = useState(false);
+
   // useEffect(콜백, [])는 "이 컴포넌트가 화면에 처음 나타났을 때 딱 한 번" 실행됨.
   // React가 화면을 그리는 시점과 Phaser 게임이 시작되는 시점을 여기서 이어주는 역할.
   useEffect(() => {
@@ -2556,11 +2590,18 @@ export const App = () => {
     };
   }, []);
 
+  useEffect(() => {
+    const onFinished = () => setShowBackButton(true);
+    window.addEventListener(MAZE_FINISHED_EVENT, onFinished);
+    return () => window.removeEventListener(MAZE_FINISHED_EVENT, onFinished);
+  }, []);
+
   return (
     // Scale.FIT은 부모 요소의 실제 크기를 기준으로 축소 비율을 계산하므로, 부모가 뷰포트
     // 전체를 채우고 있어야(w-screen h-screen) 화면 크기에 맞는 비율이 정확히 나온다.
-    <div className="flex justify-center items-center w-screen h-screen bg-black">
+    <div className="relative flex justify-center items-center w-screen h-screen bg-black">
       <div id="phaser-container" className="w-full h-full" />
+      {showBackButton ? <BackToMenuButton /> : null}
     </div>
   );
 };
