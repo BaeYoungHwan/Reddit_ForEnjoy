@@ -35,7 +35,7 @@ const MAIN_MAP_BACKGROUND = buildMazeBackground(MAIN_MAP);
 
 const WALK_STRIDE = 2;
 const STEP_INTERVAL_SEC = 0.45;
-const WALK_ICON_SIZES = ['w-9 h-9', 'w-10 h-10'];
+const WALK_ICON_SIZES = ['w-5 h-5', 'w-6 h-6'];
 
 const FULL_WALK_PATH = findPath(MAIN_MAP);
 const WALK_TILES = FULL_WALK_PATH.filter(
