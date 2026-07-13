@@ -2011,6 +2011,18 @@ class MazeScene extends Phaser.Scene {
   // 어느 인덱스가 이번에 "새로 생겼는지"/"새로 선택됐는지"를 직접 알려준다. 나머지 슬롯은 평소
   // 처럼 그냥 나타난다(재조회 때마다 매번 팝/펀치가 재생되면 안 되므로).
   private refreshItemSlotsUI(options?: { popInIndex?: number; punchIndex?: number }) {
+    // 팝인/펀치 트윈(160~220ms)이 아직 안 끝난 상태에서 또 refresh가 불리면(예: X 연타)
+    // 곧바로 destroy될 옛 오브젝트를 계속 건드리는 트윈이 남는다 — 크래시는 안 나지만
+    // (destroy된 오브젝트도 평범한 JS 객체라 속성 세팅 자체는 에러 없음) 이 파일의 다른 곳
+    // (wallBumpTween?.stop(), killTweensOf(this.playerImg))과 마찬가지로 새로 그리기 전에
+    // 이전 트윈부터 정리한다(2026-07-14 셀프 리뷰 반영).
+    this.tweens.killTweensOf([
+      ...this.itemSlotBgs,
+      ...this.itemSlotBorders,
+      ...this.itemSlotGlows,
+      ...this.itemSlotIcons,
+      ...this.itemSlotLabels,
+    ]);
     this.itemSlotBgs.forEach((g) => g.destroy());
     this.itemSlotBorders.forEach((r) => r.destroy());
     this.itemSlotGlows.forEach((g) => g.destroy());
