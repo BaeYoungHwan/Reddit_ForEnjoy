@@ -13,6 +13,7 @@ import { LOADOUT_STORAGE_KEY } from './loadout';
 import { resolveTrapEncounters } from './trapResolution';
 import type {
   ItemPickupOutput,
+  ItemUseDetectorOutput,
   Position,
   RunFinishOutput,
   TrapInstallOutput,
@@ -312,8 +313,8 @@ const INSTALL_FAILURE_MESSAGES: Record<InstallFailureReason, string> = {
 
 // items.md 기준 아이템 4종 중 서버 연동된 3종(손전등/쉴드/함정 탐지기) + 클라이언트 전용
 // 'trapInstall'(서버 스폰 데이터가 아직 없어 로컬 폴백 경로로만 테스트 가능 — docs/wbs.md
-// 전체 블로커 참고). 2026-07-10: PR #34로 함정 탐지기 서버 API(item.pickup의 revealedTraps)가
-// 추가돼 'detector'를 여기 포함시킴 — applyDetectorItem 참고.
+// 전체 블로커 참고). 2026-07-13: 함정 탐지기는 item.useDetector로 Z 발동 시점에 라이브
+// 스캔하는 방식으로 바뀜(아래 HeldItem 주석 참고) — applyDetectorItem 참고.
 type ItemType = 'flashlight' | 'shield' | 'trapInstall' | 'detector';
 
 // 아이템 좌표(+로컬 폴백 전용 종류). 2026-07-12: 서버가 미스터리 박스 방식(개별 스폰에
@@ -322,21 +323,19 @@ type ItemType = 'flashlight' | 'shield' | 'trapInstall' | 'detector';
 // 백엔드 없는 로컬 프리뷰 폴백(TEMP_ITEMS/reportItemPickup의 catch)에서만 쓰인다.
 type ItemInstance = { x: number; y: number; type?: ItemType };
 
-// fetchItemEncounter()의 반환 타입 — 미스터리 박스가 없었는지, 아이템으로 나왔는지(부가로
-// revealedTraps가 실릴 수 있음), 함정으로 나왔는지를 구분한다. resolveArrival이 이 결과와
-// fetchTrapTrigger의 설치형 함정 판정을 함께 모아 이펙트 적용/isMoving 해제를 결정한다.
-type ItemEncounter =
-  | { kind: 'none' }
-  | { kind: 'item'; type: ItemType; revealedTraps?: TrapInstance[] | undefined }
-  | { kind: 'trap'; type: TrapType };
+// fetchItemEncounter()의 반환 타입 — 미스터리 박스가 없었는지, 아이템으로 나왔는지, 함정으로
+// 나왔는지를 구분한다. resolveArrival이 이 결과와 fetchTrapTrigger의 설치형 함정 판정을 함께
+// 모아 이펙트 적용/isMoving 해제를 결정한다.
+type ItemEncounter = { kind: 'none' } | { kind: 'item'; type: ItemType } | { kind: 'trap'; type: TrapType };
 
 // 인벤토리 슬롯 하나에 들어가는 데이터(2026-07-13 도입). 쉴드는 즉시무장 예외라 여기 안
-// 들어간다 — type은 flashlight/detector/trapInstall 중 하나. revealedTraps(탐지기 전용):
-// 오라클 방지 설계상 반경 계산은 "실제로 주운 자리" 기준으로 픽업 시점에만 할 수 있어서,
-// 나중에 Z로 쓸 때가 아니라 여기 담는 시점(addHeldItem 호출 시점)에 서버가 이미 계산해준
-// 값을 미리 저장해둔다. trapType(함정 설치 전용): items.md 스펙("줍는 순간 함정 종류 랜덤
-// 결정")을 지키기 위해 Z를 누른 시점이 아니라 습득 시점에 미리 뽑아서 저장해둔다.
-type HeldItem = { type: ItemType; revealedTraps?: TrapInstance[]; trapType?: TrapType };
+// 들어간다 — type은 flashlight/detector/trapInstall 중 하나. 탐지기(detector)는 반경을
+// 미리 저장해두지 않는다 — Z로 쓰는 바로 그 순간 item.useDetector를 호출해 그 자리 기준으로
+// 매번 새로 스캔한다(주운 자리 기준 낡은 정보를 보여주거나, 그 사이 함정이 사라져도 반영이
+// 안 되는 문제를 피하기 위함 — 2026-07-13 임소리 설계). trapType(함정 설치 전용): items.md
+// 스펙("줍는 순간 함정 종류 랜덤 결정")을 지키기 위해 Z를 누른 시점이 아니라 습득 시점에
+// 미리 뽑아서 저장해둔다.
+type HeldItem = { type: ItemType; trapType?: TrapType };
 
 const ITEM_COLORS: Record<ItemType, number> = {
   flashlight: 0xfff59d, // 옅은 노랑
@@ -567,6 +566,10 @@ class MazeScene extends Phaser.Scene {
   // 잠금 플래그. isMoving과 같은 목적이지만 "이동 애니메이션"이 아니라 "네트워크 요청 1건"을
   // 잠근다는 점이 다름.
   private isInstalling = false;
+
+  // item.useDetector 요청이 응답 오기 전에 Z를 연타해 중복 요청이 나가는 것을 막는 잠금
+  // 플래그(isInstalling과 동일한 목적).
+  private isUsingDetector = false;
 
   // 지금 적용 중인 시야 반경. 평소엔 VISION_RADIUS와 같고, 시야차단 함정에 걸리면 잠깐 줄어듦.
   private currentVisionRadius = VISION_RADIUS;
@@ -807,7 +810,7 @@ class MazeScene extends Phaser.Scene {
 
     // 스플래시 로드아웃 화면에서 고른 아이템 지급 — updateFog 이후에 호출해야 손전등이
     // 즉시 넓힌 시야가 초기 안개 계산에 덮이지 않는다.
-    this.applyLoadout();
+    void this.applyLoadout();
 
     // 서버에 위치 앵커를 초기화하고 내가 설치한 함정 목록을 받아온다 (fire-and-forget).
     void this.loadServerState();
@@ -1375,11 +1378,6 @@ class MazeScene extends Phaser.Scene {
       const localItem = this.remainingItems.find((item) => item.x === x && item.y === y);
       if (!localItem) return { picked: false };
 
-      // revealedTraps: undefined로 명시 — 백엔드 없는 로컬 폴백에선 다른 유저 함정을 알 방법이
-      // 없어(revealNearbyTraps는 서버 전용 로직) 탐지기를 주워도 아무것도 안 밝혀지는 게
-      // 맞는 동작.
-      // (2026-07-11: 로컬 테스트용으로 반경 근처에 가짜 함정 좌표를 만들어 보여주는 시도를
-      // 했었으나, 맵 경계 밖으로 나갈 수 있는 등 임의성이 커서 제거하고 원래 방식으로 되돌림)
       // 2026-07-12: 서버가 미스터리 박스로 바뀌며 outcome:'item'|'trap' 판정이 추가됐지만,
       // 로컬 폴백은 실제 확률 풀(gameConfig.ts MYSTERY_BOX_OUTCOME_POOL)을 재현하지 않고
       // 기존처럼 TEMP_ITEMS에 박아둔 고정 타입을 outcome:'item'으로 그대로 반환한다 — 백엔드
@@ -1434,7 +1432,7 @@ class MazeScene extends Phaser.Scene {
     this.itemRects[y]![x] = undefined;
 
     if (result.outcome === 'trap') return { kind: 'trap', type: result.type };
-    return { kind: 'item', type: result.type, revealedTraps: result.revealedTraps };
+    return { kind: 'item', type: result.type };
   }
 
   // tryMove가 한 칸 이동을 마친 뒤 호출하는 유일한 판정 지점. 설치형 함정(fetchTrapTrigger)과
@@ -1490,9 +1488,9 @@ class MazeScene extends Phaser.Scene {
       // else로 잡는다. 'detector'를 명시적으로 분기하지 않으면 이 else가 실수로 삼켜서 함정
       // 설치 아이템으로 오판정되는 버그가 있었음(2026-07-10 발견).
       if (itemEncounter.type === 'detector') {
-        // 반경 계산은 서버가 이 픽업 시점(오라클 방지용 위치 검증을 이미 거친 이벤트)에 미리
-        // 해준 것 — Z로 나중에 쓸 때가 아니라 지금 그대로 저장해둔다(HeldItem 주석 참고).
-        this.addHeldItem({ type: 'detector', revealedTraps: itemEncounter.revealedTraps ?? [] });
+        // 반경 계산은 여기서 하지 않는다 — 서버가 충전(사용 가능 횟수)만 1 늘려두고, 실제
+        // 스캔은 Z를 눌러 쓰는 순간 item.useDetector가 그 자리 기준으로 새로 한다.
+        this.addHeldItem({ type: 'detector' });
       } else if (itemEncounter.type === 'shield') {
         // 함정이 안 보이는 게임이라 "언제 쓸지" 고를 방법이 없다 — 슬롯에 미루지 않고 줍는
         // 즉시 무장(applyLoadout과 동일한 이유).
@@ -1712,9 +1710,9 @@ class MazeScene extends Phaser.Scene {
   // 관리 — 표시 시간이 끝나면 흔적 없이 사라져야 하고, 그 사이 실제 함정 판정(trap.trigger)
   // 로직에는 전혀 관여하지 않는 순수 시각 효과다.
   //
-  // 2026-07-11: "보유했다가 X키로 확인"하는 방식을 잠깐 시도했다가(pendingDetectorReveal +
-  // useDetector로 분리) 임소리가 다시 "밟는 즉시 자동 공개"로 되돌리기로 확정 — 픽업과 공개를
-  // 다시 이 함수 하나로 합침.
+  // 2026-07-13: Z로 쓰는 시점(useSelectedItem)에 item.useDetector를 호출해 그 자리 기준으로
+  // 매번 새로 스캔한 결과를 넘겨받는다 — 주운 자리 기준 낡은 정보를 보여주거나, 그 사이 다른
+  // 유저가 함정을 치워도 반영이 안 되는 문제를 피하기 위함(배영환/임소리 논의로 확정).
   private applyDetectorItem(revealedTraps: TrapInstance[]) {
     // 공용 픽업음(itemPickup) 대신 detectorScan만 재생 — playSfx는 "이벤트 효과음끼리 겹치면
     // 최신 것만 들리게" 직전 소리를 끊는데, 둘을 곧바로 이어서 틀면 itemPickup이 시작하자마자
@@ -1905,10 +1903,37 @@ class MazeScene extends Phaser.Scene {
       this.applyFlashlightItem();
       this.removeHeldItem(item);
     } else if (item.type === 'detector') {
-      this.applyDetectorItem(item.revealedTraps ?? []);
-      this.removeHeldItem(item);
+      void this.attemptUseDetector(item);
     } else {
       void this.attemptInstall(item);
+    }
+  }
+
+  // Z로 탐지기 아이템을 사용했을 때(useSelectedItem) 호출됨. item.useDetector로 "지금 서
+  // 있는 자리" 기준 반경을 그 순간 새로 스캔한다 — attemptInstall과 동일하게 서버 응답(비동기)을
+  // 기다려야 해서 성공했을 때만 소모하고, 실패(충전 없음 등)하면 계속 들고 있다가 재시도 가능.
+  private async attemptUseDetector(item: HeldItem) {
+    if (this.hasFinished || this.isUsingDetector) return;
+
+    this.isUsingDetector = true;
+    try {
+      const { revealedTraps }: ItemUseDetectorOutput = await trpc.item.useDetector.mutate({ mapId: MAP_ID });
+      this.removeHeldItem(item);
+      this.applyDetectorItem(revealedTraps);
+    } catch (err) {
+      if (!IS_LOCAL_PREVIEW) {
+        // 실서버가 있는 환경에서 진짜로 실패한 경우(충전 소진 등) — 성공한 척하지 않고
+        // 정직하게 실패로 안내한다. heldItems에서 안 지웠으니 다른 슬롯 선택 후 다시 시도 가능.
+        console.error('item.useDetector 실패(실서버 환경)', err);
+        this.showFloatingLabel('Detector unavailable');
+      } else {
+        // 백엔드 없는 로컬 프리뷰용 폴백 — 다른 유저 함정을 알 방법이 없으므로 빈 목록으로 처리.
+        console.error('item.useDetector 실패 — 로컬 프리뷰용 빈 결과로 대체', err);
+        this.removeHeldItem(item);
+        this.applyDetectorItem([]);
+      }
+    } finally {
+      this.isUsingDetector = false;
     }
   }
 
@@ -1946,7 +1971,7 @@ class MazeScene extends Phaser.Scene {
   // 단 쉴드는 예외(같은 날 되돌림): 함정이 안 보이는 게임이라 "언제 Z로 쓸지" 판단할 방법이
   // 없다(임소리 피드백) — 쉴드는 애초에 지속시간도 없이 다음 함정을 맞을 때까지 무기한
   // 대기하는 반응형이라, 슬롯에 넣고 미루기보다 줍는 즉시 무장해두는 쪽이 항상 이득이다.
-  private applyLoadout() {
+  private async applyLoadout() {
     let saved: string | null;
     try {
       saved = localStorage.getItem(LOADOUT_STORAGE_KEY);
@@ -1957,10 +1982,21 @@ class MazeScene extends Phaser.Scene {
     if (saved === 'flashlight') this.addHeldItem({ type: 'flashlight' });
     else if (saved === 'shield') this.applyShieldItem();
     else if (saved === 'trapDetector') {
-      // 함정 탐지기는 반경 계산을 "실제로 주운 자리" 기준으로만 할 수 있는데, 로드아웃 지급은
-      // 픽업 이벤트 자체가 없어 기준 좌표가 없다 — 배영환님과 새 서버 API(현재 위치 기준 스캔)
-      // 논의 중이라 아직 슬롯에 안 채우고 기존처럼 안내만 띄운다.
-      this.showFloatingLabel('Trap Detector coming soon');
+      // 로드아웃 지급은 localStorage만 읽는 클라이언트 로컬 처리라 서버가 몰랐다 — 탐지기는
+      // 1회성을 서버가 강제해야 하는 민감 정보라, item.claimLoadout으로 서버에도 충전을
+      // 등록한 뒤에야 슬롯에 채운다(배영환/임소리 논의로 확정, 2026-07-13).
+      try {
+        const { granted } = await trpc.item.claimLoadout.mutate({ mapId: MAP_ID, loadoutId: 'trapDetector' });
+        if (granted) this.addHeldItem({ type: 'detector' });
+      } catch (err) {
+        if (IS_LOCAL_PREVIEW) {
+          // 백엔드 없는 로컬 프리뷰 — 서버 충전 등록 없이도 로컬에서 슬롯 배선을 테스트할 수 있게.
+          console.error('item.claimLoadout 실패 — 로컬 프리뷰용으로 그대로 지급', err);
+          this.addHeldItem({ type: 'detector' });
+        } else {
+          console.error('item.claimLoadout 실패(실서버 환경) — 탐지기 미지급', err);
+        }
+      }
     }
   }
 
