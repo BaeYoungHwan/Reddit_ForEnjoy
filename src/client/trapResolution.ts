@@ -19,8 +19,8 @@ export const SHIELD_BLOCK_PRIORITY: ShieldPriority = 'installed';
 
 export type TrapResolution = {
   shieldConsumedFor: 'installed' | 'mystery' | null;
-  // 쉴드로 막힌 것 제외, 타입 중복 제거(둘 다 slow인 경우 슬라이드 중복 시작 방지), 항상
-  // installed → mystery 순서.
+  // 쉴드로 막힌 것 제외, 타입 중복 제거(둘 다 slow인 경우 슬라이드 중복 시작 방지), respawn과
+  // slow가 같이 있으면 slow 제거(아래 respawn 처리 참고), 항상 installed → mystery 순서.
   effectsToApply: TrapType[];
 };
 
@@ -53,6 +53,16 @@ export function resolveTrapEncounters(
     if (seen.has(encounter.type)) continue;
     seen.add(encounter.type);
     effectsToApply.push(encounter.type);
+  }
+
+  // respawn과 slow가 같은 이동에서 함께 살아남으면(설치형+미스터리 박스 함정이 같은 타일에
+  // 공존할 때 발생 가능) slow를 제거한다 — respawn은 위치를 스폰으로 되돌리는 효과라, 그 뒤에
+  // slow(슬라이드)를 적용하면 game.tsx의 applySlideTrap이 "함정을 밟은 타일"이 아니라 "방금
+  // 리스폰된 스폰 지점"을 기준으로 미끄러지기 시작해 위치가 뒤섞이는 버그가 있었다(2026-07-13
+  // 코드리뷰 발견). respawn이 이미 위치·탐험 기록을 초기화하는 가장 강한 페널티라, 그 위에
+  // slow를 얹지 않아도 페널티 의미는 유지된다.
+  if (effectsToApply.includes('respawn')) {
+    return { shieldConsumedFor, effectsToApply: effectsToApply.filter((type) => type !== 'slow') };
   }
 
   return { shieldConsumedFor, effectsToApply };

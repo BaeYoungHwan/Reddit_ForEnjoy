@@ -69,4 +69,26 @@ describe('resolveTrapEncounters', () => {
     expect(result.shieldConsumedFor).toBe('installed');
     expect(result.effectsToApply).toEqual(['slow']);
   });
+
+  it('설치형=respawn, 미스터리=slow가 동시에 살아남으면 slow가 제거된다(슬라이드가 스폰 지점 기준으로 시작되는 버그 회귀)', () => {
+    expect(resolveTrapEncounters('respawn', 'slow', false)).toEqual({
+      shieldConsumedFor: null,
+      effectsToApply: ['respawn'],
+    });
+  });
+
+  it('설치형=slow, 미스터리=respawn 순서가 바뀌어도 동일하게 slow가 제거된다', () => {
+    expect(resolveTrapEncounters('slow', 'respawn', false)).toEqual({
+      shieldConsumedFor: null,
+      effectsToApply: ['respawn'],
+    });
+  });
+
+  it('쉴드가 respawn을 막아도 살아남은 slow는 그대로 적용된다(respawn 자체가 없으면 slow 제거 규칙이 적용되지 않음)', () => {
+    // priority 기본값(installed)이 respawn(installed)을 막으므로 mystery의 slow만 남는다.
+    expect(resolveTrapEncounters('respawn', 'slow', true)).toEqual({
+      shieldConsumedFor: 'installed',
+      effectsToApply: ['slow'],
+    });
+  });
 });
