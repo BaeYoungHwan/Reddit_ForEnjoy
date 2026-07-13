@@ -60,26 +60,36 @@ function toTrapInstances(installerFields: Record<string, string>): TrapInstance[
   }));
 }
 
-// trap.trigger/item.pickup 공용: 위치 앵커가 있는지, 직전 위치와 인접한 타일인지 확인하고 앵커를 갱신한다.
-// (인접 타일만 허용하는 이유: trap.trigger — 함정 위치를 미리 알아내는 오라클 공격 방지.
-//  item.pickup은 아이템 자체는 비밀이 아니지만, 같은 앵커를 공유하므로 검증도 동일하게 적용한다.)
-async function advancePosition(posKey: string, x: number, y: number): Promise<void> {
+// trap.trigger/item.pickup 공용: 위치 앵커를 읽는다. 함정/아이템 보드 조회와 서로 의존관계가
+// 없어 Promise.all로 병렬 발사할 수 있도록 검증(assertAdjacent)/기록(commitPosition)과 분리했다
+// (조작감 개선: 순차 Redis 왕복 4회 → 병렬 조회 1회 + 기록 1회로 축소, docs/wbs.md 72행 참조).
+async function readPositionAnchor(posKey: string): Promise<{ x: number; y: number }> {
   const last = await redis.get(posKey);
   if (!last) {
     // map.getState 없이 호출됨 — 비정상 흐름이므로 오류로 처리한다.
     throw new TRPCError({ code: 'BAD_REQUEST', message: 'NO_SESSION' });
   }
-  if (manhattanDistance(parseTile(last), { x, y }) > 1) {
+  return parseTile(last);
+}
+
+// 인접 타일만 허용하는 이유: trap.trigger — 함정 위치를 미리 알아내는 오라클 공격 방지.
+// item.pickup은 아이템 자체는 비밀이 아니지만, 같은 앵커를 공유하므로 검증도 동일하게 적용한다.
+function assertAdjacent(last: { x: number; y: number }, next: { x: number; y: number }): void {
+  if (manhattanDistance(last, next) > 1) {
     throw new TRPCError({ code: 'BAD_REQUEST', message: 'INVALID_MOVE' });
   }
+}
 
-  await redis.set(posKey, tileMember({ x, y }));
-  await redis.expire(posKey, POSITION_ANCHOR_TTL_SECONDS);
+async function commitPosition(posKey: string, x: number, y: number): Promise<void> {
+  // SET에 expiration을 실어 보내 기존 SET + EXPIRE 순차 2회 왕복을 1회로 합친다.
+  await redis.set(posKey, tileMember({ x, y }), {
+    expiration: new Date(Date.now() + POSITION_ANCHOR_TTL_SECONDS * 1000),
+  });
 }
 
 // 함정 탐지기 효과: 반경 내 함정을 별도 "스캔" API로 자유 조회하게 하면 trap.trigger의
-// 오라클 방지 설계(advancePosition — 인접 타일만 허용)가 무의미해진다. 대신 이 조회를
-// item.pickup 호출(이미 advancePosition으로 위치가 검증된 이벤트) 결과에 얹어서, 실제로
+// 오라클 방지 설계(assertAdjacent — 인접 타일만 허용)가 무의미해진다. 대신 이 조회를
+// item.pickup 호출(이미 assertAdjacent로 위치가 검증된 이벤트) 결과에 얹어서, 실제로
 // 탐지기 아이템이 있는 타일까지 걸어가 주웠을 때만 1회성으로 발동되게 한다.
 // 본인이 설치한 함정은 제외한다 — trap.trigger가 이미 설치자 본인을 회피 처리하고
 // 클라이언트도 myTraps로 항상 표시하므로(game.tsx), 여기 포함시키면 같은 함정이 두 번
@@ -234,11 +244,13 @@ export const appRouter = t.router({
         const { mapId, x, y } = input;
         const date = getKstDateString();
         const posKey = positionAnchorKey(mapId, date, ctx.userId);
-        await advancePosition(posKey, x, y);
-
         const boardKey = trapBoardKey(mapId, date);
         const field = tileMember({ x, y });
-        const raw = await redis.hGet(boardKey, field);
+
+        const [last, raw] = await Promise.all([readPositionAnchor(posKey), redis.hGet(boardKey, field)]);
+        assertAdjacent(last, { x, y });
+        await commitPosition(posKey, x, y);
+
         if (!raw) {
           return { hit: false as const };
         }
@@ -254,8 +266,7 @@ export const appRouter = t.router({
 
         if (trap.type === 'respawn') {
           const start = getMapStartPosition(mapId);
-          await redis.set(posKey, tileMember(start));
-          await redis.expire(posKey, POSITION_ANCHOR_TTL_SECONDS);
+          await commitPosition(posKey, start.x, start.y);
         }
 
         return { hit: true as const, type: trap.type };
@@ -269,11 +280,13 @@ export const appRouter = t.router({
         const { mapId, x, y } = input;
         const date = getKstDateString();
         const posKey = positionAnchorKey(mapId, date, ctx.userId);
-        await advancePosition(posKey, x, y);
-
         const boardKey = itemBoardKey(mapId, date, ctx.userId);
         const field = tileMember({ x, y });
-        const raw = await redis.hGet(boardKey, field);
+
+        const [last, raw] = await Promise.all([readPositionAnchor(posKey), redis.hGet(boardKey, field)]);
+        assertAdjacent(last, { x, y });
+        await commitPosition(posKey, x, y);
+
         if (!raw) {
           return { picked: false as const };
         }
@@ -294,8 +307,7 @@ export const appRouter = t.router({
           // 회피 로직 대상이 아니다 — 픽업자 본인에게 그 자리에서 즉시 발동.
           if (rolled.type === 'respawn') {
             const start = getMapStartPosition(mapId);
-            await redis.set(posKey, tileMember(start));
-            await redis.expire(posKey, POSITION_ANCHOR_TTL_SECONDS);
+            await commitPosition(posKey, start.x, start.y);
           }
           return { picked: true as const, outcome: 'trap' as const, type: rolled.type };
         }
