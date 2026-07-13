@@ -9,7 +9,14 @@ import { computeClothWaveX } from './goalFlagWave';
 import { trpc } from './trpcClient';
 import { SequentialDispatcher } from './sequentialDispatcher';
 import { LOADOUT_STORAGE_KEY } from './loadout';
-import type { Position, TrapInstallOutput, TrapInstance, TrapTriggerOutput, TrapType } from '../shared/game-types';
+import type {
+  Position,
+  RunFinishOutput,
+  TrapInstallOutput,
+  TrapInstance,
+  TrapTriggerOutput,
+  TrapType,
+} from '../shared/game-types';
 
 // flashPlayerTrap/activeTrapEffects가 다루는 함정 종류. 슬라이드('slow')는 지속시간이
 // 고정이 아니라(벽 만날 때까지) 이 지속시간 기반 메커니즘에 절대 들어가면 안 되고
@@ -521,6 +528,10 @@ class MazeScene extends Phaser.Scene {
   // 골인했는지 여부. true가 되면 더 이상 방향키 입력을 받지 않음(테스트용 종료 처리).
   private hasFinished = false;
 
+  // 이번 판이 시작된 실제 시각(Date.now() 기준 ms) — create()에서 기록, 골인 시
+  // clearTimeMs(= 지금 - 이 값)를 계산해 run.finish에 실어 보낸다.
+  private runStartTime = 0;
+
   constructor() {
     // 'MazeScene'은 이 씬의 이름표. 씬이 여러 개일 때 구분하는 용도라 지금은 큰 의미 없음.
     super('MazeScene');
@@ -599,6 +610,11 @@ class MazeScene extends Phaser.Scene {
 
   // create(): 게임이 시작될 때 딱 한 번만 실행됨. 여기서 맵과 캐릭터를 화면에 배치합니다.
   create() {
+    // 이번 판의 클리어 시간 기준점. 골인 시 run.finish로 보낼 clearTimeMs 계산에 쓰인다
+    // (2026-07-13: 지금까지 이 값 자체가 없어서 골인해도 리더보드에 기록이 전혀 안 남고
+    // 있었음 — checkGoalReached/reportRunFinish 참고).
+    this.runStartTime = Date.now();
+
     // 맵 크기만큼 타일 상태 배열을 준비한다. 통로와 맞닿은 벽 칸에는 석벽 텍스처 도형을
     // 하나씩 배치(깊은 안쪽 벽 칸은 어차피 안 보일 곳이라 만들지 않음). 벽 텍스처는 안개
     // 상태에 따라 밝기가 바뀐다(updateFog 참고) — 그래야 "탐험해야 벽도 보인다"는 안개
@@ -1901,7 +1917,6 @@ class MazeScene extends Phaser.Scene {
   }
 
   // 골인 지점에 도착했는지 확인하는 함수. 도착했으면 true를 반환하고 게임을 "완료" 상태로 만듦.
-  // (테스트용 — 실제 클리어 기록/랭킹 전송은 배영환님 백엔드 API 연동 필요)
   private checkGoalReached(x: number, y: number): boolean {
     if (x !== GOAL_POSITION.x || y !== GOAL_POSITION.y) return false;
 
@@ -1918,17 +1933,34 @@ class MazeScene extends Phaser.Scene {
     // 다음 주기적 flush까지 기다리면 마지막 몇 칸이 화면 종료 후로 밀릴 수 있어 바로 전송.
     void this.flushFootprints();
 
-    this.add
+    const goalText = this.add
       .text(
         (MAP_WIDTH * TILE_SIZE) / 2,
         (MAP_HEIGHT * TILE_SIZE) / 2,
         '🎉 GOAL!',
-        { fontSize: '64px', color: '#ffffff', fontStyle: 'bold' }
+        { fontSize: '64px', color: '#ffffff', fontStyle: 'bold', align: 'center' }
       )
       .setOrigin(0.5)
       .setDepth(20);
 
+    void this.reportRunFinish(goalText);
+
     return true;
+  }
+
+  // 골인 시 서버에 클리어 기록을 보내 리더보드에 반영한다. 2026-07-13까지 이 호출 자체가
+  // 없어서(테스트 단계 상태로 남아있었음) 실제로 골인해도 리더보드에 기록이 전혀 안 남고
+  // 있던 문제 수정 — 서버 run.finish는 이미 완전히 구현돼 있었음(docs/wbs.md 전체 블로커 참고).
+  private async reportRunFinish(goalText: Phaser.GameObjects.Text) {
+    const clearTimeMs = Date.now() - this.runStartTime;
+    try {
+      const result: RunFinishOutput = await trpc.run.finish.mutate({ mapId: MAP_ID, clearTimeMs });
+      goalText.setText(`🎉 GOAL!\nRank #${result.rank}${result.isNewRecord ? '  New Record!' : ''}`);
+    } catch (err) {
+      // 백엔드 없는 로컬 프리뷰 등에서는 실패가 정상 동작 — 다른 mutation들(reportPosition/
+      // reportItemPickup)과 동일한 패턴. 리더보드 반영은 실제 devvit 환경에서만 검증 가능.
+      console.error('run.finish 실패 — 로컬 프리뷰에서는 정상(리더보드 미반영)', err);
+    }
   }
 
   // 안개(시야) 상태를 다시 계산하는 함수.
