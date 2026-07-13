@@ -11,10 +11,6 @@ export type TrapInstance = Position & {
 // items.md 확정 4종 전부 — 손전등/쉴드/함정 탐지기/함정 설치.
 export type ItemType = 'flashlight' | 'shield' | 'detector' | 'trapInstall';
 
-export type ItemInstance = Position & {
-  type: ItemType;
-};
-
 export type LeaderboardEntry = {
   userId: string;
   username: string;
