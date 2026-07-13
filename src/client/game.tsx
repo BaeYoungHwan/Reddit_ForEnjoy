@@ -449,6 +449,13 @@ class MazeScene extends Phaser.Scene {
   // 겹치지 않고 순서대로 들리게 하기 위함.
   private lastEventSound: Phaser.Sound.BaseSound | null = null;
 
+  // lastEventSound가 재생을 시작한 시각(this.time.now 기준) — 남은 재생 시간을 "duration -
+  // 경과 시간"으로 직접 계산하기 위함. `BaseSound.seek`로 경과 시간을 바로 읽을 수도 있지만,
+  // `seek`는 `WebAudioSound`/`HTML5AudioSound` 같은 구체 클래스에만 있고 `BaseSound` 타입
+  // 자체에는 없어서(`tsc --build` 기준 타입 에러 — `tsc --noEmit -p .`로는 못 잡았던 맹점,
+  // 2026-07-13 CI 배포가 이 에러로 계속 실패하던 걸 뒤늦게 발견) 직접 추적하는 방식으로 변경.
+  private lastEventSoundStartedAt = 0;
+
   // 아이템 마커 도형(별 모양 — 함정 마커는 박스 모양이라 헷갈리지 않게 구분). 함정 마커와
   // 동일하게 안개 상태에 맞춰 밝기 조정됨.
   private itemRects: (Phaser.GameObjects.Star | undefined)[][] = [];
@@ -572,6 +579,7 @@ class MazeScene extends Phaser.Scene {
       this.lastEventSound?.stop();
       const sound = this.sound.add(key);
       this.lastEventSound = sound;
+      this.lastEventSoundStartedAt = this.time.now;
       sound.play({ volume: SFX_VOLUME_OVERRIDES[key] ?? DEFAULT_SFX_VOLUME });
     } catch (err) {
       console.error(`효과음 재생 실패: ${key}`, err);
@@ -586,7 +594,8 @@ class MazeScene extends Phaser.Scene {
     const activeEvent = this.lastEventSound;
     if (activeEvent?.isPlaying) {
       const token = ++this.footstepDelayToken;
-      const remainingMs = Math.max(30, (activeEvent.duration - activeEvent.seek) * 1000);
+      const elapsedMs = this.time.now - this.lastEventSoundStartedAt;
+      const remainingMs = Math.max(30, activeEvent.duration * 1000 - elapsedMs);
       this.time.delayedCall(remainingMs, () => {
         if (token !== this.footstepDelayToken) return; // 그 사이 더 최근 요청이 들어왔으면 무시
         this.playFootstep(); // 재평가 — 대기하는 사이 다른 이벤트 효과음으로 바뀌었으면 다시 대기
