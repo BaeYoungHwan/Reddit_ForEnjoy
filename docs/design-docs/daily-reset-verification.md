@@ -1,6 +1,6 @@
 # 자정 리셋 실측 검증 계획
 
-> 담당: 배영환 (백엔드/비동기 데이터) | 상태: 검증 대기 — 코드 구현 완료, devvit 실배포 환경에서의 발동 시각 실측만 남음
+> 담당: 배영환 (백엔드/비동기 데이터) | 상태: ✅ 검증 완료(2026-07-13) — 7절 참조
 > 관련: `src/server/core/dailyReset.ts`, `src/server/core/redisKeys.ts`, `devvit.json`, `docs/design-docs/async-delivery.md`, `docs/wbs.md`, `docs/product-specs/PRD-v1.md`
 
 ## 1. 배경 및 목적
@@ -42,12 +42,12 @@ export async function runDailyReset(now: Date = new Date()): Promise<DailyResetR
 
 ## 4. 검증 체크리스트
 
-| 확인 항목 | 방법 | 통과 기준 |
-|---|---|---|
-| cron이 실제로 매일 발동하는가 | 서버 로그에서 `/internal/scheduler/daily-reset` 호출 이력 확인 | 하루 1회 호출 확인 |
-| 발동 시각이 KST 00:00과 일치하는가 | 로그 타임스탬프와 실제 KST 00:00 대조 | 오차 ±5분 이내(스케줄러 지연 감안) |
-| 날짜 키 롤오버가 발동 시각과 동기화되는가 | 자정 전/후 `footprint`/`leaderboard` 키 조회 | 발동 시각 이후 새 date suffix 키 생성 확인 |
-| 중복 발동 방지 | 같은 날 두 번째 호출(수동 트리거 등)로 `alreadyRanToday` 값 확인 | 두 번째 호출 시 `alreadyRanToday: true` |
+| 확인 항목 | 방법 | 통과 기준 | 결과(2026-07-13) |
+|---|---|---|---|
+| cron이 실제로 매일 발동하는가 | 서버 로그에서 `/internal/scheduler/daily-reset` 호출 이력 확인 | 하루 1회 호출 확인 | ✅ 통과 |
+| 발동 시각이 KST 00:00과 일치하는가 | 로그 타임스탬프와 실제 KST 00:00 대조 | 오차 ±5분 이내(스케줄러 지연 감안) | ✅ 통과(오차 약 +57초) |
+| 날짜 키 롤오버가 발동 시각과 동기화되는가 | 자정 전/후 `footprint`/`leaderboard` 키 조회 | 발동 시각 이후 새 date suffix 키 생성 확인 | ⬜ 이번 회차 검증 범위 밖(후속 필요 시 별도 진행) |
+| 중복 발동 방지 | 같은 날 두 번째 호출(수동 트리거 등)로 `alreadyRanToday` 값 확인 | 두 번째 호출 시 `alreadyRanToday: true` | ⬜ 이번 회차 검증 범위 밖(로직 자체는 `dailyReset.test.ts` 단위 테스트로 커버됨) |
 
 ## 5. 실패 시 대응 방안
 
@@ -57,4 +57,17 @@ export async function runDailyReset(now: Date = new Date()): Promise<DailyResetR
 
 ## 6. 일정
 
-오늘(2026-07-09, D-6, "코어 게임 루프 완성" 목표일) 배포 후 관찰 시작, 늦어도 익일(2026-07-10) 자정까지 1회 관찰 완료를 목표로 한다.
+오늘(2026-07-09, D-6, "코어 게임 루프 완성" 목표일) 배포 후 관찰 시작, 늦어도 익일(2026-07-10) 자정까지 1회 관찰 완료를 목표로 했으나, 실제 관찰은 2026-07-13로 지연되었다(관찰 착수가 늦어진 것일 뿐 구현 자체의 문제는 아님).
+
+## 7. 검증 결과(2026-07-13)
+
+`r/maze_footprints_dev`에서 `npm run dev`(devvit playtest, 배포 상태 유지)로 실행 중인 상태에서, KST 자정(00:00) 전후로 `devvit logs maze_footprints_dev --since 1h --json` 명령으로 실측했다.
+
+```json
+{"message":"Daily reset ran for 2026-07-13","timestamp":"2026-07-12T15:00:56.825Z","tags":["Console"]}
+```
+
+- **실제 발동 시각**: UTC `2026-07-12T15:00:56.825Z` = KST `2026-07-13 00:00:56.825`
+- **목표(KST 00:00:00) 대비 오차**: 약 **+57초**
+- **결론**: `devvit.json`의 `"0 15 * * *"`(UTC 15:00) cron이 devvit 스케줄러에서 실제로 UTC 기준으로 해석된다는 가정이 실측으로 확인됨 — `dailyReset.ts:7-9` 주석에 남아있던 미검증 리스크 해소. 3절 검증 체크리스트 1·2번 항목 통과(오차 ±5분 이내). 3·4번 항목(날짜 키 롤오버, 중복 발동 방지)은 이번 회차 범위 밖으로 남겨둠 — 4번은 `dailyReset.test.ts` 단위 테스트로 이미 로직 커버 중이라 실측 우선순위는 낮음.
+- **참고**: 같은 로그 스트림에서 `daily-reset`과 무관한 경고(`Warning: connection server error undefined: listen EADDRINUSE: address already in use :::5678`)가 관측됨 — 로컬 포트 충돌로 추정되며 이번 검증 결론에는 영향 없음, 별도 확인 필요.

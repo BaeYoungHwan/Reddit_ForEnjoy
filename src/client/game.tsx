@@ -9,9 +9,10 @@ import { computeClothWaveX } from './goalFlagWave';
 import { trpc } from './trpcClient';
 import { SequentialDispatcher } from './sequentialDispatcher';
 import { LOADOUT_STORAGE_KEY } from './loadout';
+import { resolveTrapEncounters } from './trapResolution';
 import type {
+  ItemPickupOutput,
   Position,
-  RunFinishOutput,
   TrapInstallOutput,
   TrapInstance,
   TrapTriggerOutput,
@@ -251,10 +252,24 @@ const INSTALL_FAILURE_MESSAGES: Record<InstallFailureReason, string> = {
 // 추가돼 'detector'를 여기 포함시킴 — applyDetectorItem 참고.
 type ItemType = 'flashlight' | 'shield' | 'trapInstall' | 'detector';
 
-// 아이템 좌표+종류. shared/game-types.ts에도 같은 이름/형태의 타입이 있지만(item.pickup
-// 응답 등에 쓰임), 여기선 구조적으로 호환되는 로컬 타입을 그대로 쓴다(2026-07-09: 아이템
-// 서버 연동 완료 — map.getState/item.pickup 실제 호출로 교체됨).
-type ItemInstance = { x: number; y: number; type: ItemType };
+// 아이템 좌표(+로컬 폴백 전용 종류). 2026-07-12: 서버가 미스터리 박스 방식(개별 스폰에
+// 타입을 저장하지 않고 픽업 시점에 rollMysteryOutcome()으로 결정)으로 재설계되면서
+// map.getState가 주는 실제 스폰 좌표(state.mysteryBoxes)엔 더 이상 타입이 없다 — type은
+// 백엔드 없는 로컬 프리뷰 폴백(TEMP_ITEMS/reportItemPickup의 catch)에서만 쓰인다.
+type ItemInstance = { x: number; y: number; type?: ItemType };
+
+// fetchItemEncounter()의 반환 타입 — 미스터리 박스가 없었는지, 아이템으로 나왔는지(부가로
+// revealedTraps가 실릴 수 있음), 함정으로 나왔는지를 구분한다. resolveArrival이 이 결과와
+// fetchTrapTrigger의 설치형 함정 판정을 함께 모아 이펙트 적용/isMoving 해제를 결정한다.
+type ItemEncounter =
+  | { kind: 'none' }
+  | { kind: 'item'; type: ItemType; revealedTraps?: TrapInstance[] | undefined }
+  | { kind: 'trap'; type: TrapType };
+
+// 실제 미스터리 박스는 픽업 전까지 타입을 알 수 없으므로 종류 무관하게 이 색 하나로 통일해서
+// 그린다(renderItemMarkers 참고) — ITEM_COLORS는 픽업 "이후" 이펙트(flashPlayer 등)와 로컬
+// 폴백(TEMP_ITEMS) 전용으로 남겨둔다.
+const MYSTERY_BOX_COLOR = 0xe0c3ff; // 연보라 — 손전등/쉴드/함정탐지기/함정설치 어디에도 안 겹치는 색
 
 const ITEM_COLORS: Record<ItemType, number> = {
   flashlight: 0xfff59d, // 옅은 노랑
@@ -322,9 +337,11 @@ const SFX_VOLUME_OVERRIDES: Partial<Record<SfxKey, number>> = {
 };
 
 // ── 아이템 스폰 좌표 ──────────────────────────
-// 2026-07-09: 정상적으로는 loadServerState()가 map.getState 응답(state.items)으로
-// remainingItems를 채운다. 이 상수는 서버 호출이 실패했을 때(백엔드 없는 로컬 프리뷰 등)의
-// 폴백 전용 — src/server/core/items.ts의 실제 스폰 좌표(map-1)와 맞춰뒀다.
+// 2026-07-09: 정상적으로는 loadServerState()가 map.getState 응답(2026-07-12부터
+// state.mysteryBoxes)으로 remainingItems를 채운다. 이 상수는 서버 호출이 실패했을 때
+// (백엔드 없는 로컬 프리뷰 등)의 폴백 전용 — src/server/core/items.ts의 실제 스폰 좌표
+// (map-1)와 맞춰뒀다. 실제 스폰은 타입이 없는 미스터리 박스지만, 이 로컬 폴백은 백엔드 없이
+// 픽업 배선이 동작하는지만 확인하면 되므로 타입을 고정해둔 채로 유지한다(reportItemPickup 참고).
 // ⚠️ 이 좌표들은 MAIN_MAP(map-1)의 바닥 칸이어야 함 — 코드로 검증하지 않으므로, 맵 레이아웃이
 // 또 바뀌면 여기도 같이 확인할 것(벽 칸을 가리키면 마커가 벽 속에 파묻혀 주울 수 없게 됨).
 // 2026-07-10: map-1 레이아웃 4차 재설계(기능별 배치)에 맞춰 좌표 갱신.
@@ -504,7 +521,7 @@ class MazeScene extends Phaser.Scene {
   private flashlightGlow: Phaser.GameObjects.Arc | null = null;
 
   // 쉴드를 보유(hasShield)하고 있는 동안 캐릭터를 감싸는 얇은 링. 소모되는 순간
-  // (checkTrapTrigger에서 showShieldBlockEffect 재생 시) 같이 파괴한다.
+  // (resolveArrival에서 showShieldBlockEffect 재생 시) 같이 파괴한다.
   private shieldRing: Phaser.GameObjects.Arc | null = null;
 
   // 함정 설치권(heldTrapType)을 보유하고 있는 동안 캐릭터 머리 위에 떠서 "지금 함정을
@@ -772,7 +789,9 @@ class MazeScene extends Phaser.Scene {
         this.selfInstalledTrapKeys.add(`${trap.x},${trap.y}`);
       }
       footprints = state.footprints;
-      this.remainingItems = state.items;
+      // 2026-07-12: 서버가 미스터리 박스 방식으로 재설계되며 필드명도 items → mysteryBoxes로
+      // 바뀌었고, 타입 없이 좌표만 온다(오라클 방지 — 밟기 전엔 아이템/함정 여부조차 비밀).
+      this.remainingItems = state.mysteryBoxes;
     } catch (err) {
       // 정적 빌드만 단독으로 띄우는 로컬 프리뷰(백엔드 없음)에서도 마커를 눈으로 확인할 수
       // 있도록 하는 개발용 폴백. 실제 서버(devvit playtest/배포 환경)가 응답하면 위 try에서
@@ -812,6 +831,7 @@ class MazeScene extends Phaser.Scene {
 
   // this.remainingItems를 화면에 별 모양 마커로 그린다(함정 마커는 박스 모양이라 구분됨).
   // renderTrapMarkers()와 동일하게 loadServerState()에서 서버 응답을 받은 뒤 한 번 호출한다.
+  // 미스터리 박스라 타입을 모르므로(item.type은 로컬 폴백에서만 존재) 항상 같은 색으로 그린다.
   private renderItemMarkers() {
     for (const item of this.remainingItems) {
       const marker = this.add.star(
@@ -820,7 +840,7 @@ class MazeScene extends Phaser.Scene {
         5,
         TILE_SIZE * 0.12,
         TILE_SIZE * 0.24,
-        ITEM_COLORS[item.type]
+        item.type ? ITEM_COLORS[item.type] : MYSTERY_BOX_COLOR
       );
       marker.setDepth(6);
       this.itemRects[item.y]![item.x] = marker;
@@ -1081,23 +1101,20 @@ class MazeScene extends Phaser.Scene {
       duration: BASE_MOVE_DURATION,
       ease: 'Sine.easeOut',
       onComplete: () => {
-        // 주의: 여기서 isMoving을 바로 false로 풀면 안 됨 — checkTrapTrigger가 서버 응답을
-        // 기다리는 동안(비동기) 방향키 입력이 다시 받아들여져서, 리스폰 함정처럼 위치를
-        // 강제로 되돌리는 효과와 그 사이에 시작된 새 이동 트윈이 서로 충돌해 캐릭터가
-        // 엉뚱한 위치(리스폰 목적지도 원래 위치도 아닌 중간 지점)에 멈춰 있다가 다음 키
-        // 입력에야 제자리로 튀는 버그가 있었음. isMoving 해제는 checkTrapTrigger 쪽에서
-        // 판정이 다 끝난 뒤에 하도록 옮김(슬라이드 함정은 자기가 다시 잠그고 스스로 풂).
+        // 주의: 여기서 isMoving을 바로 false로 풀면 안 됨 — 설치형 함정(trap.trigger)과
+        // 미스터리 박스(item.pickup)의 서버 응답을 기다리는 동안(비동기) 방향키 입력이 다시
+        // 받아들여져서, 리스폰 함정처럼 위치를 강제로 되돌리는 효과와 그 사이에 시작된 새
+        // 이동 트윈이 서로 충돌해 캐릭터가 엉뚱한 위치에 멈춰 있다가 다음 키 입력에야 제자리로
+        // 튀는 버그가 있었음. isMoving 해제는 resolveArrival이 두 응답을 모두 받은 뒤 한
+        // 곳에서만 하도록 옮김(슬라이드 함정은 자기가 다시 잠그고 스스로 풂).
         // 발자국 기록은 골인 여부와 무관하게 항상 남긴다.
         this.queueFootprint(targetX, targetY);
 
         if (this.checkGoalReached(targetX, targetY)) return; // 골인했으면 함정 확인 없이 종료
 
-        // 아이템은 item.pickup 서버 호출로 확인(비동기) — 함정 확인과 독립적으로 진행.
-        void this.checkItemPickup(targetX, targetY);
-
-        // 도착한 칸에 함정이 있는지 서버에 확인. dx, dy(눌렀던 방향)를 같이 넘겨서
-        // 슬라이드 함정이 "어느 방향으로 미끄러질지" 알 수 있게 함.
-        void this.checkTrapTrigger(targetX, targetY, dx, dy);
+        // 설치형 함정(trap.trigger)과 미스터리 박스(item.pickup)를 함께 판정한다. dx, dy(눌렀던
+        // 방향)는 둘 중 하나(또는 둘 다)가 슬라이드 결과일 때 미끄러질 방향을 정하는 데 필요.
+        void this.resolveArrival(targetX, targetY, dx, dy);
       },
     });
 
@@ -1127,38 +1144,14 @@ class MazeScene extends Phaser.Scene {
     }
   }
 
-  // 방금 도착한 칸에 함정이 있는지 서버에 확인하고, 있으면 종류에 맞는 효과를 적용하는 함수.
-  // dx, dy는 지금 막 이동해온 방향 (슬라이드 함정이 미끄러질 방향을 정하는 데 사용).
-  // isMoving 잠금 해제는 여기서 판정이 다 끝난 뒤에 한다 — tryMove의 tween onComplete에서
-  // 미리 풀어버리면, 이 함수가 서버 응답을 기다리는(await) 사이에 다음 이동이 시작돼버려서
-  // 리스폰 등 위치를 강제로 바꾸는 효과와 충돌하는 버그가 있었음.
-  private async checkTrapTrigger(x: number, y: number, dx: number, dy: number) {
+  // 방금 도착한 칸에 설치형 함정이 있는지 서버에만 확인하는 순수 조회 함수 — 상태(isMoving,
+  // hasShield, 화면 이펙트)는 전혀 건드리지 않는다. 결과 적용/쉴드 소모/isMoving 해제는
+  // resolveArrival이 미스터리 박스 판정(fetchItemEncounter)과 함께 모아서 한 곳에서 처리한다
+  // (같은 타일에 설치형 함정과 미스터리 박스가 동시에 존재할 수 있어 — traps.md 0절 — 두 판정을
+  // 따로따로 즉시 적용하면 어느 쪽 응답이 먼저 오느냐에 따라 결과가 달라지는 레이스가 있었음).
+  private async fetchTrapTrigger(x: number, y: number): Promise<TrapType | null> {
     const result = await this.reportPosition(x, y);
-    if (!result?.hit || !result.type) {
-      this.isMoving = false;
-      return;
-    }
-
-    // items.md: 쉴드는 반응형 1회 소모 — 보유 중이면 이번 함정 효과를 무효화하고 그 자리에서 소모됨.
-    // 서버 쪽 함정 자체는 trap.trigger 시점에 이미 지워졌으므로(회피와 무관하게 소모), 여기서는
-    // 클라이언트 이펙트 적용만 막으면 된다.
-    if (this.hasShield) {
-      this.hasShield = false;
-      this.showShieldBlockEffect();
-      this.shieldRing?.destroy();
-      this.shieldRing = null;
-      this.isMoving = false;
-      return;
-    }
-
-    if (result.type === 'slow') {
-      this.applySlideTrap(dx, dy); // 슬라이드는 자기가 다시 isMoving = true로 잠그고 끝날 때 스스로 풂
-      return;
-    }
-    if (result.type === 'respawn') this.applyRespawnTrap();
-    else if (result.type === 'blind') this.applyBlindTrap();
-    else this.applyReverseTrap();
-    this.isMoving = false;
+    return result?.hit && result.type ? result.type : null;
   }
 
   // 함정을 밟았을 때 캐릭터 색을 잠깐 바꿔서 "뭔가 발동했다"는 걸 보여주는 간단한 이펙트.
@@ -1265,22 +1258,25 @@ class MazeScene extends Phaser.Scene {
   // 타겟팅한다 — 어느 쪽이 먼저 응답해서 앵커를 그 좌표로 옮기든, 나머지 하나는 "직전
   // 위치와의 거리 0"으로 검증을 통과한다(서버 advancePosition의 `거리 > 1`일 때만 거부하는
   // 조건 참고). 그래서 이동마다 두 요청이 순서 상관없이 나가도 안전하다.
-  private async reportItemPickup(x: number, y: number) {
+  private async reportItemPickup(x: number, y: number): Promise<ItemPickupOutput> {
     try {
       return await trpc.item.pickup.mutate({ mapId: MAP_ID, x, y });
     } catch (err) {
       console.error('item.pickup 실패 — 로컬 아이템 목록으로 직접 판정', err);
       const localItem = this.remainingItems.find((item) => item.x === x && item.y === y);
+      if (!localItem) return { picked: false };
 
       // revealedTraps: undefined로 명시 — 백엔드 없는 로컬 폴백에선 다른 유저 함정을 알 방법이
       // 없어(revealNearbyTraps는 서버 전용 로직) 탐지기를 주워도 아무것도 안 밝혀지는 게
-      // 맞는 동작. 필드 자체를 넣어두는 이유는 실제 서버 응답(ItemPickupOutput)과 반환 타입
-      // 형태를 통일해 호출부에서 옵셔널 체이닝 없이 그대로 접근할 수 있게 하기 위함.
+      // 맞는 동작.
       // (2026-07-11: 로컬 테스트용으로 반경 근처에 가짜 함정 좌표를 만들어 보여주는 시도를
       // 했었으나, 맵 경계 밖으로 나갈 수 있는 등 임의성이 커서 제거하고 원래 방식으로 되돌림)
-      return localItem
-        ? { picked: true, type: localItem.type, revealedTraps: undefined }
-        : { picked: false, type: undefined, revealedTraps: undefined };
+      // 2026-07-12: 서버가 미스터리 박스로 바뀌며 outcome:'item'|'trap' 판정이 추가됐지만,
+      // 로컬 폴백은 실제 확률 풀(gameConfig.ts MYSTERY_BOX_OUTCOME_POOL)을 재현하지 않고
+      // 기존처럼 TEMP_ITEMS에 박아둔 고정 타입을 outcome:'item'으로 그대로 반환한다 — 백엔드
+      // 없는 환경에서 픽업 배선 자체가 동작하는지 확인하는 용도라, 8종 확률 재현은 스코프 밖
+      // (실제 확률/함정 결과 테스트는 trpc.test.ts가 담당).
+      return { picked: true, outcome: 'item', type: localItem.type ?? 'flashlight' };
     }
   }
 
@@ -1306,24 +1302,83 @@ class MazeScene extends Phaser.Scene {
     }
   }
 
-  // 방금 도착한 칸에 아직 안 주운 아이템이 있는지 서버에 확인하고, 있으면 습득 처리한다.
-  private async checkItemPickup(x: number, y: number) {
+  // 방금 도착한 칸에 아직 안 주운 미스터리 박스가 있는지 서버에만 확인하는 순수 조회 함수.
+  // 2026-07-12: 서버가 미스터리 박스로 재설계되며 응답이 outcome:'item'|'trap' 판별 유니언이
+  // 됐다 — outcome을 먼저 안 보고 type만으로 분기하면 outcome:'trap'(전체 결과의 절반)일 때
+  // 어떤 type도 안 걸려 마지막 else(함정 설치 아이템)로 잘못 빠지는 버그가 있었다(develop의
+  // 미스터리 박스 서버 구현과 main의 클라이언트가 별도로 진행되다 병합 시 발견).
+  // 아이템 목록/마커 제거(remainingItems, itemRects)는 isMoving·hasShield와 무관한 순수 부기라
+  // 여기서 바로 처리한다 — 실제 함정/아이템 이펙트 적용과 isMoving/hasShield 관리는
+  // resolveArrival이 fetchTrapTrigger 결과와 함께 모아서 한 곳에서 처리한다(fetchTrapTrigger
+  // 주석 참고 — 같은 타일에 설치형 함정과 미스터리 박스가 동시에 존재할 수 있음).
+  private async fetchItemEncounter(x: number, y: number): Promise<ItemEncounter> {
     const result = await this.reportItemPickup(x, y);
-    if (!result?.picked || !result.type) return;
+    if (!result.picked) return { kind: 'none' };
 
     this.remainingItems = this.remainingItems.filter((item) => !(item.x === x && item.y === y));
     this.itemRects[y]![x]?.destroy();
     this.itemRects[y]![x] = undefined;
 
-    if (result.type === 'flashlight') this.applyFlashlightItem();
-    else if (result.type === 'shield') this.applyShieldItem();
-    // 서버(shared/game-types.ts ItemType)는 'trapInstall'을 반환할 일이 없다 — 로컬 폴백
-    // (reportItemPickup의 catch, TEMP_ITEMS 기반)에서만 나오는 클라이언트 전용 값이라 마지막
-    // else로 잡는다. 'detector'를 명시적으로 분기하지 않으면 이 else가 실수로 삼켜서
-    // applyTrapInstallItem이 잘못 호출되는 버그가 있었음(2026-07-10 발견 — 실제 서버 함정
-    // 탐지기 픽업이 함정 설치 아이템으로 오판정되던 문제).
-    else if (result.type === 'detector') this.applyDetectorItem(result.revealedTraps ?? []);
-    else this.applyTrapInstallItem();
+    if (result.outcome === 'trap') return { kind: 'trap', type: result.type };
+    return { kind: 'item', type: result.type, revealedTraps: result.revealedTraps };
+  }
+
+  // tryMove가 한 칸 이동을 마친 뒤 호출하는 유일한 판정 지점. 설치형 함정(fetchTrapTrigger)과
+  // 미스터리 박스(fetchItemEncounter)를 Promise.all로 병렬 조회한 뒤, 두 응답이 모두 도착한
+  // 다음에야 쉴드 소모/함정 이펙트 적용/isMoving 해제를 한 곳에서 처리한다 — 예전엔 두 함수가
+  // 각자 독립적으로 isMoving과 hasShield를 건드려서, 어느 쪽 응답이 먼저 오느냐에 따라 결과가
+  // 달라지는 레이스가 있었다(2026-07-13 코드 리뷰로 발견). dx, dy는 함정 결과가 슬라이드일 때
+  // 미끄러질 방향.
+  private async resolveArrival(x: number, y: number, dx: number, dy: number) {
+    // 이번 이동 "시작 시점"의 쉴드 보유 스냅샷 — 이 판정 도중 새로 주운 쉴드(아래 outcome:'item'
+    // && type:'shield')가 같은 이동의 함정 판정에 소급 적용되지 않게 한다.
+    const hadShieldBeforeMove = this.hasShield;
+
+    const [installedTrapType, itemEncounter] = await Promise.all([
+      this.fetchTrapTrigger(x, y),
+      this.fetchItemEncounter(x, y),
+    ]);
+
+    const mysteryTrapType = itemEncounter.kind === 'trap' ? itemEncounter.type : null;
+    const resolution = resolveTrapEncounters(installedTrapType, mysteryTrapType, hadShieldBeforeMove);
+
+    // items.md: 쉴드는 반응형 1회 소모 — 설치형/미스터리 박스 함정이 동시에 걸려도 한 번만
+    // 소모되고, 우선순위(기본: 설치형)에 따라 둘 중 하나만 무효화된다(resolveTrapEncounters 참고).
+    if (resolution.shieldConsumedFor) {
+      this.hasShield = false;
+      this.showShieldBlockEffect();
+      this.shieldRing?.destroy();
+      this.shieldRing = null;
+    }
+
+    // 슬라이드보다 순간 효과(respawn/blind/reverse)를 먼저 적용한다 — respawn이 위치 자체를
+    // 스폰으로 되돌리므로, 슬라이드가 끝난 자리를 나중에 respawn이 덮어써서 위치가 튀는 상황을
+    // 피하기 위함.
+    for (const type of resolution.effectsToApply) {
+      if (type === 'slow') continue;
+      else if (type === 'respawn') this.applyRespawnTrap();
+      else if (type === 'blind') this.applyBlindTrap();
+      else this.applyReverseTrap();
+    }
+
+    if (itemEncounter.kind === 'item') {
+      if (itemEncounter.type === 'flashlight') this.applyFlashlightItem();
+      else if (itemEncounter.type === 'shield') this.applyShieldItem();
+      // 로컬 폴백(reportItemPickup의 catch, TEMP_ITEMS 기반)에서만 나오는 클라이언트 전용
+      // 값이라 마지막 else로 잡는다. 'detector'를 명시적으로 분기하지 않으면 이 else가 실수로
+      // 삼켜서 applyTrapInstallItem이 잘못 호출되는 버그가 있었음(2026-07-10 발견 — 실제 서버
+      // 함정 탐지기 픽업이 함정 설치 아이템으로 오판정되던 문제).
+      else if (itemEncounter.type === 'detector') this.applyDetectorItem(itemEncounter.revealedTraps ?? []);
+      else this.applyTrapInstallItem();
+    }
+
+    if (resolution.effectsToApply.includes('slow')) {
+      this.applySlideTrap(dx, dy); // 슬라이드는 자기가 다시 isMoving = true로 잠그고 끝날 때 스스로 풂
+    } else {
+      // 이번 이동에 대한 isMoving 해제는 오직 이 한 줄뿐 — fetchTrapTrigger/fetchItemEncounter는
+      // 더 이상 isMoving을 건드리지 않는다.
+      this.isMoving = false;
+    }
   }
 
   // 캐릭터 머리 위에 짧은 안내 텍스트를 잠깐 띄우는 말풍선. 위로 떠오르면서 사라지는
@@ -1480,7 +1535,7 @@ class MazeScene extends Phaser.Scene {
   }
 
   // 함정 무효화(쉴드) — items.md: 반응형. 주우면 바로 발동하는 게 아니라 보유 상태로만
-  // 바뀌고, 실제 효과는 다음 함정을 밟는 순간(checkTrapTrigger)에 소모되며 적용됨.
+  // 바뀌고, 실제 효과는 다음 함정을 밟는 순간(resolveArrival)에 소모되며 적용됨.
   private applyShieldItem() {
     this.playSfx('itemPickup');
     this.showFloatingLabel(`${ITEM_LABELS.shield} acquired!`);
