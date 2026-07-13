@@ -3,10 +3,12 @@ import { z } from 'zod';
 import { context, reddit, redis } from '@devvit/web/server';
 import type { T2 } from '@devvit/shared-types/tid.js';
 import {
+  encodeLeaderboardScore,
   footprintKey,
   getKstDateString,
   itemBoardKey,
   itemSeededKey,
+  leaderboardDetailKey,
   leaderboardKey,
   parseTile,
   positionAnchorKey,
@@ -136,6 +138,13 @@ async function ensureMysteryBoxesSeeded(mapId: string, date: string, userId: str
 }
 
 export const appRouter = t.router({
+  // 리더보드에서 "내 순위" 강조(splash.tsx)를 위해 클라이언트가 자기 userId를 알아야 해서
+  // 추가한 최소 엔드포인트 — leaderboard.get이 이미 entry마다 userId를 내려주므로, 이 값과
+  // 비교해서 어떤 항목이 본인인지 클라이언트가 직접 판단한다.
+  user: t.router({
+    me: protectedProcedure.query(({ ctx }) => ({ userId: ctx.userId })),
+  }),
+
   map: t.router({
     getState: protectedProcedure.input(mapIdSchema).query(async ({ ctx, input }) => {
       const date = getKstDateString();
@@ -323,17 +332,29 @@ export const appRouter = t.router({
 
   run: t.router({
     finish: protectedProcedure
-      .input(z.object({ mapId: z.string().min(1), clearTimeMs: z.number().int().positive() }))
+      .input(
+        z.object({
+          mapId: z.string().min(1),
+          steps: z.number().int().nonnegative(),
+          clearTimeMs: z.number().int().positive(),
+        })
+      )
       .mutation(async ({ ctx, input }) => {
-        const { mapId, clearTimeMs } = input;
+        const { mapId, steps, clearTimeMs } = input;
         const date = getKstDateString();
         const key = leaderboardKey(mapId, date);
+        const score = encodeLeaderboardScore(steps, clearTimeMs);
 
         const prevScore = await redis.zScore(key, ctx.userId);
-        const isNewRecord = prevScore === undefined || clearTimeMs < prevScore;
+        const isNewRecord = prevScore === undefined || score < prevScore;
         if (isNewRecord) {
-          await redis.zAdd(key, { member: ctx.userId, score: clearTimeMs });
+          await redis.zAdd(key, { member: ctx.userId, score });
           await redis.expire(key, DATA_SAFETY_TTL_SECONDS);
+          // 스코어는 랭킹 정렬 전용 인코딩 값이라 화면에 표시할 원본 걸음 수/시간은
+          // leaderboardDetailKey에 따로 보관한다 (leaderboard.get 참고).
+          const detailKey = leaderboardDetailKey(mapId, date);
+          await redis.hSet(detailKey, { [ctx.userId]: JSON.stringify({ steps, clearTimeMs }) });
+          await redis.expire(detailKey, DATA_SAFETY_TTL_SECONDS);
         }
 
         const rank = await redis.zRank(key, ctx.userId);
@@ -347,6 +368,7 @@ export const appRouter = t.router({
     get: t.procedure.input(mapIdSchema).query(async ({ input }) => {
       const date = getKstDateString();
       const entries = await redis.zRange(leaderboardKey(input.mapId, date), 0, -1, { by: 'rank' });
+      const details = await redis.hGetAll(leaderboardDetailKey(input.mapId, date));
       // 리더보드에 Reddit userId를 그대로 노출하지 않도록 표시용 username을 조회한다.
       // reddit.getUserById의 reject 여부는 devvit SDK 타입에 문서화되어 있지 않아(내부 API
       // 실패 가능성 배제 불가), Promise.all 대신 allSettled로 개별 실패를 격리한다.
@@ -361,10 +383,15 @@ export const appRouter = t.router({
             console.error(`leaderboard.get: getUserById 실패 (userId=${entry.member})`, result.reason);
           }
           const username = result?.status === 'fulfilled' ? result.value?.username : undefined;
+          // detail 해시는 스코어와 별도 쓰기라 이론상 순간적으로 어긋날 수 있어(레이스), 없으면
+          // 0/스코어값으로 방어적으로 폴백한다 — 화면이 깨지는 것보단 낫다.
+          const rawDetail = details[entry.member];
+          const detail = rawDetail ? (JSON.parse(rawDetail) as { steps: number; clearTimeMs: number }) : null;
           return {
             userId: entry.member,
             username: username ?? entry.member,
-            clearTimeMs: entry.score,
+            steps: detail?.steps ?? 0,
+            clearTimeMs: detail?.clearTimeMs ?? entry.score,
             rank: index + 1,
           };
         }),

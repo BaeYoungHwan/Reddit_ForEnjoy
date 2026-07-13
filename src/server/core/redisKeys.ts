@@ -34,6 +34,23 @@ export const itemSeededKey = (mapId: string, date: string, userId: string): stri
 
 export const leaderboardKey = (mapId: string, date: string): string => `leaderboard:${mapId}:${date}`;
 
+// leaderboardKey의 정렬 스코어는 steps/clearTimeMs를 하나의 숫자로 합쳐 인코딩(아래
+// encodeLeaderboardScore 참고)한 값이라 그 자체로는 화면에 표시할 원본 걸음 수/시간을 복원할 수
+// 없다. 이 해시에 유저별 원본 {steps, clearTimeMs}를 따로 저장해 leaderboard.get에서 읽어 쓴다.
+export const leaderboardDetailKey = (mapId: string, date: string): string =>
+  `leaderboard:detail:${mapId}:${date}`;
+
+// 랭킹은 걸음 수(steps) 1차, 클리어 시간(clearTimeMs) 2차(동점 타이브레이크) 기준이다. Redis
+// sorted set의 스코어는 숫자 하나뿐이라, steps를 상위 자리로 두고 clearTimeMs를 하위 자리에
+// 끼워넣어 "낮을수록 좋다" 정렬 하나로 두 기준을 동시에 표현한다.
+// TIME_SLOT_MS(하루)보다 실제 클리어 시간이 길어질 일은 없다고 가정하되, 페이지를 며칠씩 열어둔
+// 채로 방치하다 골인하는 극단적인 경우에도 다음 steps 구간을 침범하지 않도록 clamp한다.
+const TIME_SLOT_MS = 24 * 60 * 60 * 1000;
+export function encodeLeaderboardScore(steps: number, clearTimeMs: number): number {
+  const clampedTimeMs = Math.min(clearTimeMs, TIME_SLOT_MS - 1);
+  return steps * TIME_SLOT_MS + clampedTimeMs;
+}
+
 export const positionAnchorKey = (mapId: string, date: string, userId: string): string =>
   `pos:${mapId}:${date}:${userId}`;
 

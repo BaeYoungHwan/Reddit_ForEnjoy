@@ -237,6 +237,12 @@ const TRAP_LABELS: Record<TrapType, string> = {
 const BLIND_DURATION_MS = 5000;
 const REVERSE_DURATION_MS = 4000;
 
+// 골인 연출: "GOAL!"이 먼저 뜨고, 약간의 텀을 두고 순위 정보가 아래에서 페이드인되며
+// 등장한다(한 번에 다 뜨면 "결과 발표" 느낌이 덜해서 2단계로 분리, 2026-07-13).
+const RANK_REVEAL_DELAY_MS = 450;
+const RANK_REVEAL_RISE_PX = 14;
+const RANK_REVEAL_DURATION_MS = 350;
+
 // trap.install 실패 사유 → 안내 문구. TrapInstallOutput.reason은 optional이라(성공 시엔
 // 항상 undefined) 값이 없을 때는 RETRY 문구로 대체.
 type InstallFailureReason = NonNullable<TrapInstallOutput['reason']>;
@@ -557,6 +563,11 @@ class MazeScene extends Phaser.Scene {
   // clearTimeMs(= 지금 - 이 값)를 계산해 run.finish에 실어 보낸다.
   private runStartTime = 0;
 
+  // 랭킹 1차 기준 — 성공적으로 이동한 칸 수(벽 부딪힘 제외, 슬라이드로 밀린 칸은 포함).
+  // tryMove/slideStep이 실제로 playerGridX/Y를 옮길 때만 증가시킨다. 리스폰 함정의 순간이동은
+  // "이동"이 아니라 위치 초기화라 여기 포함하지 않는다.
+  private stepCount = 0;
+
   constructor() {
     // 'MazeScene'은 이 씬의 이름표. 씬이 여러 개일 때 구분하는 용도라 지금은 큰 의미 없음.
     super('MazeScene');
@@ -641,6 +652,7 @@ class MazeScene extends Phaser.Scene {
     // (2026-07-13: 지금까지 이 값 자체가 없어서 골인해도 리더보드에 기록이 전혀 안 남고
     // 있었음 — checkGoalReached/reportRunFinish 참고).
     this.runStartTime = Date.now();
+    this.stepCount = 0;
 
     // 맵 크기만큼 타일 상태 배열을 준비한다. 통로와 맞닿은 벽 칸에는 석벽 텍스처 도형을
     // 하나씩 배치(깊은 안쪽 벽 칸은 어차피 안 보일 곳이라 만들지 않음). 벽 텍스처는 안개
@@ -1088,6 +1100,7 @@ class MazeScene extends Phaser.Scene {
     this.isMoving = true;
     this.playerGridX = targetX;
     this.playerGridY = targetY;
+    this.stepCount++;
     this.animatePlayerStep(dx);
     this.playFootstep();
 
@@ -1826,6 +1839,7 @@ class MazeScene extends Phaser.Scene {
 
     this.playerGridX = targetX;
     this.playerGridY = targetY;
+    this.stepCount++;
     this.updateFog();
 
     // 슬라이딩 도중 지나가는 칸에 다른 함정이 있어도 이번 구현에서는 이펙트를 재발동시키지 않음
@@ -2018,19 +2032,79 @@ class MazeScene extends Phaser.Scene {
     // 다음 주기적 flush까지 기다리면 마지막 몇 칸이 화면 종료 후로 밀릴 수 있어 바로 전송.
     void this.flushFootprints();
 
-    const goalText = this.add
-      .text(
-        (MAP_WIDTH * TILE_SIZE) / 2,
-        (MAP_HEIGHT * TILE_SIZE) / 2,
-        '🎉 GOAL!',
-        { fontSize: '64px', color: '#ffffff', fontStyle: 'bold', align: 'center' }
-      )
+    const goalCenterX = (MAP_WIDTH * TILE_SIZE) / 2;
+    const goalCenterY = (MAP_HEIGHT * TILE_SIZE) / 2;
+
+    this.add
+      .text(goalCenterX, goalCenterY, 'MAZE CLEARED!', {
+        fontFamily: 'Jua',
+        fontSize: '50px',
+        color: '#ffffff',
+        stroke: '#7a2400',
+        strokeThickness: 8,
+        shadow: { offsetY: 4, color: '#000000', blur: 6, fill: true },
+        align: 'center',
+      })
       .setOrigin(0.5)
       .setDepth(20);
 
-    void this.reportRunFinish(goalText);
+    // 순위 텍스트 — "몇 등인지"가 이 화면에서 가장 중요한 정보라, GOAL! 다음으로 크게(rankText)
+    // 강조하고 그 아래에 보조 정보(걸음 수/신기록 여부, statsText)를 작게 둔다. 둘 다 GOAL!
+    // 아래에 처음엔 투명하게 만들어두고, reportRunFinish가 서버 응답을 받으면 채워 넣은 뒤
+    // 함께 페이드인시킨다(revealRankInfo 참고).
+    const rankText = this.add
+      .text(goalCenterX, goalCenterY + 58, '', {
+        fontFamily: 'Jua',
+        fontSize: '34px',
+        color: '#e2e8f0',
+        stroke: '#000000',
+        strokeThickness: 5,
+        align: 'center',
+      })
+      .setOrigin(0.5)
+      .setDepth(20)
+      .setAlpha(0);
+
+    const statsText = this.add
+      .text(goalCenterX, goalCenterY + 96, '', {
+        fontFamily: 'Jua',
+        fontSize: '18px',
+        color: '#94a3b8',
+        stroke: '#000000',
+        strokeThickness: 3,
+        align: 'center',
+      })
+      .setOrigin(0.5)
+      .setDepth(20)
+      .setAlpha(0);
+
+    void this.reportRunFinish(rankText, statsText);
 
     return true;
+  }
+
+  // GOAL! 텍스트가 뜬 뒤 살짝 텀을 두고, "내 순위" 텍스트와 보조 스탯 텍스트를 아래에서
+  // 떠오르며 함께 페이드인시킨다.
+  private revealRankInfo(
+    rankText: Phaser.GameObjects.Text,
+    statsText: Phaser.GameObjects.Text,
+    rankLine: string,
+    statsLine: string,
+    rankColor: string
+  ) {
+    for (const target of [
+      { text: rankText, content: rankLine, color: rankColor },
+      { text: statsText, content: statsLine, color: '#94a3b8' },
+    ]) {
+      target.text.setText(target.content).setColor(target.color).setY(target.text.y + RANK_REVEAL_RISE_PX);
+      this.tweens.add({
+        targets: target.text,
+        alpha: 1,
+        y: target.text.y - RANK_REVEAL_RISE_PX,
+        duration: RANK_REVEAL_DURATION_MS,
+        ease: 'Sine.easeOut',
+      });
+    }
   }
 
   // 골인 시 서버에 클리어 기록을 보내 리더보드에 반영한다. 2026-07-13까지 이 호출 자체가
@@ -2043,11 +2117,20 @@ class MazeScene extends Phaser.Scene {
   // 처리하면 진단 자체가 불가능해짐). 실배포(=IS_LOCAL_PREVIEW가 아닌 환경)에서 실패하면
   // 화면에 실패 안내를 띄우고 에러 메시지를 콘솔에 남겨서, 최소한 무슨 에러인지 눈으로
   // 확인할 수 있게 함.
-  private async reportRunFinish(goalText: Phaser.GameObjects.Text) {
+  private async reportRunFinish(rankText: Phaser.GameObjects.Text, statsText: Phaser.GameObjects.Text) {
     const clearTimeMs = Date.now() - this.runStartTime;
     try {
-      const result: RunFinishOutput = await trpc.run.finish.mutate({ mapId: MAP_ID, clearTimeMs });
-      goalText.setText(`🎉 GOAL!\nRank #${result.rank}${result.isNewRecord ? '  New Record!' : ''}`);
+      const result: RunFinishOutput = await trpc.run.finish.mutate({
+        mapId: MAP_ID,
+        steps: this.stepCount,
+        clearTimeMs,
+      });
+      await new Promise<void>((resolve) => this.time.delayedCall(RANK_REVEAL_DELAY_MS, resolve));
+      // "몇 등인지"를 가장 또렷하게 전달하는 게 목적이라 "YOU'RE #N"처럼 플레이어를 직접
+      // 지칭하는 문장으로 표현(2026-07-13 피드백 — 기존 "RANK #N"은 라벨처럼 밋밋해 보임).
+      const rankLine = `YOU'RE #${result.rank}`;
+      const statsLine = result.isNewRecord ? `✦ NEW RECORD ✦  ·  ${this.stepCount} STEPS` : `${this.stepCount} STEPS`;
+      this.revealRankInfo(rankText, statsText, rankLine, statsLine, result.isNewRecord ? '#fcd34d' : '#e2e8f0');
     } catch (err) {
       if (IS_LOCAL_PREVIEW) {
         // 백엔드 없는 로컬 프리뷰에서는 실패가 정상 동작 — 다른 mutation들(reportPosition/
@@ -2057,7 +2140,8 @@ class MazeScene extends Phaser.Scene {
       }
       // 실배포 환경에서 진짜로 실패한 경우 — 조용히 넘어가지 않고 화면에도 알린다.
       console.error('run.finish 실패(실서버 환경) — 리더보드에 기록 안 남음', err);
-      goalText.setText('🎉 GOAL!\nFailed to save record');
+      await new Promise<void>((resolve) => this.time.delayedCall(RANK_REVEAL_DELAY_MS, resolve));
+      this.revealRankInfo(rankText, statsText, 'Record not saved', '', '#f87171');
     }
   }
 
