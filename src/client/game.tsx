@@ -466,6 +466,13 @@ class MazeScene extends Phaser.Scene {
   // 겹치지 않고 순서대로 들리게 하기 위함.
   private lastEventSound: Phaser.Sound.BaseSound | null = null;
 
+  // lastEventSound가 재생을 시작한 시각(this.time.now 기준) — 남은 재생 시간을 "duration -
+  // 경과 시간"으로 직접 계산하기 위함. `BaseSound.seek`로 경과 시간을 바로 읽을 수도 있지만,
+  // `seek`는 `WebAudioSound`/`HTML5AudioSound` 같은 구체 클래스에만 있고 `BaseSound` 타입
+  // 자체에는 없어서(`tsc --build` 기준 타입 에러 — `tsc --noEmit -p .`로는 못 잡았던 맹점,
+  // 2026-07-13 CI 배포가 이 에러로 계속 실패하던 걸 뒤늦게 발견) 직접 추적하는 방식으로 변경.
+  private lastEventSoundStartedAt = 0;
+
   // 아이템 마커 도형(별 모양 — 함정 마커는 박스 모양이라 헷갈리지 않게 구분). 함정 마커와
   // 동일하게 안개 상태에 맞춰 밝기 조정됨.
   private itemRects: (Phaser.GameObjects.Star | undefined)[][] = [];
@@ -545,6 +552,10 @@ class MazeScene extends Phaser.Scene {
   // 골인했는지 여부. true가 되면 더 이상 방향키 입력을 받지 않음(테스트용 종료 처리).
   private hasFinished = false;
 
+  // 이번 판이 시작된 실제 시각(Date.now() 기준 ms) — create()에서 기록, 골인 시
+  // clearTimeMs(= 지금 - 이 값)를 계산해 run.finish에 실어 보낸다.
+  private runStartTime = 0;
+
   constructor() {
     // 'MazeScene'은 이 씬의 이름표. 씬이 여러 개일 때 구분하는 용도라 지금은 큰 의미 없음.
     super('MazeScene');
@@ -585,6 +596,7 @@ class MazeScene extends Phaser.Scene {
       this.lastEventSound?.stop();
       const sound = this.sound.add(key);
       this.lastEventSound = sound;
+      this.lastEventSoundStartedAt = this.time.now;
       sound.play({ volume: SFX_VOLUME_OVERRIDES[key] ?? DEFAULT_SFX_VOLUME });
     } catch (err) {
       console.error(`효과음 재생 실패: ${key}`, err);
@@ -599,7 +611,8 @@ class MazeScene extends Phaser.Scene {
     const activeEvent = this.lastEventSound;
     if (activeEvent?.isPlaying) {
       const token = ++this.footstepDelayToken;
-      const remainingMs = Math.max(30, (activeEvent.duration - activeEvent.seek) * 1000);
+      const elapsedMs = this.time.now - this.lastEventSoundStartedAt;
+      const remainingMs = Math.max(30, activeEvent.duration * 1000 - elapsedMs);
       this.time.delayedCall(remainingMs, () => {
         if (token !== this.footstepDelayToken) return; // 그 사이 더 최근 요청이 들어왔으면 무시
         this.playFootstep(); // 재평가 — 대기하는 사이 다른 이벤트 효과음으로 바뀌었으면 다시 대기
@@ -623,6 +636,11 @@ class MazeScene extends Phaser.Scene {
 
   // create(): 게임이 시작될 때 딱 한 번만 실행됨. 여기서 맵과 캐릭터를 화면에 배치합니다.
   create() {
+    // 이번 판의 클리어 시간 기준점. 골인 시 run.finish로 보낼 clearTimeMs 계산에 쓰인다
+    // (2026-07-13: 지금까지 이 값 자체가 없어서 골인해도 리더보드에 기록이 전혀 안 남고
+    // 있었음 — checkGoalReached/reportRunFinish 참고).
+    this.runStartTime = Date.now();
+
     // 맵 크기만큼 타일 상태 배열을 준비한다. 통로와 맞닿은 벽 칸에는 석벽 텍스처 도형을
     // 하나씩 배치(깊은 안쪽 벽 칸은 어차피 안 보일 곳이라 만들지 않음). 벽 텍스처는 안개
     // 상태에 따라 밝기가 바뀐다(updateFog 참고) — 그래야 "탐험해야 벽도 보인다"는 안개
@@ -1963,7 +1981,6 @@ class MazeScene extends Phaser.Scene {
   }
 
   // 골인 지점에 도착했는지 확인하는 함수. 도착했으면 true를 반환하고 게임을 "완료" 상태로 만듦.
-  // (테스트용 — 실제 클리어 기록/랭킹 전송은 배영환님 백엔드 API 연동 필요)
   private checkGoalReached(x: number, y: number): boolean {
     if (x !== GOAL_POSITION.x || y !== GOAL_POSITION.y) return false;
 
@@ -1980,17 +1997,34 @@ class MazeScene extends Phaser.Scene {
     // 다음 주기적 flush까지 기다리면 마지막 몇 칸이 화면 종료 후로 밀릴 수 있어 바로 전송.
     void this.flushFootprints();
 
-    this.add
+    const goalText = this.add
       .text(
         (MAP_WIDTH * TILE_SIZE) / 2,
         (MAP_HEIGHT * TILE_SIZE) / 2,
         '🎉 GOAL!',
-        { fontSize: '64px', color: '#ffffff', fontStyle: 'bold' }
+        { fontSize: '64px', color: '#ffffff', fontStyle: 'bold', align: 'center' }
       )
       .setOrigin(0.5)
       .setDepth(20);
 
+    void this.reportRunFinish(goalText);
+
     return true;
+  }
+
+  // 골인 시 서버에 클리어 기록을 보내 리더보드에 반영한다. 2026-07-13까지 이 호출 자체가
+  // 없어서(테스트 단계 상태로 남아있었음) 실제로 골인해도 리더보드에 기록이 전혀 안 남고
+  // 있던 문제 수정 — 서버 run.finish는 이미 완전히 구현돼 있었음(docs/wbs.md 전체 블로커 참고).
+  private async reportRunFinish(goalText: Phaser.GameObjects.Text) {
+    const clearTimeMs = Date.now() - this.runStartTime;
+    try {
+      const result: RunFinishOutput = await trpc.run.finish.mutate({ mapId: MAP_ID, clearTimeMs });
+      goalText.setText(`🎉 GOAL!\nRank #${result.rank}${result.isNewRecord ? '  New Record!' : ''}`);
+    } catch (err) {
+      // 백엔드 없는 로컬 프리뷰 등에서는 실패가 정상 동작 — 다른 mutation들(reportPosition/
+      // reportItemPickup)과 동일한 패턴. 리더보드 반영은 실제 devvit 환경에서만 검증 가능.
+      console.error('run.finish 실패 — 로컬 프리뷰에서는 정상(리더보드 미반영)', err);
+    }
   }
 
   // 안개(시야) 상태를 다시 계산하는 함수.
