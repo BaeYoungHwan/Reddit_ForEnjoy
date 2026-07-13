@@ -8,12 +8,8 @@ export type TrapInstance = Position & {
   type: TrapType;
 };
 
-// items.md 확정 4종 중 서버 API가 필요한 손전등/쉴드/함정 탐지기 3종 (함정 설치는 후속).
-export type ItemType = 'flashlight' | 'shield' | 'detector';
-
-export type ItemInstance = Position & {
-  type: ItemType;
-};
+// items.md 확정 4종 전부 — 손전등/쉴드/함정 탐지기/함정 설치.
+export type ItemType = 'flashlight' | 'shield' | 'detector' | 'trapInstall';
 
 export type LeaderboardEntry = {
   userId: string;
@@ -27,7 +23,9 @@ export type MapStateOutput = {
   date: string;
   footprints: Position[];
   myTraps: TrapInstance[];
-  items: ItemInstance[];
+  // 미스터리 박스: 먹기 전엔 아이템/함정 여부조차 알 수 없으므로 좌표만 내려주고
+  // 타입은 item.pickup 응답에서만(픽업 시점에 서버가 결정해) 밝혀진다.
+  mysteryBoxes: Position[];
 };
 
 export type FootprintRecordInput = { mapId: string; tiles: Position[] };
@@ -44,10 +42,14 @@ export type TrapTriggerInput = Position & { mapId: string };
 export type TrapTriggerOutput = { hit: boolean; type?: TrapType };
 
 export type ItemPickupInput = Position & { mapId: string };
-// revealedTraps: type이 'detector'일 때만 채워짐 — 탐지기 사용을 별도 API로 분리하지 않고
-// pickup 시점(이미 오라클 방지용 위치 인접 검증을 거친 이벤트)에 묶어 반환한다.
-// 근거: docs/design-docs/items.md 함정 탐지기 vs trap.trigger 오라클 방지 설계 충돌 조율 결과.
-export type ItemPickupOutput = { picked: boolean; type?: ItemType; revealedTraps?: TrapInstance[] };
+// 미스터리 박스: outcome이 'item'/'trap' 중 무엇인지는 서버가 pickup 시점에 결정해서 알려준다
+// (근거: docs/design-docs/items.md "스폰 시각/판정 방식 변경" 절).
+// revealedTraps: outcome이 'item'이고 type이 'detector'일 때만 채워짐 — 탐지기 사용을 별도
+// API로 분리하지 않고 pickup 시점(이미 오라클 방지용 위치 인접 검증을 거친 이벤트)에 묶어 반환한다.
+export type ItemPickupOutput =
+  | { picked: false }
+  | { picked: true; outcome: 'item'; type: ItemType; revealedTraps?: TrapInstance[] }
+  | { picked: true; outcome: 'trap'; type: TrapType };
 
 export type RunFinishInput = { mapId: string; clearTimeMs: number };
 export type RunFinishOutput = { rank: number; isNewRecord: boolean };
