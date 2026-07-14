@@ -440,6 +440,23 @@ describe('map.getState 미스터리 박스 시딩', () => {
   });
 });
 
+describe('map.getState 다른 유저 설치 함정 위치 공개 (2026-07-14 오라클 완화 — otherTraps)', () => {
+  it('다른 유저가 설치한 함정은 타입 없이 좌표만 otherTraps로 내려오고, 본인 함정은 myTraps에만 있고 otherTraps엔 없다', async () => {
+    const installer = createCaller({ userId: 'user-installer-2' });
+    await installer.trap.install({ mapId: 'map-1', type: 'blind', x: 20, y: 5 });
+
+    const viewer = createCaller({ userId: 'user-viewer' });
+    await viewer.trap.install({ mapId: 'map-1', type: 'reverse', x: 21, y: 6 });
+
+    const state = await viewer.map.getState({ mapId: 'map-1' });
+
+    // 정확히 {x,y}만 있는 객체와 deep-equal이어야 통과 — type 필드가 섞여 있었다면 실패한다(오라클 방지: 종류는 비공개).
+    expect(state.otherTraps).toContainEqual({ x: 20, y: 5 });
+    expect(state.otherTraps).not.toContainEqual({ x: 21, y: 6 });
+    expect(state.myTraps).toContainEqual({ x: 21, y: 6, type: 'reverse' });
+  });
+});
+
 describe('item.pickup 위치 앵커 검증', () => {
   it('map.getState 없이 호출하면 NO_SESSION 오류', async () => {
     const caller = createCaller({ userId: 'user-l' });
