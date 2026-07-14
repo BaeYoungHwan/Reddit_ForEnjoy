@@ -4,7 +4,7 @@ import Phaser from 'phaser';
 import { StrictMode, useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import { exitExpandedMode } from '@devvit/web/client';
-import { MAZE_MAPS, getMazeMap, pickDailyMapId } from '../shared/maps';
+import { getMazeMap, pickDailyMapId, isRegisteredMapId } from '../shared/maps';
 import { getKstDateString } from '../shared/kstDate';
 import { buildRockWallTileDataUri } from './mazePattern';
 import { computeClothWaveX } from './goalFlagWave';
@@ -42,9 +42,11 @@ const IS_LOCAL_PREVIEW = window.location.hostname === 'localhost' || window.loca
 // IS_LOCAL_PREVIEW가 항상 false라 이 분기 자체가 안 타서 영향 없음, 오늘의 맵은 항상 날짜로만 결정).
 // 등록 안 된 값이면 무시(폴백)한다 — 검증 없이 그대로 쓰면 화면은 getMazeMap의 기본 폴백
 // (map-1)으로 보이는데 서버로 나가는 mapId는 잘못된 문자열 그대로 나가버려 화면과 실제
-// 통신이 어긋나는 상태가 생긴다(2026-07-13 리뷰에서 발견).
+// 통신이 어긋나는 상태가 생긴다(2026-07-13 리뷰에서 발견). isRegisteredMapId로 검증하는 이유:
+// `in` 연산자는 프로토타입 체인까지 통과시켜 ?map=constructor 같은 값이 뚫린다(2026-07-14
+// PR#60 리뷰에서 발견).
 const rawMapOverride = IS_LOCAL_PREVIEW ? new URLSearchParams(window.location.search).get('map') : null;
-const MAP_ID_OVERRIDE = rawMapOverride && rawMapOverride in MAZE_MAPS ? rawMapOverride : null;
+const MAP_ID_OVERRIDE = rawMapOverride && isRegisteredMapId(rawMapOverride) ? rawMapOverride : null;
 const MAP_ID = MAP_ID_OVERRIDE ?? pickDailyMapId(getKstDateString());
 
 // 실제 고정 맵 데이터(송원호 담당, src/shared/maps.ts). splash.tsx의 배경 미리보기와 같은 데이터.

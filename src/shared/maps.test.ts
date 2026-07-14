@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MAZE_MAPS, getMazeMap, pickDailyMapId } from './maps';
+import { MAZE_MAPS, getMazeMap, pickDailyMapId, isRegisteredMapId } from './maps';
 
 function assertWalkableStartToExit(map: (typeof MAZE_MAPS)[string]) {
   const width = map.grid[0]!.length;
@@ -94,6 +94,24 @@ describe('getMazeMap', () => {
 
   it('falls back to map-1 for an unknown id', () => {
     expect(getMazeMap('does-not-exist').id).toBe('map-1');
+  });
+});
+
+describe('isRegisteredMapId', () => {
+  it('accepts registered map ids', () => {
+    expect(isRegisteredMapId('map-1')).toBe(true);
+    expect(isRegisteredMapId('map-2')).toBe(true);
+  });
+
+  it('rejects unknown ids', () => {
+    expect(isRegisteredMapId('does-not-exist')).toBe(false);
+  });
+
+  it('rejects Object.prototype keys (in 연산자로는 뚫리는 프로토타입 우회 케이스)', () => {
+    expect(isRegisteredMapId('constructor')).toBe(false);
+    expect(isRegisteredMapId('toString')).toBe(false);
+    expect(isRegisteredMapId('hasOwnProperty')).toBe(false);
+    expect(isRegisteredMapId('valueOf')).toBe(false);
   });
 });
 

@@ -140,3 +140,10 @@ export function pickDailyMapId(kstDateString: string): string {
 export function getMazeMap(mapId: string): MazeMap {
   return MAZE_MAPS[mapId] ?? MAZE_MAPS['map-1']!;
 }
+
+// mapId 문자열이 실제로 등록된 맵인지 검증한다. `mapId in MAZE_MAPS`로 직접 검사하면 MAZE_MAPS가
+// 일반 객체 리터럴이라 Object.prototype까지 검사 대상에 들어가 'constructor'/'toString' 같은
+// 값도 통과해버린다(2026-07-14 PR#60 리뷰에서 발견) — hasOwnProperty로 프로토타입 체인을 배제한다.
+export function isRegisteredMapId(mapId: string): boolean {
+  return Object.prototype.hasOwnProperty.call(MAZE_MAPS, mapId);
+}
