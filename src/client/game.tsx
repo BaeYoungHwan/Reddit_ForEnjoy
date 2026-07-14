@@ -627,13 +627,9 @@ class MazeScene extends Phaser.Scene {
   // 원래 모습으로 되돌린다(위 shieldRing과 생명주기 동일).
   private shieldIcon: Phaser.GameObjects.Image | null = null;
 
-  // 쉴드를 2개 이상 들고 있을 때만 아이콘 모서리에 남은 개수를 보여주는 원형 배지
+  // 쉴드를 2개 이상 들고 있을 때만 아이콘 옆에 "x2" 식으로 남은 개수를 보여주는 작은 텍스트
   // (2026-07-14 도입, 쉴드 스택 버그 수정과 함께) — 1개일 땐 굳이 숫자를 안 띄워도 아이콘
   // 자체가 "보유 중"을 이미 알려주므로 생략, 개수가 여럿일 때만 의미가 있어서 조건부로 만든다.
-  // 처음엔 파란 사각 태그(배경색+텍스트)였는데 shieldRing/shieldIcon의 시안색 톤과 안
-  // 어울린다는 피드백으로, 알림 배지 느낌의 원형(shieldCountBadgeBg + 숫자만)으로 교체
-  // (2026-07-14 재수정).
-  private shieldCountBadgeBg: Phaser.GameObjects.Arc | null = null;
   private shieldCountLabel: Phaser.GameObjects.Text | null = null;
 
   // 2026-07-13 재작업: 4칸 고정 배열(null로 빈칸 표현) 대신, 실제로 들고 있는 아이템만큼만
@@ -1158,10 +1154,7 @@ class MazeScene extends Phaser.Scene {
     this.shieldIcon?.setPosition(shieldIconX, headIconY);
     this.reverseIcon?.setPosition(this.playerImg.x + headIconOffsetX, headIconY);
     // 개수 배지는 쉴드 아이콘의 오른쪽 아래 모서리에 살짝 겹치게 붙인다(뱃지 느낌).
-    const badgeX = shieldIconX + TILE_SIZE * 0.16;
-    const badgeY = headIconY + TILE_SIZE * 0.14;
-    this.shieldCountBadgeBg?.setPosition(badgeX, badgeY);
-    this.shieldCountLabel?.setPosition(badgeX, badgeY);
+    this.shieldCountLabel?.setPosition(shieldIconX + TILE_SIZE * 0.16, headIconY + TILE_SIZE * 0.14);
   }
 
   // 지금 눌려있는 방향키를 -1/0/1 형태의 방향값으로 바꿔주는 함수. 아무 키도 안 눌렸으면 null.
@@ -1567,20 +1560,7 @@ class MazeScene extends Phaser.Scene {
   // 여기서 바로 처리한다 — 실제 함정/아이템 이펙트 적용과 isMoving/shieldCount 관리는
   // resolveArrival이 fetchTrapTrigger 결과와 함께 모아서 한 곳에서 처리한다(fetchTrapTrigger
   // 주석 참고 — 같은 타일에 설치형 함정과 미스터리 박스가 동시에 존재할 수 있음).
-  //
-  // 2026-07-14 실서버 QA(아이템이 한참 뒤에야 먹힘): itemDispatcher(직렬화 큐)가 모든 칸마다
-  // 요청을 넣다 보니, 연속 이동 중 네트워크 지연이 있으면 요청이 계속 밀려 쌓였다. remainingItems
-  // 는 map.getState가 이미 공개적으로 내려준 "아직 안 주운 박스 좌표" 목록(박스는 마커로 항상
-  // 표시되므로 위치 자체는 비밀이 아님 — outcome/type만 비밀)이라, 이 목록에 없는 칸이면
-  // item.pickup 요청 자체를 생략해도 오라클 방지를 해치지 않는다. 박스는 맵에 몇 곳뿐이라
-  // 대부분의 이동에서 요청이 아예 안 나가 큐가 밀릴 일이 없어진다. 함정 쪽은 상대가 몰래 설치한
-  // 함정일 수 있어 이 최적화를 적용할 수 없다(모든 칸에서 서버 확인이 필수 — trap.trigger는
-  // 그대로 둠).
   private async fetchItemEncounter(x: number, y: number): Promise<ItemEncounter> {
-    if (!this.remainingItems.some((item) => item.x === x && item.y === y)) {
-      return { kind: 'none' };
-    }
-
     const result = await this.reportItemPickup(x, y);
     if (!result.picked) return { kind: 'none' };
 
@@ -1630,8 +1610,6 @@ class MazeScene extends Phaser.Scene {
         this.shieldRing = null;
         this.shieldIcon?.destroy();
         this.shieldIcon = null;
-        this.shieldCountBadgeBg?.destroy();
-        this.shieldCountBadgeBg = null;
         this.shieldCountLabel?.destroy();
         this.shieldCountLabel = null;
       } else {
@@ -1888,55 +1866,44 @@ class MazeScene extends Phaser.Scene {
     this.refreshShieldCountLabel();
   }
 
-  // 쉴드 개수 배지(원형 + 숫자)를 만들거나 갱신한다 — 1개 이하면 굳이 안 보여준다(아이콘
-  // 자체가 "보유 중"은 이미 표시해줌, 개수가 여럿일 때만 추가 정보로 의미가 있음). 2026-07-14:
-  // 실플레이 QA에서 "잘 눈에 안 띈다"는 피드백으로 한 차례 대비를 키웠는데(파란 사각 태그),
-  // 이후 "shieldRing/shieldIcon의 시안색 톤과 안 어울린다"는 디자인 피드백으로 알림 배지
-  // 느낌의 원형(shieldCountBadgeBg, shieldRing과 같은 시안 테두리)으로 재교체 — 텍스트도
-  // "x2" 대신 숫자만 남겨 좁은 원 안에서 더 깔끔하게 보이도록 함.
+  // 쉴드 개수 배지("x2" 등)를 만들거나 갱신한다 — 1개 이하면 굳이 안 보여준다(아이콘 자체가
+  // "보유 중"은 이미 표시해줌, 개수가 여럿일 때만 추가 정보로 의미가 있음). 2026-07-14: 실플레이
+  // QA에서 "잘 눈에 안 띈다"는 피드백 — 글자를 키우고 테두리를 넣어 대비를 높이고, 새로
+  // 생기거나 개수가 바뀔 때마다 살짝 튕기는 펀치 효과를 줘서 "지금 막 늘었다"는 걸 강조한다.
   private refreshShieldCountLabel() {
     if (this.shieldCount <= 1) {
-      this.shieldCountBadgeBg?.destroy();
-      this.shieldCountBadgeBg = null;
       this.shieldCountLabel?.destroy();
       this.shieldCountLabel = null;
       return;
     }
 
-    const text = String(this.shieldCount);
-    if (this.shieldCountLabel && this.shieldCountBadgeBg) {
+    const text = `x${this.shieldCount}`;
+    if (this.shieldCountLabel) {
       this.shieldCountLabel.setText(text);
-      const punch = { duration: 120, yoyo: true, ease: 'Sine.easeOut' as const };
-      this.tweens.add({
-        targets: this.shieldCountBadgeBg,
-        scale: (_target: Phaser.GameObjects.Arc, _key: string, value: number) => value * 1.35,
-        ...punch,
-      });
       this.tweens.add({
         targets: this.shieldCountLabel,
         scale: (_target: Phaser.GameObjects.Text, _key: string, value: number) => value * 1.35,
-        ...punch,
+        duration: 120,
+        yoyo: true,
+        ease: 'Sine.easeOut',
       });
       return;
     }
 
-    // 배경 원 — shieldRing과 같은 시안 테두리로 통일해 같은 아이템의 UI라는 걸 알 수 있게 함.
-    this.shieldCountBadgeBg = this.add.circle(this.playerImg.x, this.playerImg.y, TILE_SIZE * 0.17, 0x0c1a2e, 1);
-    this.shieldCountBadgeBg.setStrokeStyle(2, 0xbfffff, 0.9);
-    this.shieldCountBadgeBg.setScale(0);
-    this.shieldCountBadgeBg.setDepth(12); // shieldIcon(depth 11)보다 위
-
     this.shieldCountLabel = this.add
       .text(this.playerImg.x, this.playerImg.y, text, {
-        fontSize: '13px',
+        fontSize: '14px',
         color: '#ffffff',
         fontStyle: 'bold',
+        backgroundColor: '#0369a1',
+        padding: { x: 4, y: 2 },
+        stroke: '#0c1a2e',
+        strokeThickness: 3,
       })
       .setOrigin(0.5)
       .setScale(0)
-      .setDepth(13); // 배경 원보다 위
-
-    this.tweens.add({ targets: [this.shieldCountBadgeBg, this.shieldCountLabel], scale: 1, duration: 180, ease: 'Back.easeOut' });
+      .setDepth(12); // shieldIcon(depth 11)보다 위
+    this.tweens.add({ targets: this.shieldCountLabel, scale: 1, duration: 180, ease: 'Back.easeOut' });
   }
 
   // 함정 탐지기 — items.md 초안: 반경 3칸 내 함정을 표시. 반경 필터링은 서버
