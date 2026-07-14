@@ -761,6 +761,13 @@ class MazeScene extends Phaser.Scene {
   // 골인했는지 여부. true가 되면 더 이상 방향키 입력을 받지 않음(테스트용 종료 처리).
   private hasFinished = false;
 
+  // App(React)의 QuitConfirmModal이 떠 있는 동안 true — 이동/함정 발동/아이템 사용을 전부
+  // 막는다. React 오버레이는 Phaser 캔버스 밖에서 그려지기 때문에 모달이 떠 있어도 키보드
+  // 입력은 계속 MazeScene으로 들어온다 — 이 플래그가 없으면 "이 런을 나가시겠습니까?" 확인
+  // 팝업이 떠 있는 동안에도 계속 플레이가 가능해서(심하면 팝업이 뜬 채로 골인까지 가능)
+  // 확인 모달의 의미가 없어진다(2026-07-14 리뷰에서 발견). setInputLocked 참고.
+  private inputLocked = false;
+
   // 이번 판이 시작된 실제 시각(Date.now() 기준 ms) — create()에서 기록, 골인 시
   // clearTimeMs(= 지금 - 이 값)를 계산해 run.finish에 실어 보낸다.
   private runStartTime = 0;
@@ -985,10 +992,20 @@ class MazeScene extends Phaser.Scene {
   // "지금 재생 중인 소리를 끈다"가 아니라 "다음 재생부터 안 튼다"로 충분하다. 음소거하는
   // 순간엔 sfxQueue도 함께 비운다(clearQueueOnMute) — 안 비우면 playSfxNow의 대기열 재생
   // 콜백이 그대로 이어서 재생해버려 "껐는데도 큐에 밀려 있던 소리가 뒤늦게 들리는" 문제가
-  // 있었다(2026-07-14 발견, sfxQueue.test.ts로 회귀 테스트됨).
+  // 있었다(2026-07-14 발견, sfxQueue.test.ts로 회귀 테스트됨). 2026-07-14 리뷰 추가 지적:
+  // 큐만 비우고 지금 재생 중인 소리(lastEventSound)는 그대로 끝까지 뒀었다 — 시야차단(6초)
+  // 처럼 긴 효과음 도중 음소거를 눌러도 몇 초간 계속 들려서 setBgmMuted(즉시 pause)와
+  // 체감이 어긋났다. destroy()로 즉시 끊어 두 토글의 "음소거 = 즉시 조용해짐" 체감을 맞춘다.
   setSfxMuted(muted: boolean) {
     this.sfxMuted = muted;
     this.sfxQueue = clearQueueOnMute(this.sfxQueue, muted);
+    if (muted) this.lastEventSound?.destroy();
+  }
+
+  // App(React)의 QuitConfirmModal이 열리고 닫힐 때 호출된다(inputLocked 필드 설명 참고) —
+  // update()의 이동 처리와 Z/X 키 핸들러(useSelectedItem/cycleSelectedSlot) 양쪽에서 확인한다.
+  setInputLocked(locked: boolean) {
+    this.inputLocked = locked;
   }
 
   // 효과음이 재생되는 동안 배경음악 음량을 BGM_DUCK_RATIO로 낮췄다가, durationMs 뒤 평상시
@@ -1367,6 +1384,9 @@ class MazeScene extends Phaser.Scene {
 
     // 골인했으면 더 이상 입력을 받지 않음 (테스트용 종료 처리)
     if (this.hasFinished) return;
+
+    // QuitConfirmModal이 떠 있는 동안엔 이동 입력을 막는다(inputLocked 필드 설명 참고).
+    if (this.inputLocked) return;
 
     // 이동 애니메이션이 재생 중이면 새 입력은 무시 (칸 단위로 딱딱 끊어 이동하게 하기 위함)
     if (this.isMoving) return;
@@ -2553,7 +2573,7 @@ class MazeScene extends Phaser.Scene {
   // 있다가 다른 칸에서 Z로 재시도할 수 있다.
   private useSelectedItem() {
     const item = this.heldItems[this.selectedSlotIndex];
-    if (!item || this.hasFinished) return;
+    if (!item || this.hasFinished || this.inputLocked) return;
 
     // 쉴드는 여기 안 옴 — 즉시무장 예외라 애초에 인벤토리에 안 들어간다(applyLoadout/
     // resolveArrival 참고).
@@ -2615,7 +2635,7 @@ class MazeScene extends Phaser.Scene {
   // X키 — 선택을 다음 아이템으로 옮긴다. 들고 있는 게 없으면 아무 일도 하지 않는다(순환할
   // 대상 자체가 없음 — 예전처럼 빈 슬롯을 순환 대상에 포함시키던 개념이 없어짐, 2026-07-13).
   private cycleSelectedSlot() {
-    if (this.heldItems.length === 0) return;
+    if (this.heldItems.length === 0 || this.inputLocked) return;
     this.selectedSlotIndex = (this.selectedSlotIndex + 1) % this.heldItems.length;
     this.refreshItemSlotsUI({ punchIndex: this.selectedSlotIndex });
   }
@@ -3430,6 +3450,14 @@ export const App = () => {
     window.addEventListener(MAZE_FINISHED_EVENT, onFinished);
     return () => window.removeEventListener(MAZE_FINISHED_EVENT, onFinished);
   }, []);
+
+  // QuitConfirmModal(React 오버레이)이 떠 있는 동안 MazeScene의 입력을 잠근다 — 모달 없이도
+  // 캔버스는 그대로 살아있어서, 이 동기화가 없으면 "이 런을 나가시겠습니까?" 팝업이 뜬
+  // 채로도 계속 이동/함정 발동/아이템 사용이 가능했다(2026-07-14 리뷰에서 발견). 열기(Quit
+  // 버튼)/취소(Cancel) 양쪽 모두 이 하나의 effect로 커버된다.
+  useEffect(() => {
+    gameRef.current?.scene.getScene<MazeScene>('MazeScene')?.setInputLocked(showQuitConfirm);
+  }, [showQuitConfirm]);
 
   const toggleBgmMuted = () => {
     const next = !bgmMuted;
