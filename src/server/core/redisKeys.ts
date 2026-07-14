@@ -28,6 +28,14 @@ export const itemBoardKey = (mapId: string, date: string, userId: string): strin
 export const itemSeededKey = (mapId: string, date: string, userId: string): string =>
   `item:seeded:${mapId}:${date}:${userId}`;
 
+// 2026-07-14: 같은 날 재도전(run.finish가 itemSeededKey/itemBoardKey를 지움, trpc.ts 참고)해도
+// 미스터리 박스 스폰 배치가 매번 달라져야 한다는 요구사항 때문에, 시딩할 때마다 증가하는
+// 카운터를 스폰 시드에 섞어 넣는다. Date.now()만으로는 재시딩이 같은 밀리초 안에 연달아
+// 일어나면(테스트처럼 실제 I/O 지연이 없는 환경 등) 시드가 우연히 같아질 수 있어, 원자적으로
+// 항상 서로 다른 값을 보장하는 INCR 카운터를 대신 쓴다.
+export const itemSeedGenerationKey = (mapId: string, date: string, userId: string): string =>
+  `item:seedgen:${mapId}:${date}:${userId}`;
+
 export const leaderboardKey = (mapId: string, date: string): string => `leaderboard:${mapId}:${date}`;
 
 // leaderboardKey의 정렬 스코어는 steps/clearTimeMs를 하나의 숫자로 합쳐 인코딩(아래
