@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MAZE_MAPS, getMazeMap, pickDailyMapId, isRegisteredMapId } from './maps';
+import { MAZE_MAPS, SPLASH_DECORATIVE_MAP, getMazeMap, pickDailyMapId, isRegisteredMapId } from './maps';
 
 function assertWalkableStartToExit(map: (typeof MAZE_MAPS)[string]) {
   const width = map.grid[0]!.length;
@@ -83,6 +83,40 @@ describe('MAZE_MAPS / map-2', () => {
 
   it('has a walkable path from start to exit (not walled off)', () => {
     expect(assertWalkableStartToExit(map)).toBe(true);
+  });
+});
+
+// 2026-07-14 피드백: 스플래시 배경 미로가 오늘 실제 플레이 맵과 똑같아서 스포일러가 되던 문제로
+// 분리한 장식 전용 맵(splash.tsx가 배경/발자국 애니메이션에만 씀) — map-1/map-2와 동일한 무결성
+// 검증에 더해, MAZE_MAPS에 절대 등록되면 안 된다는 것(=pickDailyMapId/getMazeMap이 실제 플레이
+// 맵으로 못 고름)도 함께 고정한다.
+describe('SPLASH_DECORATIVE_MAP', () => {
+  const map = SPLASH_DECORATIVE_MAP;
+
+  it('parses S as the start tile and its grid cell as floor', () => {
+    expect(map.start).toEqual({ x: 1, y: 1 });
+    expect(map.grid[map.start.y]![map.start.x]).toBe('floor');
+  });
+
+  it('parses E as the exit tile and its grid cell as exit', () => {
+    expect(map.exit).toEqual({ x: 11, y: 3 });
+    expect(map.grid[map.exit.y]![map.exit.x]).toBe('exit');
+  });
+
+  it('produces a rectangular grid matching the layout dimensions', () => {
+    expect(map.grid.length).toBe(21);
+    for (const row of map.grid) {
+      expect(row.length).toBe(25);
+    }
+  });
+
+  it('has a walkable path from start to exit (not walled off)', () => {
+    expect(assertWalkableStartToExit(map)).toBe(true);
+  });
+
+  it('is not registered in MAZE_MAPS — must never be selectable as a real playable map', () => {
+    expect(Object.values(MAZE_MAPS)).not.toContain(map);
+    expect(MAZE_MAPS[map.id]).toBeUndefined();
   });
 });
 
