@@ -189,3 +189,79 @@ export function getMazeMap(mapId: string): MazeMap {
 export function isRegisteredMapId(mapId: string): boolean {
   return Object.prototype.hasOwnProperty.call(MAZE_MAPS, mapId);
 }
+
+const ADJACENT_DIRS: ReadonlyArray<readonly [number, number]> = [
+  [1, 0],
+  [-1, 0],
+  [0, 1],
+  [0, -1],
+];
+
+// 시작(start)에서 골인(exit)까지 실제로 도달 가능한지, 특정 한 칸(excludedKey)을 지나갈 수
+// 없다고 가정하고 BFS로 확인한다. computeMandatoryPathTiles 전용 내부 헬퍼.
+function canReachExitWithout(map: MazeMap, excludedKey: string): boolean {
+  const { grid, start, exit } = map;
+  const height = grid.length;
+  const width = grid[0]?.length ?? 0;
+  const startKey = `${start.x},${start.y}`;
+  if (startKey === excludedKey) return false;
+
+  const visited = new Set<string>([startKey]);
+  const queue: Position[] = [start];
+  let head = 0;
+  while (head < queue.length) {
+    const cur = queue[head++]!;
+    if (cur.x === exit.x && cur.y === exit.y) return true;
+    for (const [dx, dy] of ADJACENT_DIRS) {
+      const nx = cur.x + dx;
+      const ny = cur.y + dy;
+      if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+      if (grid[ny]![nx] === 'wall') continue;
+      const key = `${nx},${ny}`;
+      if (key === excludedKey || visited.has(key)) continue;
+      visited.add(key);
+      queue.push({ x: nx, y: ny });
+    }
+  }
+  return false;
+}
+
+// 2026-07-14 임소리 요청(미스터리 박스 랜덤 스폰 도입에 맞춰 신설): 시작→골인 사이에서
+// "이 칸을 지나가지 않고는 골인에 도달할 방법이 없는" 칸들의 집합을 계산한다(각 후보 칸을
+// 하나씩 그래프에서 제거해보고 그래도 골인 도달이 가능한지 BFS로 확인 — 트리형 미로라
+// loopRatio가 낮아 이런 칸이 많다, maps.ts 상단 4차 재설계 주석 참고). 미스터리 박스(아이템/
+// 함정 공용 스폰)가 이런 칸에 떨어지면, 함정 탐지기로 미리 알아내도 피해갈 방법 자체가 없어
+// "탐지"라는 아이템의 의미가 없어진다 — 랜덤 스폰 후보에서 이 칸들을 제외하기 위한 함수.
+// 시작/골인 칸 자체는 스폰 후보 판정에서 별도로 걸러지므로 이 집합에 포함하지 않는다.
+// 맵 크기가 작아(25x21 안팎) 후보 칸마다 BFS를 새로 도는 O(V*(V+E)) 방식도 충분히 빠르다
+// (실측 약 30ms/맵). 다만 이 계산은 미스터리 박스를 새로 심을 때마다(하루 첫 판/재도전마다)
+// 매번 처음부터 다시 도는데, 결과는 맵 레이아웃(고정 상수)에만 의존해 절대 안 바뀌므로 —
+// 2026-07-14 임소리: 유저가 늘어날 경우를 대비해 mapId 기준으로 한 번만 계산하고 재사용하도록
+// 메모이즈. 캐시는 프로세스 생존 기간 동안만 유지(서버 재시작 시 그냥 다시 계산될 뿐 — 별도
+// 무효화 로직 불필요, 맵 데이터가 코드 배포 없이는 안 바뀌므로 stale 걱정 없음).
+const mandatoryPathTilesCache = new Map<string, Set<string>>();
+
+export function computeMandatoryPathTiles(map: MazeMap): Set<string> {
+  // 2026-07-14 PR#70 리뷰 지적: 캐시된 Set 참조를 그대로 반환하면, 호출부가 실수로 반환값을
+  // 수정(add/delete)했을 때 캐시 자체가 오염되어 서버 재시작 전까지 잘못된 값이 고착된다 —
+  // 매번 얕은 복사본을 반환해 호출부가 뭘 하든 캐시 원본은 항상 안전하게 보존한다.
+  const cached = mandatoryPathTilesCache.get(map.id);
+  if (cached) return new Set(cached);
+
+  const { grid, start, exit } = map;
+  const mandatory = new Set<string>();
+
+  for (let y = 0; y < grid.length; y++) {
+    for (let x = 0; x < grid[y]!.length; x++) {
+      if (grid[y]![x] !== 'floor') continue;
+      if (x === start.x && y === start.y) continue;
+      if (x === exit.x && y === exit.y) continue;
+      if (!canReachExitWithout(map, `${x},${y}`)) {
+        mandatory.add(`${x},${y}`);
+      }
+    }
+  }
+
+  mandatoryPathTilesCache.set(map.id, mandatory);
+  return new Set(mandatory);
+}
