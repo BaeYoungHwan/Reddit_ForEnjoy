@@ -13,6 +13,7 @@ import { LOADOUT_STORAGE_KEY } from './loadout';
 import { resolveTrapEncounters } from './trapResolution';
 import type {
   ItemPickupOutput,
+  ItemType,
   ItemUseDetectorOutput,
   Position,
   RunFinishOutput,
@@ -331,16 +332,11 @@ const INSTALL_FAILURE_MESSAGES: Record<InstallFailureReason, string> = {
   RETRY: 'Placement failed, please try again',
 };
 
-// items.md 기준 아이템 4종 중 서버 연동된 3종(손전등/쉴드/함정 탐지기) + 클라이언트 전용
-// 'trapInstall'(서버 스폰 데이터가 아직 없어 로컬 폴백 경로로만 테스트 가능 — docs/wbs.md
-// 전체 블로커 참고). 2026-07-13: 함정 탐지기는 item.useDetector로 Z 발동 시점에 라이브
-// 스캔하는 방식으로 바뀜(아래 HeldItem 주석 참고) — applyDetectorItem 참고.
-type ItemType = 'flashlight' | 'shield' | 'trapInstall' | 'detector';
-
 // 아이템 좌표(+로컬 폴백 전용 종류). 2026-07-12: 서버가 미스터리 박스 방식(개별 스폰에
 // 타입을 저장하지 않고 픽업 시점에 rollMysteryOutcome()으로 결정)으로 재설계되면서
 // map.getState가 주는 실제 스폰 좌표(state.mysteryBoxes)엔 더 이상 타입이 없다 — type은
 // 백엔드 없는 로컬 프리뷰 폴백(TEMP_ITEMS/reportItemPickup의 catch)에서만 쓰인다.
+// ItemType(4종) 각각의 상세 스펙·확정 배경은 docs/design-docs/items.md 참고.
 type ItemInstance = { x: number; y: number; type?: ItemType };
 
 // fetchItemEncounter()의 반환 타입 — 미스터리 박스가 없었는지, 아이템으로 나왔는지, 함정으로
@@ -534,6 +530,18 @@ class MazeScene extends Phaser.Scene {
   //  역전돼 서버 위치 앵커가 뒤처진 채로 다음 이동을 검증해 정상 이동이
   //  INVALID_MOVE로 오판정될 수 있다 — 이를 막기 위한 요청 직렬화.)
   private trapDispatcher = new SequentialDispatcher<TrapTriggerOutput>();
+
+  // item.pickup 전용 직렬화 큐 — trapDispatcher와 동일한 이유로 필요하다(reportItemPickup
+  // 참고). 2026-07-14 발견: item.pickup을 직렬화 안 해도 된다고 판단했던 근거(2026-07-09,
+  // reportItemPickup 주석)는 그 시점엔 resolveArrival이 끝날 때까지 isMoving이 잠겨있어 한
+  // 번에 한 칸의 item.pickup만 in-flight일 수 있었기 때문에 성립했다 — 2026-07-13 PR #41
+  // (조작감 개선, isMoving을 트윈 완료 즉시 해제)로 그 전제가 깨지면서, 서로 다른 칸의
+  // item.pickup 두 개가 동시에 in-flight일 수 있게 됐다. Reddit 실환경처럼 응답 순서가
+  // 역전되면(나중 칸 응답이 이전 칸 응답보다 먼저 도착) 위치 앵커가 아직 안 옮겨진 상태라
+  // 정상적으로 있는 아이템도 INVALID_MOVE로 조용히 씹혀서 "아이템이 안 먹힌다"는 증상으로
+  // 나타난다(실서버 QA 2026-07-14). trap.trigger는 같은 칸이면 병렬로, 다른 칸끼리는
+  // 순서대로 나가도록 별도 큐로 분리해 병렬 조회 이점은 그대로 유지한다.
+  private itemDispatcher = new SequentialDispatcher<ItemPickupOutput>();
 
   // 지금 재생 중인 발걸음 소리 인스턴스 — 다음 발걸음이 날 때 아직 안 끝났으면 끊어서 겹쳐
   // 들리지 않게 한다(playFootstepNow 참고).
@@ -1485,15 +1493,14 @@ class MazeScene extends Phaser.Scene {
 
   // item.pickup을 호출해 서버에 픽업을 기록하고 실제로 주웠는지 응답을 받는다(다른 유저가
   // 먼저 주웠으면 picked:false). reportPosition과 동일한 이유로 실패 시 로컬 remainingItems
-  // 목록으로 직접 판정하는 폴백을 둔다.
-  // trapDispatcher로 직렬화하지 않는 이유: item.pickup도 trap.trigger와 동일하게 내부에서
-  // advancePosition(위치 앵커 검증)을 쓰지만, 같은 이동에 대해 둘 다 같은 좌표(x, y)를
-  // 타겟팅한다 — 어느 쪽이 먼저 응답해서 앵커를 그 좌표로 옮기든, 나머지 하나는 "직전
-  // 위치와의 거리 0"으로 검증을 통과한다(서버 advancePosition의 `거리 > 1`일 때만 거부하는
-  // 조건 참고). 그래서 이동마다 두 요청이 순서 상관없이 나가도 안전하다.
+  // 목록으로 직접 판정하는 폴백을 둔다. itemDispatcher로 직렬화하는 이유는 trapDispatcher와
+  // 동일 — 다른 칸끼리의 item.pickup 응답 순서가 역전되면 위치 앵커 검증에서 정상 이동이
+  // INVALID_MOVE로 오판정될 수 있다(itemDispatcher 선언부 주석 참고).
   private async reportItemPickup(x: number, y: number): Promise<ItemPickupOutput> {
     try {
-      return await trpc.item.pickup.mutate({ mapId: MAP_ID, x, y });
+      return await this.itemDispatcher.enqueue(() =>
+        trpc.item.pickup.mutate({ mapId: MAP_ID, x, y })
+      );
     } catch (err) {
       if (!IS_LOCAL_PREVIEW) {
         // reportPosition 주석 참고 — 실서버에서 나는 에러는(위치 앵커 레이스로 인한 정당한
