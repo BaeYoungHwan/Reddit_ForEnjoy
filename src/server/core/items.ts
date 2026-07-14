@@ -30,8 +30,17 @@ const MYSTERY_SPAWNS: Record<string, Position[]> = {
   'map-2': MAP_2_MYSTERY_SPAWNS,
 };
 
+// MYSTERY_SPAWNS[mapId] ?? MAP_1_MYSTERY_SPAWNS 형태로 직접 인덱싱하면 MYSTERY_SPAWNS가 일반
+// 객체 리터럴이라 Object.prototype 체인을 탄다 — mapId==='constructor' 같은 값이 Object 생성자
+// 함수(truthy)를 반환해 폴백이 안 걸리고, 이어지는 .map() 호출이 Function엔 없는 메서드라
+// TypeError로 크래시한다. map.getState(trpc.ts)가 화이트리스트 검증 없는 클라이언트 입력
+// (mapId: z.string().min(1))을 그대로 넘기므로 실제로 도달 가능한 경로다 — shared/maps.ts의
+// isRegisteredMapId/getMazeMap과 정확히 같은 취약점 클래스라 같은 방식(hasOwnProperty)으로
+// 막는다(PR#60 리뷰에서 발견).
 export function getMysteryBoxSpawns(mapId: string): Position[] {
-  return MYSTERY_SPAWNS[mapId] ?? MAP_1_MYSTERY_SPAWNS;
+  return Object.prototype.hasOwnProperty.call(MYSTERY_SPAWNS, mapId)
+    ? MYSTERY_SPAWNS[mapId]!
+    : MAP_1_MYSTERY_SPAWNS;
 }
 
 export function rollMysteryOutcome():
