@@ -393,6 +393,82 @@ export const appRouter = t.router({
     }),
   }),
 
+  // move.arrive: trap.trigger + item.pickup 통합 API(docs/design-docs/move-api-unification.md).
+  // 연속 이동 시 클라이언트가 두 API를 각자 SequentialDispatcher로 직렬화하면서 요청이 밀려
+  // 판정이 지연 반영되던 문제(실서버 RTT>0에서만 재현)의 근본 원인이 "이동 1칸당 서버 왕복 2회"였다.
+  // 위치 앵커 검증/커밋을 1회로 합치고 함정/아이템 판정을 병렬로 조회해 한 응답에 함께 반환한다.
+  // 마이그레이션 1단계(서버 PR)까지만 진행 — trap.trigger/item.pickup은 클라이언트가 전환할 때까지
+  // 그대로 유지한다(구버전 세션 대응, 문서 5절 4단계 마이그레이션 참고).
+  move: t.router({
+    arrive: protectedProcedure
+      .input(z.object({ mapId: z.string().min(1), x: z.number().int(), y: z.number().int() }))
+      .mutation(async ({ ctx, input }) => {
+        const { mapId, x, y } = input;
+        const date = getKstDateString();
+        const posKey = positionAnchorKey(mapId, date, ctx.userId);
+        const trapBoard = trapBoardKey(mapId, date);
+        const itemBoard = itemBoardKey(mapId, date, ctx.userId);
+        const field = tileMember({ x, y });
+
+        // 위치 앵커 + 함정보드 + 아이템보드 조회는 서로 의존관계가 없어 3방향 병렬.
+        const [last, rawTrap, rawItem] = await Promise.all([
+          readPositionAnchor(posKey),
+          redis.hGet(trapBoard, field),
+          redis.hGet(itemBoard, field),
+        ]);
+        assertAdjacent(last, { x, y });
+        // 위치 커밋은 여기서 1회만 — 기존엔 trap.trigger/item.pickup 각각 1회씩 총 2회였다.
+        await commitPosition(posKey, x, y);
+
+        let trapType: TrapType | undefined;
+        let trapInstallerId: string | undefined;
+        if (rawTrap) {
+          const parsed = JSON.parse(rawTrap) as { type: TrapType; installerId: string };
+          if (parsed.installerId !== ctx.userId) {
+            // 설치자 본인은 자기 함정을 회피한다 — 소모되지 않음(trap.trigger와 동일 규칙).
+            trapType = parsed.type;
+            trapInstallerId = parsed.installerId;
+          }
+        }
+        // 미스터리 박스: 결과는 픽업이 실제로 성사됐는지와 무관하게 미리 굴려도 안전하다(인메모리,
+        // 부수효과 없음) — 아래에서 hDel 성공 여부로 실제 픽업 성사만 별도 확정한다.
+        const rolled = rawItem ? rollMysteryOutcome() : null;
+
+        // 소모 처리(hDel)는 서로 다른 키라 병렬 발사 — 기존 trap.trigger의 hDel 2회 순차 호출도
+        // 여기서 함께 병렬화된다(통합과 무관한 부수 개선).
+        const [, , itemDeleted] = await Promise.all([
+          trapType ? redis.hDel(trapBoard, [field]) : Promise.resolve(0),
+          trapType ? redis.hDel(trapInstallerKey(mapId, date, trapInstallerId!), [field]) : Promise.resolve(0),
+          rawItem ? redis.hDel(itemBoard, [field]) : Promise.resolve(0),
+        ]);
+
+        const trap = trapType ? ({ hit: true, type: trapType } as const) : ({ hit: false } as const);
+        const item =
+          rawItem && itemDeleted > 0 && rolled
+            ? rolled.outcome === 'trap'
+              ? ({ picked: true, outcome: 'trap', type: rolled.type } as const)
+              : ({ picked: true, outcome: 'item', type: rolled.type } as const)
+            : ({ picked: false } as const);
+
+        // respawn(설치형/스폰형 둘 다 가능 — 같은 칸에서 동시에 터질 수 있어 dedupe)과 탐지기 충전은
+        // 서로 다른 키라 병렬 처리 가능. 둘 다 없으면 이 블록 자체를 건너뛰어 왕복을 아낀다.
+        const needsRespawn =
+          (trap.hit && trap.type === 'respawn') ||
+          (item.picked && item.outcome === 'trap' && item.type === 'respawn');
+        const needsDetectorCharge = item.picked && item.outcome === 'item' && item.type === 'detector';
+
+        if (needsRespawn || needsDetectorCharge) {
+          const start = getMapStartPosition(mapId);
+          await Promise.all([
+            needsRespawn ? commitPosition(posKey, start.x, start.y) : Promise.resolve(),
+            needsDetectorCharge ? redis.incrBy(detectorChargeKey(mapId, date, ctx.userId), 1) : Promise.resolve(),
+          ]);
+        }
+
+        return { trap, item };
+      }),
+  }),
+
   run: t.router({
     finish: protectedProcedure
       .input(
