@@ -17,7 +17,12 @@ const LEGEND: Record<string, TileType> = {
   E: 'exit',
 };
 
-function parseLayout(id: string, name: string, rows: string[]): MazeMap {
+// export하는 이유: splash.tsx가 스플래시 배경 전용 장식 미로(오늘의 실제 플레이 맵과 무관 —
+// 배경이 정답을 미리 보여주면 안 됨, 2026-07-14 피드백)를 같은 ASCII 레이아웃 형식으로 만들
+// 때 재사용한다. MAZE_MAPS엔 등록하지 않으므로 pickDailyMapId/getMazeMap이 절대 이 맵을
+// 실제 플레이 맵으로 고르지 않는다 — 이 함수로 만든 MazeMap은 배경 렌더링(buildMazeBackground)
+// /경로 계산(findPath) 입력으로만 쓰인다.
+export function parseLayout(id: string, name: string, rows: string[]): MazeMap {
   const grid = rows.map((row) => row.split('').map((ch) => LEGEND[ch] ?? 'wall'));
   let start: Position = { x: 0, y: 0 };
   let exit: Position = { x: 0, y: 0 };
