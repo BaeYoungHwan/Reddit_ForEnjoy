@@ -170,7 +170,12 @@ async function revealNearbyTraps(
 // 시점으로 앞당긴다. item.pickup은 이제 이 저장된 값을 그대로 읽기만 한다(아래 참고).
 async function seedMysteryBoxes(mapId: string, date: string, userId: string): Promise<void> {
   const boardKey = itemBoardKey(mapId, date, userId);
-  const generation = await redis.incrBy(itemSeedGenerationKey(mapId, date, userId), 1);
+  const generationKey = itemSeedGenerationKey(mapId, date, userId);
+  const generation = await redis.incrBy(generationKey, 1);
+  // 2026-07-14 PR#70 리뷰 지적: boardKey/itemSeededKey와 달리 이 카운터 키만 만료 설정이
+  // 빠져 있어서, date가 키에 포함됨에도 영구히 안 지워지고 (유저×맵×날짜) 조합만큼 계속
+  // 쌓이고 있었다 — 다른 하루짜리 키들과 동일하게 DATA_SAFETY_TTL_SECONDS로 맞춘다.
+  await redis.expire(generationKey, DATA_SAFETY_TTL_SECONDS);
   const spawnSeed = `${date}:${userId}:${generation}`;
   await redis.hSet(
     boardKey,

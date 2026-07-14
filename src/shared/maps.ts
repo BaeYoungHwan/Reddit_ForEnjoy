@@ -242,8 +242,11 @@ function canReachExitWithout(map: MazeMap, excludedKey: string): boolean {
 const mandatoryPathTilesCache = new Map<string, Set<string>>();
 
 export function computeMandatoryPathTiles(map: MazeMap): Set<string> {
+  // 2026-07-14 PR#70 리뷰 지적: 캐시된 Set 참조를 그대로 반환하면, 호출부가 실수로 반환값을
+  // 수정(add/delete)했을 때 캐시 자체가 오염되어 서버 재시작 전까지 잘못된 값이 고착된다 —
+  // 매번 얕은 복사본을 반환해 호출부가 뭘 하든 캐시 원본은 항상 안전하게 보존한다.
   const cached = mandatoryPathTilesCache.get(map.id);
-  if (cached) return cached;
+  if (cached) return new Set(cached);
 
   const { grid, start, exit } = map;
   const mandatory = new Set<string>();
@@ -260,5 +263,5 @@ export function computeMandatoryPathTiles(map: MazeMap): Set<string> {
   }
 
   mandatoryPathTilesCache.set(map.id, mandatory);
-  return mandatory;
+  return new Set(mandatory);
 }
