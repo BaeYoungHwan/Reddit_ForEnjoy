@@ -15,7 +15,7 @@ import { useLeaderboard } from './hooks/useLeaderboard';
 import { useMyUserId } from './hooks/useMyUserId';
 import { angleBetween, buildMazeBackground, findPath, tileToPercent } from './mazePattern';
 import { formatClearTime } from './format';
-import { getMazeMap, pickDailyMapId, isRegisteredMapId } from '../shared/maps';
+import { SPLASH_DECORATIVE_MAP, pickDailyMapId, isRegisteredMapId } from '../shared/maps';
 import { getKstDateString } from '../shared/kstDate';
 import type { LeaderboardEntry } from '../shared/game-types';
 import { LOADOUT_STORAGE_KEY, type LoadoutId } from './loadout';
@@ -49,7 +49,15 @@ const IS_LOCAL_PREVIEW = window.location.hostname === 'localhost' || window.loca
 const rawMapOverride = IS_LOCAL_PREVIEW ? new URLSearchParams(window.location.search).get('map') : null;
 const MAP_ID_OVERRIDE = rawMapOverride && isRegisteredMapId(rawMapOverride) ? rawMapOverride : null;
 const DEFAULT_MAP_ID = MAP_ID_OVERRIDE ?? pickDailyMapId(getKstDateString());
-const MAIN_MAP = getMazeMap(DEFAULT_MAP_ID);
+
+// 2026-07-14 피드백: 스플래시 배경 미로가 그날 실제로 플레이할 맵(MAIN_MAP)과 완전히 똑같아서,
+// 배경만 눈여겨봐도 오늘의 미로 구조가 미리 다 보이는 스포일러가 됐다 — 장식 전용 미로로 교체.
+// SPLASH_DECORATIVE_MAP(shared/maps.ts)은 MAZE_MAPS에 등록되지 않은 별도 레이아웃이라
+// pickDailyMapId/getMazeMap이 절대 이걸 실제 플레이 맵으로 고르지 않는다(오늘의 진짜 맵을
+// 결정하는 DEFAULT_MAP_ID와는 완전히 무관 — 리더보드 등 실제 게임 데이터 조회엔 여전히
+// DEFAULT_MAP_ID를 그대로 쓴다). shared/maps.ts에 둬서 map-1/map-2와 동일하게 maps.test.ts로
+// 무결성(그리드 크기, S/E 파싱, 도달 가능성) 검증도 받는다.
+const MAIN_MAP = SPLASH_DECORATIVE_MAP;
 const MAIN_MAP_BACKGROUND = buildMazeBackground(MAIN_MAP);
 
 const WALK_STRIDE = 2;

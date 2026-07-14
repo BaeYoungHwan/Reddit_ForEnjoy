@@ -52,6 +52,17 @@ export type ItemPickupOutput =
   | { picked: true; outcome: 'item'; type: ItemType }
   | { picked: true; outcome: 'trap'; type: TrapType };
 
+// move.arrive: trap.trigger + item.pickup 통합 API(docs/design-docs/move-api-unification.md).
+// 위치 앵커 검증/커밋을 1회만 수행하고 함정/아이템 판정을 한 응답에 함께 반환해 이동 1칸당
+// 서버 왕복을 2회→1회로 줄인다. 기존 TrapTriggerOutput/ItemPickupOutput을 그대로 재사용해
+// 응답을 두 하위 객체로 중첩한다 — 필드를 평평하게 섞으면 클라이언트가 매번 다른 필드 조합으로
+// "이 type이 함정인지 아이템인지"를 구분해야 해 타입 처리가 복잡해진다.
+export type MoveArriveInput = Position & { mapId: string };
+export type MoveArriveOutput = {
+  trap: TrapTriggerOutput;
+  item: ItemPickupOutput;
+};
+
 // 탐지기 발동(Z 시점 라이브 스캔) — 로드아웃/미스터리 박스 두 경로 공통 창구.
 // x, y를 입력받지 않는다 — 서버가 매 이동(trap.trigger)마다 갱신해온 위치 앵커를 그대로
 // 신뢰한다. 클라이언트가 좌표를 직접 넘기게 하면 오라클 방지 설계가 무의미해진다.
