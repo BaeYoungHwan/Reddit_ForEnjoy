@@ -137,8 +137,14 @@ export function pickDailyMapId(kstDateString: string): string {
   return ids[index]!;
 }
 
+// isRegisteredMapId로 폴백 여부를 판정한다 — `MAZE_MAPS[mapId] ?? MAZE_MAPS['map-1']!` 형태로
+// 직접 접근하면 mapId==='constructor' 같은 값이 Object.prototype 체인을 타고 truthy를 반환해
+// 폴백이 발동하지 않는다. server/trpc.ts가 클라이언트 입력(mapId: z.string().min(1), 화이트리스트
+// 검증 없음)을 그대로 이 함수에 넘기므로(getMapStartPosition 경유) 서버까지 뚫리는 취약점이었다
+// (2026-07-14 PR#60 리뷰에서 발견 — 처음엔 클라이언트 ?map= 오버라이드만 고쳤다가, getMazeMap
+// 자체가 여전히 취약해 서버 map.getState가 mapId='constructor' 한 번으로 크래시하는 걸 재확인).
 export function getMazeMap(mapId: string): MazeMap {
-  return MAZE_MAPS[mapId] ?? MAZE_MAPS['map-1']!;
+  return isRegisteredMapId(mapId) ? MAZE_MAPS[mapId]! : MAZE_MAPS['map-1']!;
 }
 
 // mapId 문자열이 실제로 등록된 맵인지 검증한다. `mapId in MAZE_MAPS`로 직접 검사하면 MAZE_MAPS가

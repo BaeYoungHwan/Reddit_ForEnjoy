@@ -95,6 +95,11 @@ describe('getMazeMap', () => {
   it('falls back to map-1 for an unknown id', () => {
     expect(getMazeMap('does-not-exist').id).toBe('map-1');
   });
+
+  it('falls back to map-1 for Object.prototype keys instead of returning a non-map value', () => {
+    expect(getMazeMap('constructor').id).toBe('map-1');
+    expect(getMazeMap('toString').id).toBe('map-1');
+  });
 });
 
 describe('isRegisteredMapId', () => {
