@@ -1,7 +1,7 @@
 # move.arrive / run.finish 코드리뷰 후속 — 버그 수정 기획안
 
-> 담당: 배영환 (백엔드/비동기 데이터) | 상태: ⚠️ 기획 초안 — 구현 착수 전
-> 관련: `/code-review high HEAD~2..HEAD`(2026-07-14, 커밋 `ae48204`/`8a749f7` 리뷰), `docs/design-docs/move-api-unification.md`, `docs/design-docs/item-board-reset.md`, `src/server/trpc.ts`
+> 담당: 배영환 (백엔드/비동기 데이터) | 상태: ⚠️ 기획 초안 — 8절(PR #67 리뷰 후속)은 구현 착수 전, 나머지는 커밋 `9268fb0` 반영 완료
+> 관련: `/code-review high HEAD~2..HEAD`(2026-07-14, 커밋 `ae48204`/`8a749f7` 리뷰), `docs/design-docs/move-api-unification.md`, `docs/design-docs/item-board-reset.md`, `src/server/trpc.ts`, PR #67(GitHub 리뷰, 2026-07-15)
 
 ## 0. 배경
 
@@ -167,7 +167,49 @@ return { rank: (rank ?? 0) + 1, isNewRecord };
 
 기존 45개 테스트는 전부 경쟁자 없는 단일 요청 시나리오라 게이팅 로직 변경으로 결과가 달라지지 않는다 — 깨지지 않을 것으로 예상. WATCH/MULTI를 새로 쓰지 않으므로 FakeRedis의 `watch()` mock 확장은 불필요.
 
-## 7. 이번 문서 범위 밖
+## 8. PR #67 리뷰 후속 — 시딩 마커 순서 갭 (2026-07-15)
 
-- `detectorChargeKey`/`loadoutClaimedKey` 리셋 여부 등 `item-board-reset.md`에 이미 열려있던 미결 항목 — 이번 8개 발견과 무관, 별도 논의 필요.
+`develop→main` PR #67 리뷰에서 이 문서 1절이 도입한 `seedMysteryBoxes`/`ensureMysteryBoxesSeeded`에 후속 결함 1건이 지적됐다.
+
+**문제**: `seedMysteryBoxes`(`trpc.ts:134-144`)의 주석은 "보드 먼저 채우고 마커는 마지막에 세운다 — 중간에 끊겨도 자연 복구된다"고 주장하지만, 이 안전장치는 **`run.finish`가 `seedMysteryBoxes`를 직접 호출하는 경로에만** 실제로 성립한다. `ensureMysteryBoxesSeeded`(146-151행, `map.getState`가 매 호출마다 타는 더 빈번한 경로)는 `seedMysteryBoxes`를 부르기도 전에 이미 `SET NX`로 `itemSeededKey`를 먼저 세워버린다 — "마커 먼저, 보드 나중"인 역순. 그 상태에서 `seedMysteryBoxes` 내부의 `hSet`이 실패(네트워크 오류 등)하면, 마커는 이미 `'1'`이라 다음 `map.getState` 호출도 스킵되고 보드가 그날 계속 빈 채로 남는다 — 정확히 이 문서 1절이 "해소했다"고 주장하는 재생성 버그가 `map.getState` 경로에는 그대로 남아있었다(완전 영구 고착은 아니고, 해당 유저가 나중에 `run.finish`에 도달하면 그때 복구되긴 함).
+
+**수정안**: `ensureMysteryBoxesSeeded`의 가드를 원자적 `SET NX` 선점에서 비원자적 `GET` 확인 + 멱등 재시딩으로 전환한다.
+
+```ts
+async function ensureMysteryBoxesSeeded(mapId: string, date: string, userId: string): Promise<void> {
+  const alreadySeeded = await redis.get(itemSeededKey(mapId, date, userId));
+  if (alreadySeeded) return;
+  await seedMysteryBoxes(mapId, date, userId); // 보드 먼저, 마커 나중 — 두 경로 모두 동일하게 적용됨
+}
+```
+
+두 호출 경로가 이제 `seedMysteryBoxes` 내부의 단일 순서(hSet → expire → set 마커)로 수렴한다. `itemSeededKey`가 유저별 독립 키라 타 유저와는 경쟁하지 않고, 같은 유저의 다중 탭 동시 호출도 `getMysteryBoxSpawns`가 순수함수라 항상 같은 데이터로 멱등 수렴한다(데이터 손상 없음). 잔여 리스크는 그날 최초 시딩이 진행 중인 극히 좁은 창(수백ms)에서 동시 픽업이 겹치면 "방금 주운 칸이 잠깐 부활"하는 이상 케이스인데, 이는 `run.finish`가 이미 감수 중인 다중 탭 리스크(1절 "잔여 리스크")의 **부분집합**(노출 창이 더 좁음)이라 별도 대응하지 않는다.
+
+**기각한 대안**:
+- WATCH/MULTI — 1절·4절과 같은 논리로 기각(오버엔지니어링, 해커톤 프로젝트 성격에 안 맞음).
+- `SET NX` 유지 + 실패 시 마커 롤백(`redis.del`) — 기각. (1) `run.finish` 경로엔 NX 가드가 없어 `seedMysteryBoxes` 자체가 이미 "보드 먼저, 마커 나중"을 자력으로 지켜야 하는데, 그 위에 NX+롤백을 얹으면 "무엇이 진짜 마커 쓰기인지" 이중화된다. (2) 롤백 자체가 새 실패 지점이라 롤백이 실패하면 원래 버그로 되돌아가, GET 기반 안의 "실패해도 항상 자연 복구" 성질을 보장 못 한다.
+
+**주석 정합성**: `trpc.ts` 122-125행, 147행의 `SET NX` 전제 주석을 "GET 기반 판정 + 원자성 트레이드오프(다중 탭 시 무해한 멱등적 중복 재시딩 가능)"로 갱신한다 — 안 그러면 코드가 스스로 주장하는 보장과 실제 동작이 다시 어긋난다.
+
+**테스트 계획 — FakeRedis 실패 주입 훅 신설**: 지금까지 FakeRedis(`trpc.test.ts` 13-179행)는 어떤 호출도 실패시킬 수 없어 "부분 실패" 시나리오를 테스트할 방법이 없었다. 범용 실패 주입 훅을 추가한다.
+
+```ts
+private failNextCalls = new Map<string, number>();
+failNext(method: string, times = 1): void { this.failNextCalls.set(method, times); }
+private maybeFail(method: string): void {
+  const remaining = this.failNextCalls.get(method);
+  if (remaining && remaining > 0) {
+    this.failNextCalls.set(method, remaining - 1);
+    throw new Error(`FakeRedis: injected failure for ${method}`);
+  }
+}
+// hSet 등 관련 메서드 시작부에 this.maybeFail('hSet') 추가, reset()에 failNextCalls.clear() 추가
+```
+
+회귀 테스트("map.getState 미스터리 박스 시딩" describe에 추가): `hSet`에 1회 실패를 주입한 뒤 `map.getState` 호출이 에러를 던지는지, 그 시점에 `itemSeededKey`가 세워지지 않았는지, 실패 주입 없이 재호출하면 보드가 정상적으로(스폰 3곳) 채워지는지 확인. **구현 전 검증 조건**: 이 테스트를 수정 전(`SET NX` 버전) 코드에 돌리면 반드시 실패해야 한다(마커가 먼저 세워져 재호출도 스킵되므로) — 실제로 이 버그를 잡아내는 테스트인지 전/후 비교로 확인할 것. 기존 두 테스트(374-386행, 388-404행)는 영향 없음.
+
+## 9. 이번 문서 범위 밖
+
+- `detectorChargeKey`/`loadoutClaimedKey` 리셋 여부 등 `item-board-reset.md`에 이미 열려있던 미결 항목 — 이번 발견들과 무관, 별도 논의 필요.
 - 클라이언트(`game.tsx`) 쪽 dispatcher 통합, "재도전" 버튼/흐름 자체의 부재 — 임소리 담당, 이 문서는 서버 API 계약까지만 책임진다.
+- 🟡 위치 커밋 지연으로 인한 `INVALID_MOVE` 오탐 가능성(2절에 이미 확인 필요로 기록) — PR #67 리뷰어도 동의만 표함, 추가 액션 없음.
