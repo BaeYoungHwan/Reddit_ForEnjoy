@@ -27,6 +27,9 @@ export type MapStateOutput = {
   // 미스터리 박스: 먹기 전엔 아이템/함정 여부조차 알 수 없으므로 좌표만 내려주고
   // 타입은 item.pickup 응답에서만(픽업 시점에 서버가 결정해) 밝혀진다.
   mysteryBoxes: Position[];
+  // 2026-07-14 오라클 완화: 다른 유저가 설치한 함정 위치도 좌표만(타입 제외) 내려준다 —
+  // mysteryBoxes와 동일하게 위치는 공개, 종류만 비공개(trpc.ts map.getState 참고).
+  otherTraps: Position[];
 };
 
 export type FootprintRecordInput = { mapId: string; tiles: Position[] };

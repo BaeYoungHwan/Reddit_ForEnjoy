@@ -28,7 +28,7 @@ import {
 } from './core/gameConfig';
 import { getMapStartPosition } from './core/maps';
 import { getMysteryBoxSpawns, rollMysteryOutcome } from './core/items';
-import type { TrapInstance, TrapType } from '../shared/game-types';
+import type { Position, TrapInstance, TrapType } from '../shared/game-types';
 
 type TrpcContext = { userId: string | undefined };
 
@@ -173,10 +173,11 @@ export const appRouter = t.router({
       // 스폰 좌표가 소수라 전역 공유하면 먼저 도착한 유저가 하루치를 다 가져가 버린다.
       await ensureMysteryBoxesSeeded(mapId, date, ctx.userId);
 
-      const [footprintMembers, myTrapFields, mysteryBoxFields] = await Promise.all([
+      const [footprintMembers, myTrapFields, mysteryBoxFields, allTrapFields] = await Promise.all([
         redis.zRange(footprintKey(mapId, date), 0, -1),
         redis.hGetAll(trapInstallerKey(mapId, date, ctx.userId)),
         redis.hGetAll(itemBoardKey(mapId, date, ctx.userId)),
+        redis.hGetAll(trapBoardKey(mapId, date)),
       ]);
 
       // NX: 세션 중 map.getState가 재호출돼도(탭 재포커스 등) 이미 진행 중인 앵커를 시작 좌표로
@@ -187,12 +188,21 @@ export const appRouter = t.router({
       await redis.set(posKey, tileMember(start), { nx: true });
       await redis.expire(posKey, POSITION_ANCHOR_TTL_SECONDS);
 
+      // 2026-07-14 오라클 방지 완화 결정(임소리, 함정 탐지기 확장 논의): 이전엔 다른 유저가
+      // 설치한 함정 위치를 아예 안 내려줘서 화면에 전혀 안 보였다 — "길인 줄 알고 걸었는데
+      // 함정이었다"는 억울함 피드백으로, 위치는 공개하고(박스+물음표 마커) 종류만 비공개로
+      // 완화한다. myTraps(본인 설치, 타입 포함)와 달리 타입은 절대 포함하지 않는다.
+      const otherTraps: Position[] = Object.entries(allTrapFields)
+        .filter(([, raw]) => (JSON.parse(raw) as { installerId: string }).installerId !== ctx.userId)
+        .map(([field]) => parseTile(field));
+
       return {
         date,
         footprints: footprintMembers.map((m) => parseTile(m.member)),
         myTraps: toTrapInstances(myTrapFields),
         // 타입 없이 좌표만 반환 — 먹기 전엔 아이템/함정 여부조차 알 수 없어야 한다.
         mysteryBoxes: Object.keys(mysteryBoxFields).map((field) => parseTile(field)),
+        otherTraps,
       };
     }),
   }),
