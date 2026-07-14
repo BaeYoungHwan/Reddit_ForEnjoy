@@ -586,10 +586,16 @@ class MazeScene extends Phaser.Scene {
   // (함정 탐지기 아이템 없이는 안개에 덮인 함정이 안 보이게 하기 위함).
   private trapRects: (Phaser.GameObjects.Container | undefined)[][] = [];
 
-  // 서버에서 받아온 "내가 설치한 함정" 목록. 다른 유저가 설치한 함정 좌표는 서버가
-  // trap.trigger(인접 타일만 조회 가능)를 통해서만 알려주므로 클라이언트에 절대 미리 내려주지
-  // 않는다 — 여기서 다른 유저 함정까지 렌더링하면 함정 위치를 미리 알아내는 치트가 된다.
+  // 서버에서 받아온 "내가 설치한 함정" 목록(타입 포함) — trap.trigger로 밟기 전에도 항상
+  // 박스+물음표 마커로 표시된다(renderTrapMarkers).
   private myTraps: TrapInstance[] = [];
+
+  // 2026-07-14 오라클 방지 완화(함정 탐지기 확장 논의): 예전엔 다른 유저가 설치한 함정
+  // 좌표를 클라이언트에 절대 안 내려줬다(위치 자체가 비밀) — "길인 줄 알고 걸었는데 함정이었다"는
+  // 억울함 피드백으로, 이제 서버 map.getState가 다른 유저 함정도 좌표만(타입 제외, otherTraps
+  // 필드) 내려준다. myTraps와 달리 타입 정보가 없으므로 renderTrapMarkers에서 항상 박스+물음표
+  // 마커로만 그린다(밟거나 탐지기로 확인하기 전엔 무슨 함정인지 여전히 비밀).
+  private otherTraps: Position[] = [];
 
   // "x,y" 형태로 기록해두는, 내가 직접 설치한 함정의 좌표 집합. 실서버에서는 trap.trigger가
   // installerId로 자기 함정을 걸러주지만(trpc.ts), 백엔드 없는 로컬 프리뷰의 reportPosition
@@ -1209,6 +1215,9 @@ class MazeScene extends Phaser.Scene {
       // 2026-07-12: 서버가 미스터리 박스 방식으로 재설계되며 필드명도 items → mysteryBoxes로
       // 바뀌었고, 타입 없이 좌표만 온다(오라클 방지 — 밟기 전엔 아이템/함정 여부조차 비밀).
       this.remainingItems = state.mysteryBoxes;
+      // 2026-07-14: 다른 유저 설치 함정도 좌표만(타입 제외) otherTraps로 받아온다(otherTraps
+      // 필드 설명 참고) — mysteryBoxes와 동일하게 위치는 공개, 종류만 비공개.
+      this.otherTraps = state.otherTraps;
     } catch (err) {
       // 정적 빌드만 단독으로 띄우는 로컬 프리뷰(백엔드 없음)에서도 마커를 눈으로 확인할 수
       // 있도록 하는 개발용 폴백. 실제 서버(devvit playtest/배포 환경)가 응답하면 위 try에서
@@ -1233,6 +1242,8 @@ class MazeScene extends Phaser.Scene {
       footprints = [];
       // 아이템도 위와 동일한 이유(백엔드 없는 로컬 프리뷰)로 TEMP_ITEMS 좌표로 폴백한다.
       this.remainingItems = TEMP_ITEMS;
+      // 다른 유저 함정도 로컬 프리뷰엔 개념이 없으므로(유저가 나 하나뿐) 빈 배열로 둔다.
+      this.otherTraps = [];
     }
     this.renderTrapMarkers();
     this.renderFootprintMarkers(footprints);
@@ -1283,10 +1294,17 @@ class MazeScene extends Phaser.Scene {
     this.updateFog();
   }
 
-  // this.myTraps(내가 설치한 함정)를 화면에 마커로 그린다.
+  // this.myTraps(내가 설치한 함정) + this.otherTraps(다른 유저가 설치한 함정, 2026-07-14
+  // 오라클 완화)를 화면에 마커로 그린다. 둘 다 같은 박스+물음표 모양이라(타입 구분 없음)
+  // buildMysteryBoxMarker를 그대로 재사용 — 어차피 종류는 밟거나 탐지기로 확인하기 전까진 비밀.
   // 안개 상태를 바로 반영하기 위해 마지막에 updateFog도 호출.
   private renderTrapMarkers() {
     for (const trap of this.myTraps) {
+      const cx = trap.x * TILE_SIZE + TILE_SIZE / 2;
+      const cy = trap.y * TILE_SIZE + TILE_SIZE / 2;
+      this.trapRects[trap.y]![trap.x] = this.buildMysteryBoxMarker(cx, cy);
+    }
+    for (const trap of this.otherTraps) {
       const cx = trap.x * TILE_SIZE + TILE_SIZE / 2;
       const cy = trap.y * TILE_SIZE + TILE_SIZE / 2;
       this.trapRects[trap.y]![trap.x] = this.buildMysteryBoxMarker(cx, cy);

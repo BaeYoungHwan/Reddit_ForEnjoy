@@ -19,10 +19,11 @@ export const POSITION_ANCHOR_TTL_SECONDS = 2 * 60 * 60;
 export const DATA_SAFETY_TTL_SECONDS = 3 * 24 * 60 * 60;
 
 /**
- * 근거: docs/design-docs/items.md 함정 탐지기 초안 수치("반경 3칸"). ⚠️ 플레이테스트로 조정 예정인 가정치
+ * 근거: docs/design-docs/items.md 함정 탐지기 초안 수치("반경 3칸") — 2026-07-14 실플레이
+ * 피드백으로 7칸으로 확대(반경이 너무 좁다는 지적).
  * 거리 기준은 체비셰프 거리(대각선 포함, game.tsx의 updateFog 시야 반경 계산과 동일 공식) — 맨해튼 거리 아님.
  */
-export const DETECTOR_REVEAL_RADIUS = 3;
+export const DETECTOR_REVEAL_RADIUS = 7;
 
 /**
  * 미스터리 박스 결과 풀 — 8종 uniform random(각 12.5%, 아이템:함정 = 50:50).
