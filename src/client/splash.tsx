@@ -4,6 +4,7 @@ import { context, requestExpandedMode } from '@devvit/web/client';
 import {
   StrictMode,
   useEffect,
+  useRef,
   useState,
   type CSSProperties,
   type MouseEvent,
@@ -18,13 +19,21 @@ import { getMazeMap, pickDailyMapId, isRegisteredMapId } from '../shared/maps';
 import { getKstDateString } from '../shared/kstDate';
 import type { LeaderboardEntry } from '../shared/game-types';
 import { LOADOUT_STORAGE_KEY, type LoadoutId } from './loadout';
+import { loadSoundSettings, saveSoundSettings, type SoundSettings } from './soundSettings';
 
 // 공용 버튼 클릭음(public/sounds/ui-click.mp3) — 로드아웃 화면의 아이템 선택/확정 버튼은
 // 이번 스코프에서 제외(사용자 지시)라 일부러 안 붙임. Phaser가 아니라 순수 React 화면이라
-// game.tsx의 Phaser Sound Manager 대신 가벼운 HTMLAudioElement로 재생한다.
+// game.tsx의 Phaser Sound Manager 대신 가벼운 HTMLAudioElement로 재생한다. 2026-07-14: 사운드
+// 설정(음소거/볼륨) 도입 이후 매번 loadSoundSettings()로 최신값을 읽는다 — 이 함수는 여러 자식
+// 컴포넌트에서 호출되는 모듈 레벨 함수라 React state를 직접 못 받으므로, 매 호출 시점의
+// localStorage 값을 그대로 신뢰(설정 변경 시 곧바로 저장되므로 다음 클릭부터는 항상 최신).
 function playUiClickSound() {
+  const { sfxMuted, sfxVolume } = loadSoundSettings();
+  if (sfxMuted) return;
   try {
-    void new Audio('/sounds/ui-click.mp3').play();
+    const audio = new Audio('/sounds/ui-click.mp3');
+    audio.volume = sfxVolume;
+    void audio.play();
   } catch {
     // 자동재생 정책 등으로 재생이 막혀도 화면 전환 자체는 계속 진행돼야 한다.
   }
@@ -69,7 +78,7 @@ const FOOTPRINTS = WALK_TILES.map((tile, i) => {
   };
 });
 
-type View = 'menu' | 'howToPlay' | 'loadout' | 'leaderboard';
+type View = 'menu' | 'howToPlay' | 'loadout' | 'leaderboard' | 'settings';
 
 // LoadoutId/LOADOUT_STORAGE_KEY는 ./loadout.ts로 옮겨서 game.tsx와 공유한다(2026-07-10 —
 // 처음엔 여기 로컬로 정의했었는데, game.tsx가 이 값을 전혀 안 읽어서 로드아웃 선택이 실제
@@ -118,14 +127,40 @@ const RankIcon = () => (
   </svg>
 );
 
-const HudButton = ({ onClick, label, icon }: { onClick: () => void; label: string; icon: ReactNode }) => (
+const HudButton = ({
+  onClick,
+  label,
+  icon,
+  side = 'right',
+}: {
+  onClick: () => void;
+  label: string;
+  icon: ReactNode;
+  side?: 'left' | 'right';
+}) => (
   <button
-    className="absolute top-4 right-4 z-20 flex items-center justify-center w-11 h-11 rounded-full bg-slate-800/90 border-2 border-slate-950 text-slate-200 shadow-lg cursor-pointer select-none transition active:translate-y-[1px] hover:brightness-110 hover:text-white"
+    className={`absolute top-4 ${side === 'right' ? 'right-4' : 'left-4'} z-20 flex items-center justify-center w-11 h-11 rounded-full bg-slate-800/90 border-2 border-slate-950 text-slate-200 shadow-lg cursor-pointer select-none transition active:translate-y-[1px] hover:brightness-110 hover:text-white`}
     onClick={onClick}
     aria-label={label}
   >
     {icon}
   </button>
+);
+
+// 배경음악/효과음이 둘 다 꺼져 있을 때만 "뮤트" 아이콘으로 보이게 — 하나만 꺼져 있어도
+// 소리 자체는 여전히 나오므로 스피커 아이콘을 유지한다.
+const SpeakerIcon = ({ muted }: { muted: boolean }) => (
+  <svg viewBox="0 0 24 24" className="w-5 h-5" aria-hidden>
+    <path d="M4 9v6h4l5 5V4L8 9H4Z" fill="currentColor" />
+    {muted ? (
+      <g stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+        <line x1="16" y1="9" x2="21" y2="14" />
+        <line x1="21" y1="9" x2="16" y2="14" />
+      </g>
+    ) : (
+      <path d="M17 8.5a5 5 0 0 1 0 7" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" />
+    )}
+  </svg>
 );
 
 const PlayButton = ({ onClick }: { onClick: (e: MouseEvent<HTMLButtonElement>) => void }) => (
@@ -298,9 +333,13 @@ const LogoTitle = ({ size = 'text-4xl' }: { size?: string }) => (
 const Menu = ({
   onShowLeaderboard,
   onPlay,
+  onShowSoundSettings,
+  soundMuted,
 }: {
   onShowLeaderboard: () => void;
   onPlay: () => void;
+  onShowSoundSettings: () => void;
+  soundMuted: boolean;
 }) => (
   <>
     <HudButton
@@ -310,6 +349,16 @@ const Menu = ({
       }}
       label="Leaderboard"
       icon={<RankIcon />}
+      side="right"
+    />
+    <HudButton
+      onClick={() => {
+        playUiClickSound();
+        onShowSoundSettings();
+      }}
+      label="Sound settings"
+      icon={<SpeakerIcon muted={soundMuted} />}
+      side="left"
     />
     <PawTrail />
     <div className="flex flex-col items-center gap-2">
@@ -491,7 +540,7 @@ const HowToPlay = ({ onContinue }: { onContinue: () => void }) => {
 // 여기를 먼저 거친다 — 선택 결과는 localStorage에 저장해뒀다가 game.tsx가 읽어간다(별도
 // 웹뷰라 React state로는 못 넘김). 확인 버튼을 눌러야 실제로 게임을 시작하도록 해서, 선택
 // 안 하고 실수로 넘어가는 일이 없게 함(기본 선택값 없음).
-const Loadout = ({ onBack }: { onBack: () => void }) => {
+const Loadout = ({ onBack, onBeforeStart }: { onBack: () => void; onBeforeStart: () => void }) => {
   // game.tsx의 applyLoadout()과 마찬가지로, localStorage 접근이 막힌 환경(서드파티 iframe
   // 스토리지 정책 등)에서도 화면 자체는 렌더링/진행되게 try/catch로 방어한다 — PR #33 리뷰에서
   // game.tsx만 방어돼 있고 여기는 방어가 없어 그 환경에서 스플래시 전체가 깨질 수 있다는 점이
@@ -513,6 +562,10 @@ const Loadout = ({ onBack }: { onBack: () => void }) => {
       // 저장 실패해도(예: 저장공간 막힘) 이번 판은 진행은 시켜준다 — game.tsx의 applyLoadout()이
       // 값을 못 읽으면 그냥 빈손으로 시작하는 안전한 폴백을 이미 갖고 있음.
     }
+    // 게임 화면(game.tsx)이 자기 BGM을 새로 재생하므로, 넘어가기 직전에 스플래시 BGM을 반드시
+    // 멈춘다 — 웹뷰 전환 시 이 React 트리가 실제로 언제/어떻게 언마운트되는지 보장이 없어서,
+    // effect cleanup(onUnmount)에만 의존하면 두 화면의 BGM이 잠깐 겹쳐 들릴 수 있다.
+    onBeforeStart();
     requestExpandedMode(e.nativeEvent, 'game');
   };
 
@@ -765,8 +818,130 @@ const Leaderboard = ({ onBack }: { onBack: () => void }) => {
   );
 };
 
+const VolumeSlider = ({
+  label,
+  volume,
+  muted,
+  onVolumeChange,
+  onToggleMute,
+}: {
+  label: string;
+  volume: number;
+  muted: boolean;
+  onVolumeChange: (volume: number) => void;
+  onToggleMute: () => void;
+}) => (
+  <div className="flex flex-col gap-1.5">
+    <div className="flex items-center justify-between">
+      <span className="text-xs text-slate-300 font-medium">{label}</span>
+      <button
+        className="text-[11px] px-2 py-0.5 rounded-full border border-slate-700 text-slate-300 hover:text-white hover:border-slate-500 transition cursor-pointer"
+        onClick={onToggleMute}
+      >
+        {muted ? 'Unmute' : 'Mute'}
+      </button>
+    </div>
+    <input
+      type="range"
+      min={0}
+      max={100}
+      value={Math.round(volume * 100)}
+      disabled={muted}
+      onChange={(e) => onVolumeChange(Number(e.target.value) / 100)}
+      className="w-full accent-orange-500 disabled:opacity-40"
+      aria-label={`${label} volume`}
+    />
+  </div>
+);
+
+const SoundSettingsPanel = ({
+  settings,
+  onChange,
+  onBack,
+}: {
+  settings: SoundSettings;
+  onChange: (next: SoundSettings) => void;
+  onBack: () => void;
+}) => (
+  <div className="w-full flex flex-col gap-4">
+    <div className="flex items-center gap-2">
+      <button
+        className="flex items-center justify-center w-9 h-9 rounded-xl border-2 border-slate-700 text-slate-300 hover:text-white hover:border-slate-500 transition cursor-pointer"
+        onClick={() => {
+          playUiClickSound();
+          onBack();
+        }}
+        aria-label="Back"
+      >
+        ←
+      </button>
+      <h1 className="font-display text-lg tracking-wide text-white">Sound</h1>
+    </div>
+
+    <VolumeSlider
+      label="Music"
+      volume={settings.bgmVolume}
+      muted={settings.bgmMuted}
+      onVolumeChange={(bgmVolume) => onChange({ ...settings, bgmVolume })}
+      onToggleMute={() => onChange({ ...settings, bgmMuted: !settings.bgmMuted })}
+    />
+    <VolumeSlider
+      label="Sound Effects"
+      volume={settings.sfxVolume}
+      muted={settings.sfxMuted}
+      onVolumeChange={(sfxVolume) => onChange({ ...settings, sfxVolume })}
+      onToggleMute={() => onChange({ ...settings, sfxMuted: !settings.sfxMuted })}
+    />
+  </div>
+);
+
 export const Splash = () => {
   const [view, setView] = useState<View>('menu');
+  const [soundSettings, setSoundSettings] = useState<SoundSettings>(() => loadSoundSettings());
+  const bgmRef = useRef<HTMLAudioElement | null>(null);
+  // "첫 자동재생이 브라우저 정책으로 막혔을 때, 첫 사용자 상호작용에서 재시도" 리스너가
+  // 항상 최신 음소거 상태를 보도록 ref로도 들고 있는다 — 그 리스너는 { once: true }로 걸리는
+  // 시점의 클로저라, state를 직접 참조하면 등록 이후 설정이 바뀌어도 그 값을 못 본다.
+  const bgmMutedRef = useRef(soundSettings.bgmMuted);
+  useEffect(() => {
+    bgmMutedRef.current = soundSettings.bgmMuted;
+  }, [soundSettings.bgmMuted]);
+
+  // BGM 인스턴스는 마운트 시 한 번만 생성 — 볼륨/음소거 반영은 아래 별도 effect가 담당한다.
+  useEffect(() => {
+    const audio = new Audio('/sounds/bgm-splash.mp3');
+    audio.loop = true;
+    bgmRef.current = audio;
+    return () => {
+      audio.pause();
+      bgmRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const audio = bgmRef.current;
+    if (!audio) return;
+    audio.volume = soundSettings.bgmVolume;
+    if (soundSettings.bgmMuted) {
+      audio.pause();
+      return;
+    }
+    if (audio.paused) {
+      // 자동재생 정책으로 막히면(대부분의 브라우저는 사용자 상호작용 전 재생을 막음) 첫
+      // 클릭/탭에서 재시도한다.
+      audio.play().catch(() => {
+        const resume = () => {
+          if (!bgmMutedRef.current) void audio.play().catch(() => {});
+        };
+        document.addEventListener('pointerdown', resume, { once: true });
+      });
+    }
+  }, [soundSettings.bgmMuted, soundSettings.bgmVolume]);
+
+  const updateSoundSettings = (next: SoundSettings) => {
+    setSoundSettings(next);
+    saveSoundSettings(next);
+  };
 
   return (
     <div className="relative flex flex-col justify-center items-center min-h-screen bg-slate-950 text-white px-4 overflow-hidden">
@@ -774,11 +949,18 @@ export const Splash = () => {
       <div className="relative z-10 w-full max-w-sm">
         <RivetPanel>
           {view === 'menu' ? (
-            <Menu onShowLeaderboard={() => setView('leaderboard')} onPlay={() => setView('howToPlay')} />
+            <Menu
+              onShowLeaderboard={() => setView('leaderboard')}
+              onPlay={() => setView('howToPlay')}
+              onShowSoundSettings={() => setView('settings')}
+              soundMuted={soundSettings.bgmMuted && soundSettings.sfxMuted}
+            />
           ) : view === 'howToPlay' ? (
             <HowToPlay onContinue={() => setView('loadout')} />
           ) : view === 'loadout' ? (
-            <Loadout onBack={() => setView('menu')} />
+            <Loadout onBack={() => setView('menu')} onBeforeStart={() => bgmRef.current?.pause()} />
+          ) : view === 'settings' ? (
+            <SoundSettingsPanel settings={soundSettings} onChange={updateSoundSettings} onBack={() => setView('menu')} />
           ) : (
             <Leaderboard onBack={() => setView('menu')} />
           )}
