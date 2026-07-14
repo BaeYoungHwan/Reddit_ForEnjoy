@@ -277,6 +277,63 @@ describe('map.getState 위치 앵커 (8.1 회귀 테스트)', () => {
   });
 });
 
+describe('run.finish 아이템 보드 리셋 (docs/design-docs/item-board-reset.md 회귀 테스트)', () => {
+  it('골인 후 아이템 보드가 리셋되어 다음 map.getState가 미스터리 박스를 재시딩한다(재생성 버그 없이)', async () => {
+    const caller = createCaller({ userId: 'user-reset-a' });
+    await caller.map.getState({ mapId: 'map-1' });
+    for (let x = 2; x <= 5; x++) {
+      await caller.item.pickup({ mapId: 'map-1', x, y: 1 });
+    }
+    for (let y = 2; y < 12; y++) {
+      await caller.item.pickup({ mapId: 'map-1', x: 5, y });
+    }
+
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.5 / 8); // 결과를 flashlight로 고정(부수효과 없음)
+    const picked = await caller.item.pickup({ mapId: 'map-1', x: 5, y: 12 });
+    randomSpy.mockRestore();
+    expect(picked.picked).toBe(true);
+
+    // 리셋 전이라면 (기존 "재생성 버그" 회귀 테스트처럼) (5,12)는 다시 채워지지 않아야 정상이다.
+    const beforeFinish = await caller.map.getState({ mapId: 'map-1' });
+    expect(beforeFinish.mysteryBoxes).not.toContainEqual({ x: 5, y: 12 });
+
+    await caller.run.finish({ mapId: 'map-1', steps: 30, clearTimeMs: 20000 });
+
+    const afterFinish = await caller.map.getState({ mapId: 'map-1' });
+    expect(afterFinish.mysteryBoxes).toEqual(
+      expect.arrayContaining([
+        { x: 5, y: 12 },
+        { x: 9, y: 1 },
+        { x: 15, y: 12 },
+      ])
+    );
+  });
+
+  it('신기록이 아니어도(더 느린 재도전) 아이템 보드는 항상 리셋된다', async () => {
+    const caller = createCaller({ userId: 'user-reset-b' });
+    await caller.map.getState({ mapId: 'map-1' });
+    await caller.run.finish({ mapId: 'map-1', steps: 10, clearTimeMs: 5000 }); // 1차: 신기록
+
+    // 리셋된 보드에서 (5,12)를 다시 주운다.
+    await caller.map.getState({ mapId: 'map-1' });
+    for (let x = 2; x <= 5; x++) {
+      await caller.item.pickup({ mapId: 'map-1', x, y: 1 });
+    }
+    for (let y = 2; y < 12; y++) {
+      await caller.item.pickup({ mapId: 'map-1', x: 5, y });
+    }
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.5 / 8);
+    await caller.item.pickup({ mapId: 'map-1', x: 5, y: 12 });
+    randomSpy.mockRestore();
+
+    const result = await caller.run.finish({ mapId: 'map-1', steps: 50, clearTimeMs: 90000 }); // 2차: 신기록 아님
+    expect(result.isNewRecord).toBe(false);
+
+    const state = await caller.map.getState({ mapId: 'map-1' });
+    expect(state.mysteryBoxes).toContainEqual({ x: 5, y: 12 });
+  });
+});
+
 describe('map.getState 미스터리 박스 시딩', () => {
   it('첫 호출 시 고정 스폰 좌표가 채워지고, 재호출해도 같은 목록을 반환한다(타입은 노출하지 않음)', async () => {
     const caller = createCaller({ userId: 'user-k' });

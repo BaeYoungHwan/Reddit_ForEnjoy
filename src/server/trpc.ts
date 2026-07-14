@@ -499,8 +499,20 @@ export const appRouter = t.router({
         }
 
         const rank = await redis.zRank(key, ctx.userId);
-        // 런 종료 — 다음 map.getState가 (NX로) 위치 앵커를 다시 시작 좌표로 초기화할 수 있도록 지운다.
-        await redis.del(positionAnchorKey(mapId, date, ctx.userId));
+        // 런 종료 — 위치 앵커뿐 아니라 유저별 아이템 보드도 함께 지운다(docs/design-docs/item-board-reset.md,
+        // 임소리 요청 2). itemBoardKey만 지우고 itemSeededKey를 빠뜨리면 ensureMysteryBoxesSeeded의
+        // firstSeed가 항상 false가 되어 보드가 영구히 빈 채로 남는다(재생성 버그) — 반드시 함께 지운다.
+        // 지연 재시딩: 여기서는 삭제만 하고, 다음 map.getState 호출 시 ensureMysteryBoxesSeeded가
+        // (마커가 지워졌으므로) SET NX를 다시 통과해 자연히 재시딩한다. isNewRecord 여부와 무관하게
+        // 항상 실행 — 새로고침만 하고 이 mutation이 호출 안 된 경우는 애초에 이 코드를 안 타므로
+        // "정상 골인일 때만 리셋" 조건이 자연히 만족된다.
+        // ⚠️ detectorChargeKey/loadoutClaimedKey 리셋 여부는 밸런스 판단이 필요해 미정(문서 4절) — 이번
+        // 변경 범위에서는 건드리지 않는다.
+        await Promise.all([
+          redis.del(positionAnchorKey(mapId, date, ctx.userId)),
+          redis.del(itemBoardKey(mapId, date, ctx.userId)),
+          redis.del(itemSeededKey(mapId, date, ctx.userId)),
+        ]);
         return { rank: (rank ?? 0) + 1, isNewRecord };
       }),
   }),
