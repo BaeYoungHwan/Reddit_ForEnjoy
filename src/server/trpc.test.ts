@@ -1,5 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { getKstDateString, itemBoardKey, itemSeededKey, tileMember, trapBoardKey } from './core/redisKeys';
+import {
+  getKstDateString,
+  itemBoardKey,
+  itemSeededKey,
+  parseTile,
+  positionAnchorKey,
+  tileMember,
+  trapBoardKey,
+} from './core/redisKeys';
+import { getMapExitPosition } from './core/maps';
 import type { Position } from '../shared/game-types';
 
 /**
@@ -283,6 +292,34 @@ async function walkAnchorTo(
   }
 }
 
+// run.finish의 골인 위치 검증(2026-07-14 추가) 회귀 대응 — 앵커를 실제 맵 골인 지점까지
+// 옮겨야 run.finish가 NOT_AT_GOAL로 거부하지 않는다. from은 호출 시점의 실제 앵커 위치를
+// 호출자가 정확히 알려줘야 한다(walkAnchorTo와 동일한 이유 — assertAdjacent는 Redis에 저장된
+// 실제 앵커 기준으로만 검증하므로, from이 실제 앵커와 다르면 첫 스텝부터 INVALID_MOVE).
+async function walkAnchorToGoal(
+  caller: ReturnType<typeof createCaller>,
+  mapId: string,
+  from: Position
+): Promise<void> {
+  await walkAnchorTo(caller, mapId, from, getMapExitPosition(mapId));
+}
+
+// walkAnchorToGoal과 달리 from을 호출자가 미리 알 필요가 없다 — Redis에 실제로 커밋된 앵커를
+// 직접 읽어서 그 자리부터 걷는다. item.pickup 직후처럼 "결과가 respawn이면 앵커가 시작 좌표로,
+// 아니면 방금 주운 자리로" 갈리는 것처럼 실제 도착 위치가 테스트 코드만 보고는 확정할 수 없는
+// 경우에 쓴다(2026-07-14 미스터리 박스 사전 확정 PR#70 이후, 스폰 시점에 이미 굴려둔 결과라
+// pickup 호출 시점에 vi.spyOn(Math.random)을 걸어도 그 결과를 바꿀 수 없다 — 어떤 outcome이
+// 나올지 테스트가 통제할 수 없으므로 anchor 위치도 예측할 수 없다).
+async function walkAnchorToGoalFromCurrent(
+  caller: ReturnType<typeof createCaller>,
+  mapId: string,
+  userId: string
+): Promise<void> {
+  const raw = await mocks.redis.get(positionAnchorKey(mapId, getKstDateString(), userId));
+  if (!raw) throw new Error(`walkAnchorToGoalFromCurrent: 앵커 없음 (userId=${userId})`);
+  await walkAnchorToGoal(caller, mapId, parseTile(raw));
+}
+
 // map-1 그리드 크기(maps.test.ts에서 검증됨) — 아래 offsetWithinBounds가 랜덤 target 기준
 // 오프셋이 그리드를 벗어나지 않게 하는 데 쓴다.
 const MAP_1_WIDTH = 25;
@@ -355,6 +392,41 @@ describe('trap.trigger 위치 앵커 검증 (8.4 회귀 테스트)', () => {
   });
 });
 
+describe('run.finish 골인 위치 검증 (리더보드 위조 방지 회귀 테스트)', () => {
+  it('map.getState 없이(세션 없이) 호출하면 NO_SESSION으로 거부된다', async () => {
+    const caller = createCaller({ userId: 'user-no-session' });
+    await expect(caller.run.finish({ mapId: 'map-1', steps: 10, clearTimeMs: 5000 })).rejects.toMatchObject({
+      message: 'NO_SESSION',
+    });
+  });
+
+  it('골인 지점에 도달하지 않은 채(시작 좌표 그대로) 호출하면 NOT_AT_GOAL로 거부된다', async () => {
+    const caller = createCaller({ userId: 'user-not-at-goal' });
+    await caller.map.getState({ mapId: 'map-1' }); // 앵커: 시작 좌표
+
+    await expect(caller.run.finish({ mapId: 'map-1', steps: 10, clearTimeMs: 5000 })).rejects.toMatchObject({
+      message: 'NOT_AT_GOAL',
+    });
+  });
+
+  it('입력값(steps/clearTimeMs)만으로는 위조할 수 없다 — 골인 지점까지 실제로 이동해야 리더보드에 반영된다', async () => {
+    const caller = createCaller({ userId: 'user-forged-score' });
+    await caller.map.getState({ mapId: 'map-1' });
+
+    // 골인과 무관한 임의의 인접 좌표로만 한 칸 이동 — 실제 골인 지점이 아니다.
+    await caller.trap.trigger({ mapId: 'map-1', x: 1, y: 0 });
+    await expect(
+      caller.run.finish({ mapId: 'map-1', steps: 0, clearTimeMs: 1 })
+    ).rejects.toMatchObject({ message: 'NOT_AT_GOAL' });
+
+    // 실제로 골인 지점까지 이동한 뒤에는 정상적으로 리더보드에 반영된다.
+    await walkAnchorToGoal(caller, 'map-1', { x: 1, y: 0 });
+    await expect(caller.run.finish({ mapId: 'map-1', steps: 42, clearTimeMs: 9999 })).resolves.toMatchObject({
+      rank: 1,
+    });
+  });
+});
+
 describe('map.getState 위치 앵커 (8.1 회귀 테스트)', () => {
   it('세션 중 재호출해도 진행 중인 앵커를 시작 좌표로 되돌리지 않는다', async () => {
     const caller = createCaller({ userId: 'user-e' });
@@ -373,6 +445,7 @@ describe('map.getState 위치 앵커 (8.1 회귀 테스트)', () => {
     const caller = createCaller({ userId: 'user-f' });
     await caller.map.getState({ mapId: 'map-1' });
     await caller.trap.trigger({ mapId: 'map-1', x: 1, y: 0 }); // 앵커: (1,0)
+    await walkAnchorToGoal(caller, 'map-1', { x: 1, y: 0 });
     await caller.run.finish({ mapId: 'map-1', steps: 10, clearTimeMs: 12345 });
 
     await caller.map.getState({ mapId: 'map-1' }); // 새 런 — 앵커가 (0,0)으로 재초기화됨
@@ -400,6 +473,7 @@ describe('run.finish 아이템 보드 리셋 (docs/design-docs/item-board-reset.
     const beforeFinish = await caller.map.getState({ mapId: 'map-1' });
     expect(beforeFinish.mysteryBoxes).not.toContainEqual(target);
 
+    await walkAnchorToGoalFromCurrent(caller, 'map-1', 'user-reset-a');
     await caller.run.finish({ mapId: 'map-1', steps: 30, clearTimeMs: 20000 });
 
     // 2026-07-14(랜덤 스폰 도입): 스폰 좌표는 매 시딩(재도전)마다 시드가 바뀌어 달라지므로,
@@ -411,6 +485,7 @@ describe('run.finish 아이템 보드 리셋 (docs/design-docs/item-board-reset.
   it('신기록이 아니어도(더 느린 재도전) 아이템 보드는 항상 리셋된다', async () => {
     const caller = createCaller({ userId: 'user-reset-b' });
     await caller.map.getState({ mapId: 'map-1' });
+    await walkAnchorToGoal(caller, 'map-1', MAP_1_START);
     await caller.run.finish({ mapId: 'map-1', steps: 10, clearTimeMs: 5000 }); // 1차: 신기록
 
     // 리셋된 보드에서 하나를 다시 주운다.
@@ -421,6 +496,7 @@ describe('run.finish 아이템 보드 리셋 (docs/design-docs/item-board-reset.
     await caller.item.pickup({ mapId: 'map-1', x: target.x, y: target.y });
     randomSpy.mockRestore();
 
+    await walkAnchorToGoalFromCurrent(caller, 'map-1', 'user-reset-b');
     const result = await caller.run.finish({ mapId: 'map-1', steps: 50, clearTimeMs: 90000 }); // 2차: 신기록 아님
     expect(result.isNewRecord).toBe(false);
 
@@ -438,6 +514,7 @@ describe('run.finish 아이템 보드 리셋 (docs/design-docs/item-board-reset.
     // 골인 전: 정상 시딩된 상태(맵당 스폰 8곳, 랜덤 스폰 도입 이후)
     expect(Object.keys(await mocks.redis.hGetAll(boardKey))).toHaveLength(8);
 
+    await walkAnchorToGoal(caller, 'map-1', MAP_1_START);
     await caller.run.finish({ mapId: 'map-1', steps: 10, clearTimeMs: 5000 });
 
     // map.getState를 다시 부르지 않고 run.finish 직후 Redis 상태를 직접 확인한다 — 지연
@@ -456,6 +533,7 @@ describe('run.finish 아이템 보드 리셋 (docs/design-docs/item-board-reset.
     // 레이스를 재현하려면 map.getState 쪽도 실제로 재시딩을 타야 한다 — 이미 seeded 상태라
     // ensureMysteryBoxesSeeded가 스킵해버리므로 마커를 지워 "아직 시딩 안 됨"으로 되돌린다.
     await mocks.redis.del(itemSeededKey('map-1', date, 'user-concurrent-seed'));
+    await walkAnchorToGoal(caller, 'map-1', MAP_1_START);
 
     // run.finish(무조건 재시딩)와 map.getState(마커가 없어 재시딩)를 동시에 발사 — seedMysteryBoxes
     // 내부의 await 지점들에서 서로 인터리빙될 기회가 생긴다. WATCH 보호가 없다면 del→del→hSet→hSet
@@ -1079,6 +1157,8 @@ describe('leaderboard.get username 매핑', () => {
   it('reddit.getUserById로 조회된 username을 entry에 채운다', async () => {
     mocks.users.set('user-g', { username: 'maze-runner' });
     const caller = createCaller({ userId: 'user-g' });
+    await caller.map.getState({ mapId: 'map-1' });
+    await walkAnchorToGoal(caller, 'map-1', MAP_1_START);
     await caller.run.finish({ mapId: 'map-1', steps: 20, clearTimeMs: 5000 });
 
     const { entries } = await caller.leaderboard.get({ mapId: 'map-1' });
@@ -1089,6 +1169,8 @@ describe('leaderboard.get username 매핑', () => {
 
   it('탈퇴/정지 등으로 조회가 안 되는 유저는 userId로 폴백한다', async () => {
     const caller = createCaller({ userId: 'user-h' });
+    await caller.map.getState({ mapId: 'map-1' });
+    await walkAnchorToGoal(caller, 'map-1', MAP_1_START);
     await caller.run.finish({ mapId: 'map-1', steps: 20, clearTimeMs: 6000 });
 
     const { entries } = await caller.leaderboard.get({ mapId: 'map-1' });
@@ -1101,8 +1183,15 @@ describe('leaderboard.get username 매핑', () => {
     mocks.users.set('user-i', { username: 'runner-i' });
     mocks.rejectIds.add('user-j');
 
-    await createCaller({ userId: 'user-i' }).run.finish({ mapId: 'map-1', steps: 10, clearTimeMs: 4000 });
-    await createCaller({ userId: 'user-j' }).run.finish({ mapId: 'map-1', steps: 20, clearTimeMs: 5000 });
+    const callerI = createCaller({ userId: 'user-i' });
+    await callerI.map.getState({ mapId: 'map-1' });
+    await walkAnchorToGoal(callerI, 'map-1', MAP_1_START);
+    await callerI.run.finish({ mapId: 'map-1', steps: 10, clearTimeMs: 4000 });
+
+    const callerJ = createCaller({ userId: 'user-j' });
+    await callerJ.map.getState({ mapId: 'map-1' });
+    await walkAnchorToGoal(callerJ, 'map-1', MAP_1_START);
+    await callerJ.run.finish({ mapId: 'map-1', steps: 20, clearTimeMs: 5000 });
 
     const { entries } = await createCaller({ userId: 'user-i' }).leaderboard.get({ mapId: 'map-1' });
 
@@ -1116,12 +1205,19 @@ describe('leaderboard.get username 매핑', () => {
   });
 
   it('걸음 수가 랭킹 1차 기준이다 — 시간이 더 걸려도 걸음 수가 적으면 상위', async () => {
-    await createCaller({ userId: 'user-fewer-steps' }).run.finish({
+    const callerFewerSteps = createCaller({ userId: 'user-fewer-steps' });
+    await callerFewerSteps.map.getState({ mapId: 'map-1' });
+    await walkAnchorToGoal(callerFewerSteps, 'map-1', MAP_1_START);
+    await callerFewerSteps.run.finish({
       mapId: 'map-1',
       steps: 10,
       clearTimeMs: 60000,
     });
-    await createCaller({ userId: 'user-more-steps' }).run.finish({
+
+    const callerMoreSteps = createCaller({ userId: 'user-more-steps' });
+    await callerMoreSteps.map.getState({ mapId: 'map-1' });
+    await walkAnchorToGoal(callerMoreSteps, 'map-1', MAP_1_START);
+    await callerMoreSteps.run.finish({
       mapId: 'map-1',
       steps: 20,
       clearTimeMs: 1000,
@@ -1135,12 +1231,19 @@ describe('leaderboard.get username 매핑', () => {
   });
 
   it('걸음 수가 같으면 클리어 시간이 짧은 쪽이 상위(2차 타이브레이크)', async () => {
-    await createCaller({ userId: 'user-slower' }).run.finish({
+    const callerSlower = createCaller({ userId: 'user-slower' });
+    await callerSlower.map.getState({ mapId: 'map-1' });
+    await walkAnchorToGoal(callerSlower, 'map-1', MAP_1_START);
+    await callerSlower.run.finish({
       mapId: 'map-1',
       steps: 15,
       clearTimeMs: 9000,
     });
-    await createCaller({ userId: 'user-faster' }).run.finish({
+
+    const callerFaster = createCaller({ userId: 'user-faster' });
+    await callerFaster.map.getState({ mapId: 'map-1' });
+    await walkAnchorToGoal(callerFaster, 'map-1', MAP_1_START);
+    await callerFaster.run.finish({
       mapId: 'map-1',
       steps: 15,
       clearTimeMs: 3000,

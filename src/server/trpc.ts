@@ -27,7 +27,7 @@ import {
   POSITION_ANCHOR_TTL_SECONDS,
   TOTAL_TRAP_CAP,
 } from './core/gameConfig';
-import { getMapStartPosition } from './core/maps';
+import { getMapExitPosition, getMapStartPosition } from './core/maps';
 import { getMysteryBoxSpawns, rollMysteryOutcome } from './core/items';
 import type { ItemType, Position, TrapInstance, TrapType } from '../shared/game-types';
 
@@ -604,6 +604,19 @@ export const appRouter = t.router({
       .mutation(async ({ ctx, input }) => {
         const { mapId, steps, clearTimeMs } = input;
         const date = getKstDateString();
+
+        // 리더보드 위조 방지: 입력값(steps/clearTimeMs)을 그대로 신뢰하지 않고, 이동마다
+        // 갱신되는 위치 앵커가 실제로 골인 지점에 있는지 검증한다 — trap.trigger/item.pickup/
+        // move.arrive가 전부 갖춘 readPositionAnchor 검증이 run.finish에만 빠져있으면, 이
+        // 엔드포인트를 직접 호출해 임의의 steps/clearTimeMs로 리더보드를 조작할 수 있다.
+        // 앵커가 없으면(map.getState 없이 호출) NO_SESSION, 골인 지점이 아니면 NOT_AT_GOAL.
+        const posKey = positionAnchorKey(mapId, date, ctx.userId);
+        const position = await readPositionAnchor(posKey);
+        const goal = getMapExitPosition(mapId);
+        if (position.x !== goal.x || position.y !== goal.y) {
+          throw new TRPCError({ code: 'BAD_REQUEST', message: 'NOT_AT_GOAL' });
+        }
+
         const key = leaderboardKey(mapId, date);
         const score = encodeLeaderboardScore(steps, clearTimeMs);
 
@@ -649,10 +662,7 @@ export const appRouter = t.router({
         // 통째로 유실되고, 클라이언트가 재시도하면 score가 이미 같아 isNewRecord가 잘못 false로
         // 계산된다(move-run-finish-bugfixes.md 3절).
         try {
-          await Promise.all([
-            redis.del(positionAnchorKey(mapId, date, ctx.userId)),
-            seedMysteryBoxes(mapId, date, ctx.userId),
-          ]);
+          await Promise.all([redis.del(posKey), seedMysteryBoxes(mapId, date, ctx.userId)]);
         } catch (err) {
           console.error(`run.finish: 위치 앵커/아이템 보드 정리 실패 (userId=${ctx.userId}, mapId=${mapId})`, err);
         }
