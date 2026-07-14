@@ -47,7 +47,7 @@ Reddit Devvit 플랫폼 (`devvit playtest` → `devvit upload` → `devvit publi
 - [ ] 함정 설치 기능 + 함정 4종 — 상세: [`docs/design-docs/traps.md`](../design-docs/traps.md)
 - [ ] 아이템 획득(랜덤 스폰 + 게임 시작 전 로드아웃 선택) + 아이템 종류 — 최종 4종 확정(2026-07-09), 수치는 일부 ⚠️ 플레이테스트 필요: [`docs/design-docs/items.md`](../design-docs/items.md)
 - [ ] 골인 시 걸음 수(성공 이동 칸 수) 기록 + 리더보드 — 1차 정렬 기준은 걸음 수, 동점(걸음 수 같음)일 때만 클리어 시간으로 2차 정렬 (2026-07-13 확정, 근거: `docs/wbs.md`)
-- [ ] 매일 자정 기준 맵 리셋 (발자국·함정·아이템 스폰·랭킹 초기화, 데일리 맵)
+- [ ] 매일 자정 기준 맵 리셋 (발자국·함정·아이템 스폰·랭킹 초기화, 데일리 맵) — 데일리 맵 로테이션 정책 확정(2026-07-13): 등록 맵(map-1, map-2) 중 KST 날짜 문자열 해시로 결정론적 선택(`shared/maps.ts`의 `pickDailyMapId`), 같은 날엔 모든 유저가 항상 같은 맵을 봄. 상세는 `docs/wbs.md` 참조
 
 ## 8. MVP 제외 사항 ⚠️
 

@@ -16,8 +16,18 @@ const MAP_1_MYSTERY_SPAWNS: Position[] = [
   { x: 15, y: 12 },
 ];
 
+// 2026-07-13 데일리 맵 로테이션 도입 — map-2 좌표는 최단경로(시작→골인 140칸)의 20/50/80%
+// 지점(shared/maps.ts MAP_2_LAYOUT 생성 스크립트 참고)으로, map-1과 동일하게 "초반/중반/후반"
+// 배치 관례를 따른다. game.tsx의 로컬 프리뷰 폴백(TEMP_ITEMS_BY_MAP)과 좌표를 맞춰뒀다.
+const MAP_2_MYSTERY_SPAWNS: Position[] = [
+  { x: 17, y: 1 },
+  { x: 11, y: 8 },
+  { x: 12, y: 19 },
+];
+
 const MYSTERY_SPAWNS: Record<string, Position[]> = {
   'map-1': MAP_1_MYSTERY_SPAWNS,
+  'map-2': MAP_2_MYSTERY_SPAWNS,
 };
 
 export function getMysteryBoxSpawns(mapId: string): Position[] {

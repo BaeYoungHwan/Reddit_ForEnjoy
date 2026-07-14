@@ -4,7 +4,8 @@ import Phaser from 'phaser';
 import { StrictMode, useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import { exitExpandedMode } from '@devvit/web/client';
-import { getMazeMap } from '../shared/maps';
+import { MAZE_MAPS, getMazeMap, pickDailyMapId } from '../shared/maps';
+import { getKstDateString } from '../shared/kstDate';
 import { buildRockWallTileDataUri } from './mazePattern';
 import { computeClothWaveX } from './goalFlagWave';
 import { trpc } from './trpcClient';
@@ -28,18 +29,27 @@ import type {
 // 컴파일 타임에 막는다.
 type TimedTrapType = Exclude<TrapType, 'slow'>;
 
-// 실제 고정 맵 데이터(송원호 담당, src/shared/maps.ts). splash.tsx의 배경 미리보기와 같은 데이터.
-const MAIN_MAP = getMazeMap('map-1');
-const MAP_WIDTH = MAIN_MAP.grid[0]!.length;
-const MAP_HEIGHT = MAIN_MAP.grid.length;
-
-// 서버에 등록된 실제 맵 ID. 함정/발자국 API는 mapId 단위로 데이터를 구분한다.
-const MAP_ID = 'map-1';
-
 // 지금이 백엔드 없는 로컬 정적 프리뷰(npx serve dist/client)인지 판단하는 기준. 실제 devvit
 // 웹뷰(배포/playtest)는 절대 localhost로 안 뜨므로, 에러 종류를 추측하는 것보다 훨씬 확실한
 // 신호다(2026-07-12, attemptInstall의 에러 처리를 상황별로 나누기 위해 도입 — 임소리 확인).
 const IS_LOCAL_PREVIEW = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+
+// 2026-07-13 데일리 맵 로테이션 도입 — KST 날짜 기준으로 오늘의 맵을 결정론적으로 고른다
+// (같은 날엔 모든 유저가 항상 같은 맵을 봄). splash.tsx도 동일한 함수로 같은 맵을 골라야
+// 스플래시 미리보기와 실제 게임 화면이 어긋나지 않는다.
+// 로컬 프리뷰 한정으로 ?map=map-2 쿼리 파라미터로 강제 지정 가능(QA 편의용 — 실배포에서는
+// IS_LOCAL_PREVIEW가 항상 false라 이 분기 자체가 안 타서 영향 없음, 오늘의 맵은 항상 날짜로만 결정).
+// 등록 안 된 값이면 무시(폴백)한다 — 검증 없이 그대로 쓰면 화면은 getMazeMap의 기본 폴백
+// (map-1)으로 보이는데 서버로 나가는 mapId는 잘못된 문자열 그대로 나가버려 화면과 실제
+// 통신이 어긋나는 상태가 생긴다(2026-07-13 리뷰에서 발견).
+const rawMapOverride = IS_LOCAL_PREVIEW ? new URLSearchParams(window.location.search).get('map') : null;
+const MAP_ID_OVERRIDE = rawMapOverride && rawMapOverride in MAZE_MAPS ? rawMapOverride : null;
+const MAP_ID = MAP_ID_OVERRIDE ?? pickDailyMapId(getKstDateString());
+
+// 실제 고정 맵 데이터(송원호 담당, src/shared/maps.ts). splash.tsx의 배경 미리보기와 같은 데이터.
+const MAIN_MAP = getMazeMap(MAP_ID);
+const MAP_WIDTH = MAIN_MAP.grid[0]!.length;
+const MAP_HEIGHT = MAIN_MAP.grid.length;
 
 // 골인 후 처음 화면(스플래시)으로 돌아갈 방법이 없다는 피드백(2026-07-13) 반영 —
 // Phaser 씬은 DOM 버튼을 직접 못 그려서(캔버스), 순위 공개가 끝났을 때 이 이벤트를
@@ -406,18 +416,61 @@ const SFX_VOLUME_OVERRIDES: Partial<Record<SfxKey, number>> = {
 // ── 아이템 스폰 좌표 ──────────────────────────
 // 2026-07-09: 정상적으로는 loadServerState()가 map.getState 응답(2026-07-12부터
 // state.mysteryBoxes)으로 remainingItems를 채운다. 이 상수는 서버 호출이 실패했을 때
-// (백엔드 없는 로컬 프리뷰 등)의 폴백 전용 — src/server/core/items.ts의 실제 스폰 좌표
-// (map-1)와 맞춰뒀다. 실제 스폰은 타입이 없는 미스터리 박스지만, 이 로컬 폴백은 백엔드 없이
-// 픽업 배선이 동작하는지만 확인하면 되므로 타입을 고정해둔 채로 유지한다(reportItemPickup 참고).
-// ⚠️ 이 좌표들은 MAIN_MAP(map-1)의 바닥 칸이어야 함 — 코드로 검증하지 않으므로, 맵 레이아웃이
-// 또 바뀌면 여기도 같이 확인할 것(벽 칸을 가리키면 마커가 벽 속에 파묻혀 주울 수 없게 됨).
+// (백엔드 없는 로컬 프리뷰 등)의 폴백 전용 — src/server/core/items.ts의 실제 스폰 좌표와
+// 맞춰뒀다. 실제 스폰은 타입이 없는 미스터리 박스지만, 이 로컬 폴백은 백엔드 없이 픽업 배선이
+// 동작하는지만 확인하면 되므로 타입을 고정해둔 채로 유지한다(reportItemPickup 참고).
+// ⚠️ 이 좌표들은 각 맵의 바닥 칸이어야 함 — 코드로 검증하지 않으므로, 맵 레이아웃이 바뀌면
+// 여기도 같이 확인할 것(벽 칸을 가리키면 마커가 벽 속에 파묻혀 주울 수 없게 됨).
 // 2026-07-10: map-1 레이아웃 4차 재설계(기능별 배치)에 맞춰 좌표 갱신.
-const TEMP_ITEMS: ItemInstance[] = [
-  { x: 5, y: 12, type: 'flashlight' },
-  { x: 9, y: 1, type: 'shield' },
-  { x: 23, y: 1, type: 'trapInstall' },
-  { x: 15, y: 12, type: 'detector' }, // src/server/core/items.ts 실제 스폰 좌표와 동일
-];
+// 2026-07-13: 데일리 맵 로테이션 도입으로 맵별 테이블로 전환(TEMP_ITEMS_BY_MAP) — trapInstall은
+// 서버 스폰 개념이 없는 클라이언트 전용 종류라 items.ts의 3곳과 안 겹치는 별도 좌표를 쓴다.
+const TEMP_ITEMS_BY_MAP: Record<string, ItemInstance[]> = {
+  'map-1': [
+    { x: 5, y: 12, type: 'flashlight' },
+    { x: 9, y: 1, type: 'shield' },
+    { x: 23, y: 1, type: 'trapInstall' },
+    { x: 15, y: 12, type: 'detector' }, // src/server/core/items.ts 실제 스폰 좌표와 동일
+  ],
+  'map-2': [
+    { x: 11, y: 8, type: 'flashlight' },
+    { x: 17, y: 1, type: 'shield' },
+    { x: 19, y: 15, type: 'trapInstall' },
+    { x: 12, y: 19, type: 'detector' }, // src/server/core/items.ts 실제 스폰 좌표와 동일
+  ],
+};
+const TEMP_ITEMS: ItemInstance[] = TEMP_ITEMS_BY_MAP[MAP_ID] ?? TEMP_ITEMS_BY_MAP['map-1']!;
+
+// map.getState 실패(백엔드 없는 로컬 프리뷰) 시 myTraps/footprints 폴백 — 실제 게임플레이엔
+// 영향 없는 개발용 임시 데이터. slow(슬라이드)는 "진입 가능한 방향으로 실제 몇 칸 미끄러지는지"
+// 까지 확인된 좌표라야 로컬에서도 의미가 있다(map-1에서 발견된 교훈 — 위 TEMP_ITEMS 주석 참고).
+// map-2 좌표는 gen-map2.mjs의 러너웨이 계산 결과(슬라이드) + 최단경로 샘플(나머지)에서 가져옴.
+const LOCAL_FALLBACK_TRAPS_BY_MAP: Record<string, TrapInstance[]> = {
+  'map-1': [
+    { x: 2, y: 19, type: 'slow' },
+    { x: 17, y: 3, type: 'respawn' },
+    { x: 3, y: 17, type: 'blind' },
+    { x: 21, y: 17, type: 'reverse' },
+  ],
+  'map-2': [
+    { x: 4, y: 1, type: 'slow' }, // 오른쪽으로 17칸 미끄러짐(러너웨이 확인됨)
+    { x: 1, y: 13, type: 'respawn' },
+    { x: 15, y: 15, type: 'blind' },
+    { x: 7, y: 3, type: 'reverse' },
+  ],
+};
+
+const LOCAL_FALLBACK_FOOTPRINTS_BY_MAP: Record<string, Position[]> = {
+  'map-1': [
+    { x: 2, y: 1 },
+    { x: 5, y: 3 },
+    { x: 1, y: 7 },
+  ],
+  'map-2': [
+    { x: 10, y: 1 },
+    { x: 8, y: 7 },
+    { x: 3, y: 7 },
+  ],
+};
 
 // Phaser의 "씬(Scene)" = 게임 화면 한 장을 담당하는 클래스.
 // 우리 게임은 미로 플레이 화면 하나만 있으면 되니 씬도 하나만 만듭니다.
@@ -917,17 +970,8 @@ class MazeScene extends Phaser.Scene {
       // 아래 (2,19)는 실제로 왼쪽에서 오른쪽으로 걸어 들어오면서 그대로 오른쪽으로 15칸
       // 미끄러지는 지점(맵 하단의 긴 통로 한복판).
       console.error('map.getState 실패 — 로컬 프리뷰용 임시 데이터로 대체', err);
-      this.myTraps = [
-        { x: 2, y: 19, type: 'slow' },
-        { x: 17, y: 3, type: 'respawn' },
-        { x: 3, y: 17, type: 'blind' },
-        { x: 21, y: 17, type: 'reverse' },
-      ];
-      footprints = [
-        { x: 2, y: 1 },
-        { x: 5, y: 3 },
-        { x: 1, y: 7 },
-      ];
+      this.myTraps = LOCAL_FALLBACK_TRAPS_BY_MAP[MAP_ID] ?? LOCAL_FALLBACK_TRAPS_BY_MAP['map-1']!;
+      footprints = LOCAL_FALLBACK_FOOTPRINTS_BY_MAP[MAP_ID] ?? LOCAL_FALLBACK_FOOTPRINTS_BY_MAP['map-1']!;
       // 아이템도 위와 동일한 이유(백엔드 없는 로컬 프리뷰)로 TEMP_ITEMS 좌표로 폴백한다.
       this.remainingItems = TEMP_ITEMS;
     }

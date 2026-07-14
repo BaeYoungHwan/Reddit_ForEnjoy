@@ -14,7 +14,8 @@ import { useLeaderboard } from './hooks/useLeaderboard';
 import { useMyUserId } from './hooks/useMyUserId';
 import { angleBetween, buildMazeBackground, findPath, tileToPercent } from './mazePattern';
 import { formatClearTime } from './format';
-import { getMazeMap } from '../shared/maps';
+import { MAZE_MAPS, getMazeMap, pickDailyMapId } from '../shared/maps';
+import { getKstDateString } from '../shared/kstDate';
 import type { LeaderboardEntry } from '../shared/game-types';
 import { LOADOUT_STORAGE_KEY, type LoadoutId } from './loadout';
 
@@ -29,7 +30,14 @@ function playUiClickSound() {
   }
 }
 
-const DEFAULT_MAP_ID = 'map-1';
+// 2026-07-13 데일리 맵 로테이션 — game.tsx와 동일한 함수로 오늘의 맵을 고른다(같은 날엔
+// 항상 같은 맵을 보도록, 스플래시 미리보기와 실제 게임 화면이 어긋나지 않게). game.tsx와
+// 동일하게 로컬 프리뷰 한정 ?map= 오버라이드도 지원(QA 편의용, 실배포 영향 없음).
+const IS_LOCAL_PREVIEW = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+// 등록 안 된 값이면 무시(폴백) — game.tsx와 동일한 이유(2026-07-13 리뷰에서 발견).
+const rawMapOverride = IS_LOCAL_PREVIEW ? new URLSearchParams(window.location.search).get('map') : null;
+const MAP_ID_OVERRIDE = rawMapOverride && rawMapOverride in MAZE_MAPS ? rawMapOverride : null;
+const DEFAULT_MAP_ID = MAP_ID_OVERRIDE ?? pickDailyMapId(getKstDateString());
 const MAIN_MAP = getMazeMap(DEFAULT_MAP_ID);
 const MAIN_MAP_BACKGROUND = buildMazeBackground(MAIN_MAP);
 
