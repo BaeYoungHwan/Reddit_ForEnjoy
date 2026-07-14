@@ -186,14 +186,31 @@ async function seedMysteryBoxes(mapId: string, date: string, userId: string): Pr
   // hSet만 하면 이전 세대에 남아있던(아직 안 먹은) 필드가 지워지지 않고 새 8곳 위에 계속
   // 누적된다(재도전마다 보드가 무한정 커지는 버그). 재시딩은 항상 "완전히 새로운 8곳"이어야
   // 하므로, hSet 전에 이전 세대 전체를 지운다.
-  await redis.del(boardKey);
-  await redis.hSet(
+  //
+  // 2026-07-14 PR#70 리뷰 후속 지적: del과 hSet이 별개의 두 호출이라, run.finish(강제 재시딩)와
+  // 거의 동시에 도착한 ensureMysteryBoxesSeeded(map.getState 경유) 같은 동시 seedMysteryBoxes
+  // 호출이 서로의 del/hSet과 인터리빙되면 두 세대의 필드가 뒤섞여 보드가 다시 8개보다 많아지는
+  // (바로 위에서 고친 것과 같은 종류의) 레이스가 있었다. boardKey를 WATCH해 del+hSet+expire를
+  // 하나의 트랜잭션으로 묶는다 — 우리가 스냅샷을 뜬 뒤 다른 트랜잭션이 먼저 boardKey를
+  // 바꿔놓으면 exec()이 null을 반환(실패)하므로, 이 경우 상대방이 이미 완전한 재시딩(8곳 새로 +
+  // itemSeededKey 설정)을 끝냈다고 보고 우리는 그냥 양보한다 — 재시도 없이 반환해도 안전하다
+  // (trap.install의 WATCH 실패 시 RETRY 응답과 달리, 여긴 호출자에게 돌려줄 응답이 없는 내부
+  // 헬퍼라 "누군가는 성공했다"만 보장되면 충분하다).
+  const tx = await redis.watch(boardKey);
+  await tx.multi();
+  await tx.del(boardKey);
+  await tx.hSet(
     boardKey,
     Object.fromEntries(
       getMysteryBoxSpawns(mapId, spawnSeed).map((pos) => [tileMember(pos), JSON.stringify(rollMysteryOutcome())])
     )
   );
-  await redis.expire(boardKey, DATA_SAFETY_TTL_SECONDS);
+  await tx.expire(boardKey, DATA_SAFETY_TTL_SECONDS);
+  const results = await tx.exec();
+  if (!results) {
+    return;
+  }
+
   await redis.set(itemSeededKey(mapId, date, userId), '1', {
     expiration: new Date(Date.now() + DATA_SAFETY_TTL_SECONDS * 1000),
   });

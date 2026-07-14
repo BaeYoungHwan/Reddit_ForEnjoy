@@ -78,10 +78,14 @@ const mocks = vi.hoisted(() => {
       return next;
     }
 
+    private delSync(key: string): void {
+      const existed = this.strings.delete(key) || this.hashes.delete(key) || this.zsets.delete(key);
+      if (existed) this.bump(key);
+    }
+
     async del(...keys: string[]): Promise<void> {
       for (const key of keys) {
-        const existed = this.strings.delete(key) || this.hashes.delete(key) || this.zsets.delete(key);
-        if (existed) this.bump(key);
+        this.delSync(key);
       }
     }
 
@@ -177,7 +181,17 @@ const mocks = vi.hoisted(() => {
       const tx = {
         multi: async (): Promise<void> => {},
         hSet: (key: string, fieldValues: Record<string, string>) => {
-          queued.push(() => this.hSetSync(key, fieldValues));
+          // 실제 hSet과 동일하게 failNext 주입을 존중한다 — 그러지 않으면 트랜잭션 경유
+          // hSet은 실패 주입 테스트를 우회해버린다(2026-07-14 PR#70 리뷰 후속, seedMysteryBoxes가
+          // WATCH/MULTI/EXEC로 바뀌며 드러남).
+          queued.push(() => {
+            this.maybeFail('hSet');
+            return this.hSetSync(key, fieldValues);
+          });
+          return Promise.resolve(tx);
+        },
+        del: (...keys: string[]) => {
+          queued.push(() => keys.forEach((key) => this.delSync(key)));
           return Promise.resolve(tx);
         },
         expire: (_key: string, _seconds: number) => {
@@ -431,6 +445,28 @@ describe('run.finish 아이템 보드 리셋 (docs/design-docs/item-board-reset.
     // 즉시 재시딩이므로 개입 호출 없이도 이미 채워져 있어야 한다.
     const boardAfterFinish = await mocks.redis.hGetAll(boardKey);
     expect(Object.keys(boardAfterFinish)).toHaveLength(8);
+  });
+
+  it('run.finish의 강제 재시딩과 거의 동시에 도착한 map.getState의 재시딩이 겹쳐도, 두 세대의 필드가 뒤섞여 보드가 8개보다 커지지 않는다(WATCH 레이스 회귀, PR#70 리뷰 후속)', async () => {
+    const caller = createCaller({ userId: 'user-concurrent-seed' });
+    await caller.map.getState({ mapId: 'map-1' }); // 최초 시딩(8곳)
+    const date = getKstDateString();
+    const boardKey = itemBoardKey('map-1', date, 'user-concurrent-seed');
+
+    // 레이스를 재현하려면 map.getState 쪽도 실제로 재시딩을 타야 한다 — 이미 seeded 상태라
+    // ensureMysteryBoxesSeeded가 스킵해버리므로 마커를 지워 "아직 시딩 안 됨"으로 되돌린다.
+    await mocks.redis.del(itemSeededKey('map-1', date, 'user-concurrent-seed'));
+
+    // run.finish(무조건 재시딩)와 map.getState(마커가 없어 재시딩)를 동시에 발사 — seedMysteryBoxes
+    // 내부의 await 지점들에서 서로 인터리빙될 기회가 생긴다. WATCH 보호가 없다면 del→del→hSet→hSet
+    // 순서로 겹쳐 8+8=16개까지 쌓일 수 있었다(바로 위 "즉시성 회귀" 테스트가 고쳤던 것과 같은 종류의
+    // 버그가 동시성 경로에서 재발한 것).
+    await Promise.all([
+      caller.run.finish({ mapId: 'map-1', steps: 10, clearTimeMs: 5000 }),
+      caller.map.getState({ mapId: 'map-1' }),
+    ]);
+
+    expect(Object.keys(await mocks.redis.hGetAll(boardKey))).toHaveLength(8);
   });
 });
 
