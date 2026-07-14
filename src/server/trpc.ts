@@ -119,24 +119,41 @@ async function revealNearbyTraps(
 // 유저별로 독립된 보드라 한 유저의 픽업이 다른 유저의 스폰 여부에 영향을 주지 않는다
 // (고정 스폰 좌표가 맵당 2곳뿐이라 전역 공유였다면 가장 먼저 도착한 유저가 하루치를
 // 다 가져가 버렸을 것 — 함정과 달리 미스터리 박스는 유저마다 독립적으로 존재).
-// 시딩 여부를 "필드 존재"가 아니라 전용 마커 키(NX)로 판정해야 한다 — hSetNX만 쓰면
+// 시딩 여부를 "필드 존재"가 아니라 전용 마커 키(itemSeededKey)로 판정해야 한다 — hSetNX만 쓰면
 // item.pickup의 hDel로 지워진 필드가 다음 map.getState 호출 때 다시 채워져 버려서
-// (재생성 버그) 픽업한 박스가 무한정 재획득 가능해진다. 마커 키는 map.getState가 이미
-// 위치 앵커 초기화에 쓰는 SET NX 1회성 패턴(아래 posKey 초기화 참고)과 동일하다.
+// (재생성 버그) 픽업한 박스가 무한정 재획득 가능해진다.
 // 보드 값 자체엔 타입을 저장하지 않는다 — 결과는 item.pickup이 픽업 시점에 rollMysteryOutcome()으로
 // 결정하므로, 저장 값은 "이 타일에 미확인 박스가 있다"는 존재 표시(placeholder)일 뿐이다.
-async function ensureMysteryBoxesSeeded(mapId: string, date: string, userId: string): Promise<void> {
-  const seededKey = itemSeededKey(mapId, date, userId);
-  const firstSeed = await redis.set(seededKey, '1', { nx: true });
-  if (!firstSeed) return;
-
+//
+// map.getState(ensureMysteryBoxesSeeded)와 run.finish(아이템 보드 리셋) 양쪽에서 공유하는 시딩 로직
+// (docs/design-docs/move-run-finish-bugfixes.md 1절). 보드를 먼저 채우고 마커(itemSeededKey)는
+// 마지막에 세운다 — 순서를 반대로 하면(마커 먼저) hSet이 중간에 실패했을 때 "seeded=true인데
+// 보드는 빈" 상태가 자정까지 고착될 수 있다. 이 순서면 중간에 끊겨도 "아직 시딩 안 됨"으로 남아
+// 다음 호출이 자연 복구한다.
+async function seedMysteryBoxes(mapId: string, date: string, userId: string): Promise<void> {
   const boardKey = itemBoardKey(mapId, date, userId);
   await redis.hSet(
     boardKey,
     Object.fromEntries(getMysteryBoxSpawns(mapId).map((pos) => [tileMember(pos), '1']))
   );
   await redis.expire(boardKey, DATA_SAFETY_TTL_SECONDS);
-  await redis.expire(seededKey, DATA_SAFETY_TTL_SECONDS);
+  await redis.set(itemSeededKey(mapId, date, userId), '1', {
+    expiration: new Date(Date.now() + DATA_SAFETY_TTL_SECONDS * 1000),
+  });
+}
+
+// PR #67 리뷰 후속(move-run-finish-bugfixes.md 8절): GET으로만 판정하고 실제 시딩(순서 보장 포함)은
+// seedMysteryBoxes에 전량 위임한다 — 예전엔 여기서 SET NX로 마커를 먼저 선점한 뒤 seedMysteryBoxes를
+// 불렀는데, 그러면 이 경로(가장 빈번한 호출 경로)에서만 "마커 먼저, 보드 나중"이 되어 seedMysteryBoxes
+// 내부의 hSet이 실패했을 때 마커가 이미 세워진 채로 남아 자연 복구가 안 됐다(run.finish가 직접 부르는
+// 경로에만 안전 순서가 적용되는 비대칭 버그). GET은 원자적 선점이 아니므로 같은 유저가 다중 탭으로
+// 거의 동시에 호출하면 둘 다 재시딩을 시도할 수 있지만, getMysteryBoxSpawns가 순수함수라 항상 같은
+// 데이터로 멱등 수렴한다(itemSeededKey가 유저별 독립 키라 다른 유저와는 애초에 경쟁하지 않음) — run.finish의
+// 즉시 재시딩이 이미 감수 중인 다중 탭 리스크의 부분집합(노출 창이 더 좁음)이라 별도 대응하지 않는다.
+async function ensureMysteryBoxesSeeded(mapId: string, date: string, userId: string): Promise<void> {
+  const alreadySeeded = await redis.get(itemSeededKey(mapId, date, userId));
+  if (alreadySeeded) return;
+  await seedMysteryBoxes(mapId, date, userId);
 }
 
 export const appRouter = t.router({
@@ -272,8 +289,17 @@ export const appRouter = t.router({
           return { hit: false as const };
         }
 
-        await redis.hDel(boardKey, [field]);
+        // hDel 반환값(실제로 지운 개수)으로 게이팅한다 — hGet에서 봤다는 사실만으로 hit:true를
+        // 반환하면, 같은 함정 타일에 두 유저가 거의 동시에 접근했을 때 둘 다 아직 지워지기 전의
+        // hGet 스냅샷을 보고 둘 다 hit:true를 받는 이중발동이 가능해진다(오라클 방지 설계와는
+        // 별개의 레이스 — 단일 소모 자원의 동시성 문제, docs/design-docs/move-run-finish-bugfixes.md
+        // 2절). trapInstallerKey는 설치자 UI(myTraps) 표시용 부기일 뿐이라 게이팅 기준에서 제외한다
+        // (실패해도 DATA_SAFETY_TTL_SECONDS로 자연 소멸).
+        const deleted = await redis.hDel(boardKey, [field]);
         await redis.hDel(trapInstallerKey(mapId, date, trap.installerId), [field]);
+        if (deleted === 0) {
+          return { hit: false as const };
+        }
 
         if (trap.type === 'respawn') {
           const start = getMapStartPosition(mapId);
@@ -393,6 +419,89 @@ export const appRouter = t.router({
     }),
   }),
 
+  // move.arrive: trap.trigger + item.pickup 통합 API(docs/design-docs/move-api-unification.md).
+  // 연속 이동 시 클라이언트가 두 API를 각자 SequentialDispatcher로 직렬화하면서 요청이 밀려
+  // 판정이 지연 반영되던 문제(실서버 RTT>0에서만 재현)의 근본 원인이 "이동 1칸당 서버 왕복 2회"였다.
+  // 위치 앵커 검증/커밋을 1회로 합치고 함정/아이템 판정을 병렬로 조회해 한 응답에 함께 반환한다.
+  // 마이그레이션 1단계(서버 PR)까지만 진행 — trap.trigger/item.pickup은 클라이언트가 전환할 때까지
+  // 그대로 유지한다(구버전 세션 대응, 문서 5절 4단계 마이그레이션 참고).
+  move: t.router({
+    arrive: protectedProcedure
+      .input(z.object({ mapId: z.string().min(1), x: z.number().int(), y: z.number().int() }))
+      .mutation(async ({ ctx, input }) => {
+        const { mapId, x, y } = input;
+        const date = getKstDateString();
+        const posKey = positionAnchorKey(mapId, date, ctx.userId);
+        const trapBoard = trapBoardKey(mapId, date);
+        const itemBoard = itemBoardKey(mapId, date, ctx.userId);
+        const field = tileMember({ x, y });
+
+        // RT1: 위치 앵커 + 함정보드 + 아이템보드 조회는 서로 의존관계가 없어 3방향 병렬. 위치는
+        // 아직 커밋하지 않는다 — 최종 목적지(그대로 vs respawn 시작 좌표)를 알기 전에 커밋하면
+        // respawn 타일마다 같은 키에 두 번 쓰는 낭비가 생긴다(docs/design-docs/move-run-finish-bugfixes.md 2절).
+        const [last, rawTrap, rawItem] = await Promise.all([
+          readPositionAnchor(posKey),
+          redis.hGet(trapBoard, field),
+          redis.hGet(itemBoard, field),
+        ]);
+        assertAdjacent(last, { x, y }); // 오라클 방지 — 커밋 여부와 무관하게 앵커 검증은 여기서 끝난다.
+
+        let trapType: TrapType | undefined;
+        let trapInstallerId: string | undefined;
+        if (rawTrap) {
+          const parsed = JSON.parse(rawTrap) as { type: TrapType; installerId: string };
+          if (parsed.installerId !== ctx.userId) {
+            // 설치자 본인은 자기 함정을 회피한다 — 소모되지 않음(trap.trigger와 동일 규칙).
+            trapType = parsed.type;
+            trapInstallerId = parsed.installerId;
+          }
+        }
+        // 미스터리 박스: 결과는 픽업이 실제로 성사됐는지와 무관하게 미리 굴려도 안전하다(인메모리,
+        // 부수효과 없음) — 아래에서 hDel 성공 여부로 실제 픽업 성사만 별도 확정한다.
+        const rolled = rawItem ? rollMysteryOutcome() : null;
+
+        // RT2(조건부): 소모할 게 있는 것만 개별 실행. Promise.allSettled로 서로의 실패를 격리한다 —
+        // Promise.all로 묶으면 한쪽이 일시 실패했을 때 이미 성공한 다른 쪽 hDel(Redis에는 이미 반영됨)의
+        // 결과를 응답으로 돌려주지 못하고 통째로 에러가 돼, 소모된 자원이 유실된 것처럼 보인다.
+        const [trapBoardResult, , itemResult] = await Promise.allSettled([
+          trapType ? redis.hDel(trapBoard, [field]) : Promise.resolve(0),
+          // trapInstallerKey는 설치자 UI(myTraps) 표시용 부기일 뿐이라 게이팅에 쓰지 않는다
+          // (trap.trigger와 동일 — 실패해도 DATA_SAFETY_TTL_SECONDS로 자연 소멸).
+          trapType ? redis.hDel(trapInstallerKey(mapId, date, trapInstallerId!), [field]) : Promise.resolve(0),
+          rawItem ? redis.hDel(itemBoard, [field]) : Promise.resolve(0),
+        ]);
+
+        // 게이팅: hGet 스냅샷이 아니라 hDel의 실제 반환값(fulfilled && count>0)으로만 소모 성사를
+        // 인정한다 — 이전엔 hGet에서 봤다는 사실만으로 hit:true를 반환해, 같은 함정 타일에 두 유저가
+        // 거의 동시에 접근하면 둘 다 hit:true를 받는 이중발동이 가능했다.
+        const trapDeleted = trapBoardResult.status === 'fulfilled' ? trapBoardResult.value : 0;
+        const itemDeleted = itemResult.status === 'fulfilled' ? itemResult.value : 0;
+
+        const trap =
+          trapType && trapDeleted > 0 ? ({ hit: true, type: trapType } as const) : ({ hit: false } as const);
+        const item =
+          rawItem && itemDeleted > 0 && rolled
+            ? rolled.outcome === 'trap'
+              ? ({ picked: true, outcome: 'trap', type: rolled.type } as const)
+              : ({ picked: true, outcome: 'item', type: rolled.type } as const)
+            : ({ picked: false } as const);
+
+        const needsRespawn =
+          (trap.hit && trap.type === 'respawn') ||
+          (item.picked && item.outcome === 'trap' && item.type === 'respawn');
+        const needsDetectorCharge = item.picked && item.outcome === 'item' && item.type === 'detector';
+
+        // RT3: 위치 커밋은 이 시점에 단 1회만 — 목적지를 미리 정해서 쓰므로 이중쓰기가 없다.
+        const destination = needsRespawn ? getMapStartPosition(mapId) : { x, y };
+        await Promise.all([
+          commitPosition(posKey, destination.x, destination.y),
+          needsDetectorCharge ? redis.incrBy(detectorChargeKey(mapId, date, ctx.userId), 1) : Promise.resolve(),
+        ]);
+
+        return { trap, item };
+      }),
+  }),
+
   run: t.router({
     finish: protectedProcedure
       .input(
@@ -423,8 +532,29 @@ export const appRouter = t.router({
         }
 
         const rank = await redis.zRank(key, ctx.userId);
-        // 런 종료 — 다음 map.getState가 (NX로) 위치 앵커를 다시 시작 좌표로 초기화할 수 있도록 지운다.
-        await redis.del(positionAnchorKey(mapId, date, ctx.userId));
+        // 런 종료 — 위치 앵커를 지우고 유저별 아이템 보드를 즉시 재시딩한다(docs/design-docs/
+        // move-run-finish-bugfixes.md 1절). 예전엔 itemBoardKey/itemSeededKey를 삭제만 하고 다음
+        // map.getState가 재시딩하길 기다렸는데(지연 재시딩), 다중 탭 환경에서 동시 map.getState의
+        // 시딩과 인터리빙되면 "itemSeededKey는 존재(재시딩 영구 차단) + itemBoardKey는 빈 채"인
+        // 영구 빈 보드가 재현될 수 있었다. seedMysteryBoxes는 항상 같은 최종 데이터(고정 스폰 좌표)를
+        // 쓰는 멱등 함수라, ensureMysteryBoxesSeeded와 동시에 실행돼도 트랜잭션 없이 안전하게 수렴한다.
+        // isNewRecord 여부와 무관하게 항상 실행 — 새로고침만 하고 이 mutation이 호출 안 된 경우는
+        // 애초에 이 코드를 안 타므로 "정상 골인일 때만 리셋" 조건이 자연히 만족된다.
+        // ⚠️ detectorChargeKey/loadoutClaimedKey 리셋 여부는 밸런스 판단이 필요해 미정(item-board-reset.md
+        // 4절) — 이번 변경 범위에서는 건드리지 않는다.
+        //
+        // 리더보드 기록(zAdd/hSet)은 이미 위에서 커밋됐으므로, 여기서 실패해도 rank/isNewRecord
+        // 응답까지 잃지 않도록 try/catch로 감싼다 — 실패를 그대로 던지면 이미 세운 기록의 응답이
+        // 통째로 유실되고, 클라이언트가 재시도하면 score가 이미 같아 isNewRecord가 잘못 false로
+        // 계산된다(move-run-finish-bugfixes.md 3절).
+        try {
+          await Promise.all([
+            redis.del(positionAnchorKey(mapId, date, ctx.userId)),
+            seedMysteryBoxes(mapId, date, ctx.userId),
+          ]);
+        } catch (err) {
+          console.error(`run.finish: 위치 앵커/아이템 보드 정리 실패 (userId=${ctx.userId}, mapId=${mapId})`, err);
+        }
         return { rank: (rank ?? 0) + 1, isNewRecord };
       }),
   }),
