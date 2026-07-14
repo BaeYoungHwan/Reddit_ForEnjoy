@@ -86,9 +86,7 @@ const PATH_WIDTH = 26;
 // 사각형으로 빈틈없이 채워서 옆 타일과 이어붙여도 격자 줄눈이 안 보이게 하고, 그 위에 시드
 // 고정 의사난수(mulberry32, Math.random 아님)로 불규칙한 암반 조각 면 + 균열선을 얹음 —
 // 변형 개수를 6개로 늘려(기존 4개) 반복 패턴이 덜 도드라지게 함. 벽 칸 좌표 기준 결정론적
-// 해시로 변형을 고르는 방식은 그대로 유지(같은 맵은 항상 같은 결과). 바닥 칸은 이번에도
-// 건드리지 않음(과거 회색 사각형 도입 시 "이동할 때마다 회색 선 생긴다"는 피드백으로 제거된
-// 이력이 있어 리스크가 큼 — updateFog/paintTile 주석 참고).
+// 해시로 변형을 고르는 방식은 그대로 유지(같은 맵은 항상 같은 결과).
 const WALL_TILE_VARIANTS = [
   { seed: 101, baseFill: '#2b1d13', facetFill: '#1c1209', highlightFill: '#5a4030' },
   { seed: 202, baseFill: '#241709', facetFill: '#170f06', highlightFill: '#4a3325' },
@@ -107,6 +105,13 @@ const WALL_TILE_TEXTURE_URIS = WALL_TILE_VARIANTS.map((variant) =>
     highlightFill: variant.highlightFill,
   })
 );
+
+// 바닥 타일 실험(2026-07-14): 벽돌 → 이끼/풀숲 → 석조 슬라브를 차례로 시도했으나 매번 벽과
+// 톤/입체감이 경쟁하거나 구분이 안 된다는 피드백이 반복되어 결국 원래대로 되돌림 — 바닥 칸은
+// 다시 별도 도형 없이 검은 배경 그대로 둔다(과거 "회색 사각형이 이동할 때마다 선 생긴다"는
+// 문제도 있었던 영역이라 보수적으로 접근). 시도했던 생성 함수(buildBrickFloorTileSvg 등,
+// 실제로는 buildStoneFloorTileSvg/buildMossFloorTileSvg로 남아있음)는 mazePattern.ts에
+// 그대로 남겨뒀으니 나중에 다시 시도할 때 재사용 가능.
 
 // 벽 칸 좌표(x,y)로부터 항상 같은 변형 인덱스를 골라주는 결정론적 해시 — 같은 맵이면 새로고침
 // 해도 벽 무늬가 안 바뀜(랜덤이면 매번 텍스처가 바뀌어 "깜빡이는" 느낌이 나서 고정 필요).
@@ -186,14 +191,12 @@ const PLAYER_WALK_STRETCH = 1.12; // 눌리는 동안 가로로 살짝 넓어지
 const IDLE_BOB_AMPLITUDE_PX = 3;
 const IDLE_BOB_DURATION_MS = 900;
 
-// 게임 시작 인트로(playSpawnIntro) — 가만히 정지된 채로 시작하지 않고, 하늘에서 뚝 떨어져
-// 착지하는 연출을 준다(2026-07-14 피드백). 낙하 자체는 중력 가속 느낌(Cubic.easeIn)으로,
-// 착지 순간엔 걷기보다 훨씬 깊은 스쿼시로 "쿵" 하는 무게감을 낸다.
-const SPAWN_DROP_HEIGHT_PX = TILE_SIZE * 6;
-const SPAWN_DROP_DURATION_MS = 500;
-const SPAWN_LAND_SQUASH = 0.55;
-const SPAWN_LAND_STRETCH = 1.35;
-const SPAWN_LAND_SQUASH_DURATION_MS = 200;
+// 골인 순간 캐릭터가 반갑다는 듯 통통 두 번 튀어 오르는 축하 홉(2026-07-14 도입) — 걷기
+// 스쿼시(PLAYER_WALK_*)와 같은 원리지만 더 크고 두 번 반복해서 "골인했다"는 임팩트를 낸다.
+const GOAL_HOP_HEIGHT_PX = TILE_SIZE * 0.28;
+const GOAL_HOP_DURATION_MS = 180;
+const GOAL_HOP_SQUASH = 0.85;
+const GOAL_HOP_STRETCH = 1.15;
 
 // 함정에 걸렸을 때 flashPlayer(색 틴트)만으로는 "무엇에 걸렸는지" 한눈에 안 들어와서, 캐릭터
 // 이미지 자체를 그 함정을 상징하는 그림(예: 슬라이드→바나나 옷, 시야차단→고글)으로 바꾼다 —
@@ -476,19 +479,6 @@ const LOCAL_FALLBACK_TRAPS_BY_MAP: Record<string, TrapInstance[]> = {
   ],
 };
 
-const LOCAL_FALLBACK_FOOTPRINTS_BY_MAP: Record<string, Position[]> = {
-  'map-1': [
-    { x: 2, y: 1 },
-    { x: 5, y: 3 },
-    { x: 1, y: 7 },
-  ],
-  'map-2': [
-    { x: 10, y: 1 },
-    { x: 8, y: 7 },
-    { x: 3, y: 7 },
-  ],
-};
-
 // Phaser의 "씬(Scene)" = 게임 화면 한 장을 담당하는 클래스.
 // 우리 게임은 미로 플레이 화면 하나만 있으면 되니 씬도 하나만 만듭니다.
 class MazeScene extends Phaser.Scene {
@@ -499,6 +489,11 @@ class MazeScene extends Phaser.Scene {
   // 이동 애니메이션(트윈)이 재생 중인지 여부.
   // true인 동안은 새 방향키 입력을 무시해서, 한 칸씩 딱딱 끊어서 이동하게 만듦.
   private isMoving = false;
+
+  // 스포트라이트 스폰 인트로가 암전 상태를 유지해야 하는 동안 updateFog() 호출을 전부
+  // 무시하게 하는 플래그(2026-07-14, updateFog 선언부 주석 참고). create()에서 true로
+  // 시작하고, 인트로의 마지막 flicker에서 false로 되돌린 뒤 실제 updateFog()를 호출한다.
+  private suppressFogUpdates = false;
 
   // Phaser가 제공하는 "방향키 입력 감지" 객체 (매 프레임 자동으로 눌림 상태를 갱신해줌)
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
@@ -708,6 +703,10 @@ class MazeScene extends Phaser.Scene {
   private itemSlotIcons: Phaser.GameObjects.Image[] = [];
   // 슬롯 이름표(영문) — 아이콘만으론 뭔지 안 보일 수 있다는 피드백(2026-07-13)으로 추가.
   private itemSlotLabels: Phaser.GameObjects.Text[] = [];
+  // 선택된 슬롯 바로 아래에 뜨는 작은 삼각형 인디케이터 — 선택 표시가 테두리 색/두께
+  // 차이뿐이라 눈에 덜 띈다는 피드백(2026-07-14)으로 추가. 선택된 슬롯 하나에만 존재하므로
+  // 다른 배열과 달리 길이가 0 또는 1.
+  private itemSlotSelectionIndicator: Phaser.GameObjects.Triangle | null = null;
 
   // 역방향 함정에 걸린 상태인지 여부. true면 방향키 입력을 반대로 뒤집어서 처리함.
   private isReversed = false;
@@ -841,8 +840,10 @@ class MazeScene extends Phaser.Scene {
 
     // 맵 크기만큼 타일 상태 배열을 준비한다. 통로와 맞닿은 벽 칸에는 석벽 텍스처 도형을
     // 하나씩 배치(깊은 안쪽 벽 칸은 어차피 안 보일 곳이라 만들지 않음). 벽 텍스처는 안개
-    // 상태에 따라 밝기가 바뀐다(updateFog 참고) — 그래야 "탐험해야 벽도 보인다"는 안개
-    // 시스템 취지가 유지된다. 바닥 칸 자체에는 별도 도형을 그리지 않는다.
+    // 상태에 따라 밝기가 바뀐다(computeFogVisibility 참고) — 그래야 "탐험해야 벽도 보인다"는
+    // 안개 시스템 취지가 유지된다. 바닥 칸 자체에는 별도 도형을 그리지 않는다(2026-07-14
+    // 벽돌/이끼/석조를 차례로 시도했으나 매번 벽과 경쟁하거나 구분이 안 된다는 피드백으로
+    // 원래대로 되돌림 — 검은 배경 그대로 유지).
     for (let y = 0; y < MAP_HEIGHT; y++) {
       this.tileStates[y] = [];
       this.trapRects[y] = [];
@@ -866,9 +867,9 @@ class MazeScene extends Phaser.Scene {
           }
           continue; // 벽 칸은 통로 도형을 만들지 않고 건너뜀
         }
-        // 바닥 칸 자체는 별도 도형을 그리지 않는다(원래 여기 있던 회색 사각형/연결 통로가
-        // "이동하면 자꾸 회색 선이 생긴다"는 피드백의 원인이었음) — 검은 배경 그대로 두고,
-        // 벽 텍스처(윤곽)와 발자국 아이콘만으로 통로를 표현한다.
+        // 바닥 칸 자체는 별도 도형을 그리지 않는다(과거 회색 사각형/연결 통로가 "이동할
+        // 때마다 회색 선 생긴다"는 피드백으로 제거된 이력이 있어 리스크가 큼) — 검은 배경
+        // 그대로 두고, 벽 텍스처(윤곽)와 발자국 아이콘만으로 통로를 표현한다.
       }
     }
 
@@ -887,7 +888,11 @@ class MazeScene extends Phaser.Scene {
     this.playerBaseScaleX = this.playerImg.scaleX;
     this.playerBaseScaleY = this.playerImg.scaleY;
     this.playerImg.setDepth(10); // depth(그리기 순서)를 높여서 타일 위에 캐릭터가 보이게 함
-    this.playSpawnIntro();
+    // 스폰 인트로(스포트라이트, 2026-07-14 — 하늘에서 떨어지기/살금살금 등장 후보는 비교
+    // 검토 끝에 제거됨) — updateFog() 억제부터 시작해야 인트로 끝날 때까지 맵이 안 보인다.
+    // 아래 카메라/아이템 슬롯/시야 계산 등 나머지 create() 로직보다 먼저 켜둔다.
+    this.suppressFogUpdates = true;
+    this.playSpawnIntroSpotlight();
 
     // 카메라가 캐릭터를 따라다니게 한다(2026-07-13 도입). setBounds로 맵 바깥은 스크롤이
     // 안 되게 막아서, 맵 가장자리에서도 화면 밖(빈 공간)이 보이지 않게 한다. startFollow의
@@ -912,8 +917,10 @@ class MazeScene extends Phaser.Scene {
     this.input.keyboard!.on('keydown-Z', () => this.useSelectedItem());
     this.input.keyboard!.on('keydown-X', () => this.cycleSelectedSlot());
 
-    // 게임 시작하자마자 시작 지점 기준으로 시야(안개)부터 계산해서 보여줌
-    this.updateFog();
+    // 시야(안개) 초기 계산은 여기서 하지 않는다 — "캐릭터에 불이 들어오는 순간"과 "맵이
+    // 드러나는 순간"을 맞추려고 playSpawnIntroSpotlight의 마지막 flicker 단계에서 대신
+    // 호출한다(그 전까진 맵 전체가 초기값 그대로 hidden 상태 유지 — wallTiles가 이미
+    // setAlpha(0)로 시작하므로 별도 처리 불필요).
 
     // 스플래시 로드아웃 화면에서 고른 아이템 지급 — updateFog 이후에 호출해야 손전등이
     // 즉시 넓힌 시야가 초기 안개 계산에 덮이지 않는다.
@@ -1024,7 +1031,9 @@ class MazeScene extends Phaser.Scene {
       // 미끄러지는 지점(맵 하단의 긴 통로 한복판).
       console.error('map.getState 실패 — 로컬 프리뷰용 임시 데이터로 대체', err);
       this.myTraps = LOCAL_FALLBACK_TRAPS_BY_MAP[MAP_ID] ?? LOCAL_FALLBACK_TRAPS_BY_MAP['map-1']!;
-      footprints = LOCAL_FALLBACK_FOOTPRINTS_BY_MAP[MAP_ID] ?? LOCAL_FALLBACK_FOOTPRINTS_BY_MAP['map-1']!;
+      // 발자국은 로컬 폴백 임시 좌표를 두지 않는다(2026-07-14 제거, PR#65) — 시작 지점 근처
+      // 좌표라 스폰 인트로가 끝나자마자 바로 보여서 "다른 유저 발자국"이라기엔 부자연스러웠음.
+      footprints = [];
       // 아이템도 위와 동일한 이유(백엔드 없는 로컬 프리뷰)로 TEMP_ITEMS 좌표로 폴백한다.
       this.remainingItems = TEMP_ITEMS;
     }
@@ -1046,6 +1055,12 @@ class MazeScene extends Phaser.Scene {
 
     const marker = this.add.container(cx, cy, [boxImg, markImg]);
     marker.setDepth(6); // 타일(기본 depth 0)보다 위, 캐릭터(depth 10)보다 아래
+    // 벽 타일(wallTiles)과 동일하게 기본값을 숨김(0)으로 시작 — updateFog()의 paintTile이
+    // 안개 상태에 맞는 알파를 계산해줄 때까지는 안 보여야 한다. 스포트라이트 인트로처럼
+    // updateFog()가 한동안 억제되는 동안에도(2026-07-14 발견) 이 기본값 덕분에 미리 노출되지
+    // 않는다 — 억제 중이 아니면 호출부(renderItemMarkers/renderTrapMarkers)의 updateFog()가
+    // 같은 프레임 안에서 바로 알맞은 알파로 보정하므로 평소 동작엔 영향 없다.
+    marker.setAlpha(0);
 
     // 물음표만 위아래로 살짝 통통 뜨는 애니메이션 (박스는 움직이지 않음)
     this.tweens.add({
@@ -1095,6 +1110,7 @@ class MazeScene extends Phaser.Scene {
       );
       marker.setDisplaySize(PATH_WIDTH * 0.7, PATH_WIDTH * 0.7);
       marker.setDepth(2); // 통로(depth 0)보다 위, 함정/캐릭터(depth 6/10)보다 아래
+      marker.setAlpha(0); // buildMysteryBoxMarker와 동일한 이유(안개 계산 전엔 숨김 기본값)
       this.footprintRects[tile.y]![tile.x] = marker;
     }
     this.updateFog();
@@ -1230,46 +1246,133 @@ class MazeScene extends Phaser.Scene {
     return null;
   }
 
-  // 게임 시작 인트로 — 캐릭터가 시작 지점 위 하늘에서 뚝 떨어져 착지한다. 가만히 정지된
-  // 채로 시작하지 않고 첫인상부터 동적으로 보이게 하기 위함(2026-07-14 피드백). 착지 전까지는
-  // isMoving을 잠가 방향키 입력을 막는다 — 낙하 도중에 이동이 끼어들면 캐릭터 위치가
-  // 트윈(낙하)과 이동 트윈 둘로 동시에 조작되어 위치가 튀어 보일 수 있다.
-  private playSpawnIntro() {
-    const landingY = this.playerImg.y;
-    this.playerImg.y = landingY - SPAWN_DROP_HEIGHT_PX;
+  // 스폰 인트로 — "스포트라이트"(2026-07-14, 하늘에서 떨어지기/살금살금 등장 후보와 비교
+  // 검토 끝에 최종 채택).
+  // - 1차(확 퍼지는 원)/2차(타원 빛무리)는 "캐릭터 자신이 빛을 뿜는" 손전등 인상이라는
+  //   피드백 → 3차에서 위는 좁고 아래로 갈수록 넓어지는 삼각형 빔으로 교체.
+  // - Phaser의 Triangle 게임 오브젝트는 지정한 세 점을 원점 기준 그대로 배치하는 게 아니라
+  //   바운딩 박스 중심을 기본 origin(0.5, 0.5)에 맞춰 재배치해서 도형이 비스듬히 그려지는
+  //   문제가 있었음(2026-07-14 발견) → 좌표를 완전히 직접 통제하는 Graphics로 교체.
+  // - 6차에서 "캐릭터 먼저 페이드인 → 조명 따로 깜빡" 순서로 바꿨었는데, "암흑에서 시작해서
+  //   조명이 깜빡일 때마다 캐릭터도 같이 보였다 안 보였다 하고, 조명이 완전히 켜지는 순간
+  //   맵이 드러나면 좋겠다"는 피드백으로 재조정 → 다시 캐릭터를 lampGlow/beam과 같은
+  //   flicker 토큰으로 묶되(runFlicker 안에서 셋 다 같이 토글), 맵 공개(updateFog)만 마지막
+  //   켜짐 시점에 별도로 실행하는 형태로 정리(이 부분은 6차에서 그대로 유지).
+  // - "삼각형이 너무 단단해 보인다, 그라디언트로 은은하게" 피드백 → Graphics의
+  //   fillGradientStyle로 램프 쪽(꼭짓점)은 진하고 캐릭터 쪽(밑변)으로 갈수록 옅어지는
+  //   수직 그라디언트 채우기로 교체(단색 fillStyle 대신).
+  private playSpawnIntroSpotlight() {
     this.isMoving = true;
+    this.playerImg.setAlpha(0);
 
-    this.tweens.add({
-      targets: this.playerImg,
-      y: landingY,
-      duration: SPAWN_DROP_DURATION_MS,
-      ease: 'Cubic.easeIn', // 중력에 끌려 점점 빨라지다 착지하는 느낌
-      onComplete: () => {
-        // 착지 순간 — 카메라가 살짝 흔들리고, 발밑에 옅은 먼지 링이 퍼졌다 사라짐(트랩
-        // 이펙트와 동일한 spawnPulseEffect 재사용). 전용 착지 효과음 에셋은 아직 없어
-        // 소리는 생략 — 나중에 구하면 여기서 재생하면 됨.
-        this.cameras.main.shake(150, 0.006);
-        this.spawnPulseEffect(this.playerImg.x, landingY + PLAYER_DISPLAY_SIZE * 0.32, {
-          radius: TILE_SIZE * 0.32,
-          color: 0x000000,
-          fillAlpha: 0.35,
-          endScale: 2.2,
-          endAlpha: 0,
-          duration: 350,
-          depth: 9,
-        });
+    const lampX = this.playerImg.x;
+    const lampY = this.playerImg.y - TILE_SIZE * 1.7;
+    const beamBottomY = this.playerImg.y + TILE_SIZE * 0.4;
+    const beamHalfWidth = TILE_SIZE * 0.85;
 
+    const lampGlow = this.add.circle(lampX, lampY, TILE_SIZE * 0.15, 0xfff4c2, 0.7);
+    lampGlow.setBlendMode(Phaser.BlendModes.ADD);
+    lampGlow.setDepth(9);
+    lampGlow.setAlpha(0);
+
+    // Graphics는 world 좌표를 그대로 쓰므로(별도 origin 보정 없음), moveTo(램프 위치) →
+    // 캐릭터 발밑 좌/우로 벌어진 두 점을 잇는 삼각형이 정확히 의도한 모양대로 그려진다.
+    // fillGradientStyle(top,top,bottom,bottom, alphaTop,alphaTop,alphaBottom,alphaBottom) —
+    // 꼭짓점(램프, 위)이 짙고 밑변(캐릭터, 아래)으로 갈수록 옅어져 "은은하게 퍼지는" 느낌.
+    const beam = this.add.graphics();
+    beam.fillGradientStyle(0xfff4c2, 0xfff4c2, 0xfff4c2, 0xfff4c2, 0.45, 0.45, 0.1, 0.1);
+    beam.beginPath();
+    beam.moveTo(lampX, lampY);
+    beam.lineTo(lampX - beamHalfWidth, beamBottomY);
+    beam.lineTo(lampX + beamHalfWidth, beamBottomY);
+    beam.closePath();
+    beam.fillPath();
+    beam.setBlendMode(Phaser.BlendModes.ADD);
+    beam.setDepth(9);
+    beam.setAlpha(0);
+
+    const flickers: Array<{ on: boolean; holdMs: number }> = [
+      { on: true, holdMs: 80 },
+      { on: false, holdMs: 70 },
+      { on: true, holdMs: 50 },
+      { on: false, holdMs: 120 },
+      { on: true, holdMs: 90 },
+      { on: false, holdMs: 50 },
+      { on: true, holdMs: 0 }, // 마지막 — 이후 계속 켜진 채 유지
+    ];
+
+    const runFlicker = (index: number) => {
+      const step = flickers[index];
+      if (!step) return;
+
+      lampGlow.setAlpha(step.on ? 0.7 : 0);
+      beam.setAlpha(step.on ? 1 : 0); // beam 자체의 실제 밝기는 그라디언트 알파로 이미 고정
+      this.playerImg.setAlpha(step.on ? 1 : 0); // 조명이 꺼질 때마다 캐릭터도 같이 안 보이게
+
+      // 맵(벽/발자국/아이템/함정/골인 마커)도 캐릭터·조명과 같은 리듬으로 같이 깜빡이게 한다
+      // (2026-07-14 피드백) — updateFog()는 suppressFogUpdates에 막혀 아직 아무 것도 안 하니,
+      // 그 가드를 우회하는 실제 계산 함수(computeFogVisibility)/블랙아웃 함수를 켜짐/꺼짐마다
+      // 직접 번갈아 호출한다. computeFogVisibility는 tileStates(탐험 기억)를 갱신하고,
+      // blackoutMap은 그 기억은 안 건드리고 화면 표시만 끈다 — 그래서 다음 켜짐 때 다시
+      // computeFogVisibility를 부르면 지금까지 쌓인 탐험 범위 그대로 정상 표시된다.
+      if (step.on) this.computeFogVisibility();
+      else this.blackoutMap();
+
+      if (index + 1 >= flickers.length) {
+        // 불이 정착하는 순간 — 이후엔 정상적인 updateFog() 호출(이동 등)이 다시 통하도록
+        // 억제 플래그를 푼다. 위에서 이미 computeFogVisibility()로 직접 그렸으므로 여기서
+        // updateFog()를 또 부를 필요는 없다.
+        this.suppressFogUpdates = false;
+
+        // 둘 다 캐릭터를 따라 움직이지 않는 고정 오브젝트라, 여기서 같이 안 지우면 캐릭터가
+        // 걸어간 뒤에도 시작 칸에 빔이 영구히 남는다.
         this.tweens.add({
-          targets: this.playerImg,
-          scaleY: this.playerBaseScaleY * SPAWN_LAND_SQUASH,
-          scaleX: this.playerBaseScaleX * SPAWN_LAND_STRETCH,
-          duration: SPAWN_LAND_SQUASH_DURATION_MS,
-          yoyo: true,
-          ease: 'Sine.easeOut',
+          targets: [lampGlow, beam],
+          alpha: 0, // 각자 현재 알파(lampGlow=0.7, beam=1)에서부터 자연스럽게 옅어짐
+          duration: 500,
           onComplete: () => {
-            this.isMoving = false;
+            lampGlow.destroy();
+            beam.destroy();
           },
         });
+        this.isMoving = false;
+        return;
+      }
+      this.time.delayedCall(step.holdMs, () => runFlicker(index + 1));
+    };
+    runFlicker(0);
+  }
+
+  // 골인 순간 재생하는 축하 홉 — 위아래로 통통 두 번 튀면서 동시에 스쿼시&스트레치를 줘서
+  // 반가움을 표현한다(2026-07-14 도입). 시작 전에 killTweensOf로 진행 중일 수 있는 다른
+  // 트윈(예: idle bob)을 확실히 정리한다 — 이동 트윈이 끝난 직후 호출되는 자리라 보통은
+  // 이미 정리돼있지만, tryMove가 이동 시작 시 항상 killTweensOf를 부르는 것과 같은 방어적
+  // 패턴을 여기서도 유지한다.
+  private playGoalCelebration() {
+    this.tweens.killTweensOf(this.playerImg);
+
+    const baseY = this.playerImg.y;
+    this.tweens.add({
+      targets: this.playerImg,
+      y: baseY - GOAL_HOP_HEIGHT_PX,
+      duration: GOAL_HOP_DURATION_MS,
+      yoyo: true,
+      repeat: 1,
+      ease: 'Sine.easeOut',
+      onComplete: () => {
+        this.playerImg.y = baseY;
+      },
+    });
+    this.tweens.add({
+      targets: this.playerImg,
+      scaleY: this.playerBaseScaleY * GOAL_HOP_SQUASH,
+      scaleX: this.playerBaseScaleX * GOAL_HOP_STRETCH,
+      duration: GOAL_HOP_DURATION_MS,
+      yoyo: true,
+      repeat: 1,
+      ease: 'Sine.easeOut',
+      onComplete: () => {
+        this.playerImg.setScale(this.playerBaseScaleX, this.playerBaseScaleY);
       },
     });
   }
@@ -1847,6 +1950,20 @@ class MazeScene extends Phaser.Scene {
       duration: 500,
       depth: 15,
     });
+
+    // 카메라 펀치 — 링 이펙트만으로는 "막았다"는 임팩트가 약하다는 피드백(2026-07-14)으로
+    // 추가. 살짝 확대했다가 원래 배율(1, 카메라 줌은 이 파일에서 여기 말고는 안 건드림)로
+    // 되돌아오는 짧은 트윈. 진행 중인 줌 트윈이 있으면 먼저 죽여서, 연속으로 빠르게 함정을
+    // 막았을 때 배율이 1을 기준으로 계속 누적되는 것을 방지한다(항상 절대값 1↔1.06로만 왕복).
+    this.tweens.killTweensOf(this.cameras.main);
+    this.cameras.main.zoom = 1;
+    this.tweens.add({
+      targets: this.cameras.main,
+      zoom: 1.06,
+      duration: 90,
+      yoyo: true,
+      ease: 'Sine.easeOut',
+    });
   }
 
   // 손전등 — items.md: 시야 반경 2→4칸, 8초 후 원래대로 복귀.
@@ -2124,6 +2241,8 @@ class MazeScene extends Phaser.Scene {
     this.itemSlotGlows.forEach((g) => g.destroy());
     this.itemSlotIcons.forEach((i) => i.destroy());
     this.itemSlotLabels.forEach((l) => l.destroy());
+    this.itemSlotSelectionIndicator?.destroy();
+    this.itemSlotSelectionIndicator = null;
     this.itemSlotBgs = [];
     this.itemSlotBorders = [];
     this.itemSlotGlows = [];
@@ -2174,6 +2293,16 @@ class MazeScene extends Phaser.Scene {
         .setScrollFactor(0)
         .setDepth(33);
       this.itemSlotLabels.push(label);
+
+      // 선택된 슬롯 하나에만: 테두리 색/두께 차이만으론 눈에 덜 띈다는 피드백(2026-07-14)으로
+      // 슬롯 바로 아래에 위쪽을 가리키는 작은 삼각형을 추가로 띄운다. 테두리와 같은 골드 톤.
+      if (selected) {
+        const indicatorY = slotY + ITEM_SLOT_SIZE / 2 + 8;
+        this.itemSlotSelectionIndicator = this.add
+          .triangle(slotX, indicatorY, -5, 5, 5, 5, 0, -4, 0xffe066, 1)
+          .setScrollFactor(0)
+          .setDepth(33);
+      }
 
       // icon은 setDisplaySize()로 이미 원본 텍스처 대비 축소된 scale을 갖고 있어(다른
       // 파츠처럼 "정상 크기 = scale 1"이 아님) — 아래 팝인/펀치 트윈이 다른 파츠와 똑같이
@@ -2689,6 +2818,7 @@ class MazeScene extends Phaser.Scene {
     // 문제가 있었다 — 여기서도 확실히 정리한다.
     this.isSliding = false;
     this.refreshPlayerTrapVisual();
+    this.playGoalCelebration();
 
     // 다음 주기적 flush까지 기다리면 마지막 몇 칸이 화면 종료 후로 밀릴 수 있어 바로 전송.
     void this.flushFootprints();
@@ -2820,6 +2950,19 @@ class MazeScene extends Phaser.Scene {
   // 안개(시야) 상태를 다시 계산하는 함수.
   // vision-system.md 규칙: 기본 시야 2칸 안쪽은 밝게, 지나간 타일은 안개가 다시 덮이지 않고 유지.
   private updateFog() {
+    // 스포트라이트 인트로 진행 중엔 이 함수를 통째로 무시한다(2026-07-14 발견) — create()에서
+    // 초기 호출만 건너뛰어도, 손전등 로드아웃이 저장돼 있으면 applyLoadout() →
+    // applyFlashlightItem()이 자체적으로 updateFog()를 또 불러서 맵이 미리 드러나 버렸다.
+    // 호출 지점마다 일일이 막는 대신 이 함수 진입점 자체를 막아서, 앞으로 updateFog를 부르는
+    // 코드가 늘어나도 스포트라이트 인트로 중엔 항상 안전하게 무시되도록 한다. 실제 계산은
+    // computeFogVisibility로 분리해뒀다 — playSpawnIntroSpotlight가 깜빡임 각 단계마다 이
+    // 가드를 우회해서 직접 계산/블랙아웃을 번갈아 호출해야 하기 때문(아래 참고).
+    if (this.suppressFogUpdates) return;
+    this.computeFogVisibility();
+  }
+
+  // updateFog()의 실제 계산 로직 — suppressFogUpdates 가드 없이 항상 즉시 실행된다.
+  private computeFogVisibility() {
     // 1단계: 플레이어 위치에서 시작해 벽이 아닌 칸만 타고(4방향) BFS로 반경만큼 퍼뜨려
     // "지금 보이는 칸" 집합을 구한다. 예전에는 체비셰프 거리(벽 무시하고 정사각형으로
     // 퍼짐)를 썼는데, 좁은 통로에서도 옆 통로/방까지 벽을 뚫고 보여서 "손전등"처럼 느껴지는
@@ -2902,6 +3045,26 @@ class MazeScene extends Phaser.Scene {
       }
       wallTile.image.setAlpha(maxAlpha);
     }
+  }
+
+  // computeFogVisibility가 평소에 그리는 모든 것(벽 텍스처, 함정/발자국/아이템 마커, 골인
+  // 마커)을 강제로 알파 0(완전 숨김)으로 되돌린다 — tileStates(탐험 기억)는 건드리지 않고
+  // 화면 표시만 임시로 끈다. playSpawnIntroSpotlight의 조명 깜빡임 중 "꺼짐" 단계에서 맵도
+  // 캐릭터와 같은 리듬으로 같이 안 보이게 하는 용도(2026-07-14 도입) — tileStates를 안
+  // 건드리므로, 바로 다음 "켜짐" 단계에서 computeFogVisibility를 다시 부르면 지금까지
+  // 쌓인 탐험 기억 그대로 정상적으로 다시 그려진다.
+  private blackoutMap() {
+    for (const wallTile of this.wallTiles) {
+      wallTile.image.setAlpha(0);
+    }
+    for (let y = 0; y < MAP_HEIGHT; y++) {
+      for (let x = 0; x < MAP_WIDTH; x++) {
+        this.trapRects[y]?.[x]?.setAlpha(0);
+        this.footprintRects[y]?.[x]?.setAlpha(0);
+        this.itemRects[y]?.[x]?.setAlpha(0);
+      }
+    }
+    this.goalRect.setAlpha(0);
   }
 
   // 타일 상태(hidden/explored/visible)를 실제 화면 밝기(alpha)로 변환하는 함수.
