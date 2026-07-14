@@ -17,12 +17,7 @@ const LEGEND: Record<string, TileType> = {
   E: 'exit',
 };
 
-// export하는 이유: splash.tsx가 스플래시 배경 전용 장식 미로(오늘의 실제 플레이 맵과 무관 —
-// 배경이 정답을 미리 보여주면 안 됨, 2026-07-14 피드백)를 같은 ASCII 레이아웃 형식으로 만들
-// 때 재사용한다. MAZE_MAPS엔 등록하지 않으므로 pickDailyMapId/getMazeMap이 절대 이 맵을
-// 실제 플레이 맵으로 고르지 않는다 — 이 함수로 만든 MazeMap은 배경 렌더링(buildMazeBackground)
-// /경로 계산(findPath) 입력으로만 쓰인다.
-export function parseLayout(id: string, name: string, rows: string[]): MazeMap {
+function parseLayout(id: string, name: string, rows: string[]): MazeMap {
   const grid = rows.map((row) => row.split('').map((ch) => LEGEND[ch] ?? 'wall'));
   let start: Position = { x: 0, y: 0 };
   let exit: Position = { x: 0, y: 0 };
@@ -127,6 +122,42 @@ export const MAZE_MAPS: Record<string, MazeMap> = {
   'map-1': parseLayout('map-1', '첫 번째 미로', MAP_1_LAYOUT),
   'map-2': parseLayout('map-2', '두 번째 미로', MAP_2_LAYOUT),
 };
+
+// 스플래시(메인) 화면 배경 전용 장식 미로 — 오늘 실제로 플레이할 맵과 완전히 무관하다(배경만
+// 봐도 오늘의 미로 구조가 스포일러되는 문제, 2026-07-14 피드백으로 분리). 의도적으로
+// MAZE_MAPS엔 등록하지 않는다 — pickDailyMapId/getMazeMap이 절대 이 맵을 실제 플레이 맵으로
+// 고르면 안 되기 때문. 생성 방식은 실제 플레이 맵들과 동일(recursive-backtracker,
+// continueBias=0.15, loopRatio=0.03, 25x21, map-2와 같은 자동 스코어링 스크립트)이라 시각적
+// 스타일은 유지하면서 내용만 다르다. map-1/map-2와 마찬가지로 maps.test.ts에서 무결성(그리드
+// 크기, S/E 파싱, 도달 가능성)을 검증한다.
+const SPLASH_BACKGROUND_LAYOUT = [
+  '#########################',
+  '#S....#.......#...#...#.#',
+  '#####.#.#####.#.#.#.#.#.#',
+  '#...#.#.#..E#...#.#.#...#',
+  '#.###.#.#.#######.#.###.#',
+  '#.....#.#...#...#.#.....#',
+  '#.#####.###.#.#.#.#.#.#.#',
+  '#.........#...#.#...#.#.#',
+  '#.#.#####.###.#.###.#.#.#',
+  '#.#...#.#...#.#...#.#.#.#',
+  '#.###.#.###.###.#.#.#.#.#',
+  '#...#.....#...#.#.#.#.#.#',
+  '###.#########.###.#.###.#',
+  '#.#.#.........#...#.....#',
+  '#.#.#.#########.#######.#',
+  '#...#.#.#.....#.......#.#',
+  '#.###.#.#.###.#.###.###.#',
+  '#...#.#.#.#.#...#.#.....#',
+  '###.#.#.#.#.#####.#######',
+  '#.....#.................#',
+  '#########################',
+];
+export const SPLASH_DECORATIVE_MAP: MazeMap = parseLayout(
+  'splash-decorative',
+  '스플래시 장식용 미로',
+  SPLASH_BACKGROUND_LAYOUT
+);
 
 // 데일리 맵 로테이션 — KST 날짜 문자열(YYYY-MM-DD)을 해시해 등록된 맵 중 하나를 결정론적으로
 // 고른다(매일 같은 날짜엔 항상 같은 맵, 팀원 전체가 항상 같은 맵을 봄). 등록된 맵이 1개뿐이면
