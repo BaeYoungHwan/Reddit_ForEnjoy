@@ -763,10 +763,19 @@ class MazeScene extends Phaser.Scene {
   // 마찬가지로, 함정을 연달아 밟는 등 이벤트 효과음끼리 겹치는 경우도 있어서(이전 함정
   // 효과음이 아직 울리는 중에 새 함정을 밟으면 두 소리가 섞여 들림) 새 이벤트 효과음을 틀기
   // 전에 이전 이벤트 효과음도 끊는다 — 항상 "가장 최근에 발동한 효과음"만 들리게 함.
+  //
+  // 2026-07-14: 예전엔 여기서 .stop()만 하고 인스턴스를 안 지워서(.destroy() 안 함),
+  // this.sound.add()가 매번 새로 만드는 인스턴스가 Phaser SoundManager 내부 배열(sounds)에
+  // 영구히 쌓이는 문제가 있었다(update()가 매 프레임 이 배열 전체를 순회해 오래 플레이할수록
+  // 프레임당 비용이 늘어남 — /review pr#36 셀프 리뷰로 처음 발견, docs/wbs.md 참고).
+  // BaseSound.destroy()가 내부적으로 stop()을 먼저 호출하고 pendingRemove 플래그를 세우면,
+  // BaseSoundManager.update()가 매 프레임 그 플래그를 보고 배열에서 스플라이스로 제거한다
+  // (Phaser 소스 확인 — .stop()만으론 이 플래그가 절대 안 세워짐). 재생 로직/겹침 처리는
+  // 그대로 두고 "다 쓴 인스턴스 정리"만 추가 — .stop() 대신 .destroy()로 교체.
   private playSfx(key: SfxKey) {
     try {
-      this.footstepSound?.stop();
-      this.lastEventSound?.stop();
+      this.footstepSound?.destroy();
+      this.lastEventSound?.destroy();
       const sound = this.sound.add(key);
       this.lastEventSound = sound;
       this.lastEventSoundStartedAt = this.time.now;
@@ -796,10 +805,11 @@ class MazeScene extends Phaser.Scene {
   }
 
   // 발걸음 소리를 실제로 재생. 이전 발걸음이 아직 울리는 중에 새 걸음을 내디디면(연속 이동 시
-  // 흔함) 겹쳐 들리지 않게 먼저 끊는다.
+  // 흔함) 겹쳐 들리지 않게 먼저 끊는다. playSfx와 동일한 이유로 .stop() 대신 .destroy() 사용
+  // (사운드 인스턴스 누적 방지, 2026-07-14).
   private playFootstepNow() {
     try {
-      this.footstepSound?.stop();
+      this.footstepSound?.destroy();
       this.footstepSound = this.sound.add('footstep');
       this.footstepSound.play({ volume: DEFAULT_SFX_VOLUME });
     } catch (err) {
