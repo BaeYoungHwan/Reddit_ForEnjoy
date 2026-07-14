@@ -87,10 +87,69 @@ const MAP_1_LAYOUT = [
   '#########################',
 ];
 
+// 2026-07-13 데일리 맵 로테이션 착수: map-1의 4차 재설계에서 확정된 생성 파라미터
+// (recursive-backtracker, continueBias=0.15, loopRatio=0.03, 25x21)를 그대로 재사용해
+// map-2를 생성 — 이번엔 수작업 시행착오 대신 자동 스코어링으로 시드를 선정(스크립트:
+// gen-map2.mjs, 세션 스크래치패드). 선정 기준(map-1 실측치와 동일선상): 시작→골인 최단거리
+// 100~145칸, 최단경로상 교차로 밀도 10칸당 1개에 최대한 근접, 슬라이드 함정용 러너웨이(6칸
+// 이상, 진입 가능 방향 한정) 후보 3곳 이상. 시드 389 선정 결과: 최단거리 140칸, 교차로
+// 밀도 10.0칸당 1개(map-1과 동일), 러너웨이 후보 36곳.
+const MAP_2_LAYOUT = [
+  '#########################',
+  '#S#...................#.#',
+  '#.#.#.#######.###.#.#.#.#',
+  '#.#.#.#.....#...#.#.#...#',
+  '#.###.#####.#.#.#.#.###.#',
+  '#...#.#.....#...#...#.#.#',
+  '###.#.#.#####.#####.#.#.#',
+  '#.#...#.....#.......#...#',
+  '#.#####.###.#########.###',
+  '#.#...#.#.#.......#.#...#',
+  '#.#.#.#.#.#####.#.#.###.#',
+  '#...#...#.....#.#...#...#',
+  '#.#######.#.###.#####.###',
+  '#.....#...#...#.....#.#.#',
+  '#####.###.###.#####.#.#.#',
+  '#...#...#.#E#.....#...#.#',
+  '#.#####.#.#.###.#.#####.#',
+  '#...#...#...#...#.#.....#',
+  '#.#.#.#######.###.###.#.#',
+  '#.#...........#.......#.#',
+  '#########################',
+];
+
 export const MAZE_MAPS: Record<string, MazeMap> = {
   'map-1': parseLayout('map-1', '첫 번째 미로', MAP_1_LAYOUT),
+  'map-2': parseLayout('map-2', '두 번째 미로', MAP_2_LAYOUT),
 };
 
+// 데일리 맵 로테이션 — KST 날짜 문자열(YYYY-MM-DD)을 해시해 등록된 맵 중 하나를 결정론적으로
+// 고른다(매일 같은 날짜엔 항상 같은 맵, 팀원 전체가 항상 같은 맵을 봄). 등록된 맵이 1개뿐이면
+// 항상 그 맵 하나만 나오므로, map-3 이상을 추가해도 이 함수는 그대로 재사용 가능하다.
+export function pickDailyMapId(kstDateString: string): string {
+  const ids = Object.keys(MAZE_MAPS).sort();
+  if (ids.length === 0) throw new Error('MAZE_MAPS가 비어있음');
+  let hash = 0;
+  for (let i = 0; i < kstDateString.length; i++) {
+    hash = (hash * 31 + kstDateString.charCodeAt(i)) | 0;
+  }
+  const index = Math.abs(hash) % ids.length;
+  return ids[index]!;
+}
+
+// isRegisteredMapId로 폴백 여부를 판정한다 — `MAZE_MAPS[mapId] ?? MAZE_MAPS['map-1']!` 형태로
+// 직접 접근하면 mapId==='constructor' 같은 값이 Object.prototype 체인을 타고 truthy를 반환해
+// 폴백이 발동하지 않는다. server/trpc.ts가 클라이언트 입력(mapId: z.string().min(1), 화이트리스트
+// 검증 없음)을 그대로 이 함수에 넘기므로(getMapStartPosition 경유) 서버까지 뚫리는 취약점이었다
+// (2026-07-14 PR#60 리뷰에서 발견 — 처음엔 클라이언트 ?map= 오버라이드만 고쳤다가, getMazeMap
+// 자체가 여전히 취약해 서버 map.getState가 mapId='constructor' 한 번으로 크래시하는 걸 재확인).
 export function getMazeMap(mapId: string): MazeMap {
-  return MAZE_MAPS[mapId] ?? MAZE_MAPS['map-1']!;
+  return isRegisteredMapId(mapId) ? MAZE_MAPS[mapId]! : MAZE_MAPS['map-1']!;
+}
+
+// mapId 문자열이 실제로 등록된 맵인지 검증한다. `mapId in MAZE_MAPS`로 직접 검사하면 MAZE_MAPS가
+// 일반 객체 리터럴이라 Object.prototype까지 검사 대상에 들어가 'constructor'/'toString' 같은
+// 값도 통과해버린다(2026-07-14 PR#60 리뷰에서 발견) — hasOwnProperty로 프로토타입 체인을 배제한다.
+export function isRegisteredMapId(mapId: string): boolean {
+  return Object.prototype.hasOwnProperty.call(MAZE_MAPS, mapId);
 }

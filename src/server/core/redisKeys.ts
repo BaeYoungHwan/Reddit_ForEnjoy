@@ -1,13 +1,9 @@
 import type { Position } from '../../shared/game-types';
 
-/**
- * 서버 인스턴스의 시스템 타임존에 의존하면 리셋 기준이 배포 환경마다 달라질 수 있어,
- * UTC 시각에 KST(UTC+9) 오프셋을 직접 더해 날짜를 계산한다.
- */
-export function getKstDateString(now: Date = new Date()): string {
-  const kst = new Date(now.getTime() + 9 * 60 * 60 * 1000);
-  return kst.toISOString().slice(0, 10);
-}
+// 2026-07-13: 클라이언트(오늘의 맵 선택, shared/maps.ts의 pickDailyMapId)도 서버와 동일한
+// 날짜 문자열을 계산해야 해서 shared/kstDate.ts로 옮김 — 기존 호출부(`./redisKeys`에서 import)가
+// 안 깨지도록 여기서 재수출한다.
+export { getKstDateString } from '../../shared/kstDate';
 
 export const tileMember = (pos: Position): string => `${pos.x}:${pos.y}`;
 
