@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { getKstDateString, itemBoardKey } from './core/redisKeys';
+import { getKstDateString, itemBoardKey, itemSeededKey } from './core/redisKeys';
 
 /**
  * @devvit/web/server의 redis는 실제 Devvit 런타임에서만 접속 가능한 싱글턴이라,
@@ -15,12 +15,28 @@ const mocks = vi.hoisted(() => {
     private hashes = new Map<string, Map<string, string>>();
     private zsets = new Map<string, Map<string, number>>();
     private versions = new Map<string, number>();
+    // 부분 실패(예: hSet 성공/실패 순서에 따른 시딩 갭) 회귀 테스트를 위한 실패 주입 훅
+    // (docs/design-docs/move-run-finish-bugfixes.md 8절).
+    private failNextCalls = new Map<string, number>();
 
     reset(): void {
       this.strings.clear();
       this.hashes.clear();
       this.zsets.clear();
       this.versions.clear();
+      this.failNextCalls.clear();
+    }
+
+    failNext(method: string, times = 1): void {
+      this.failNextCalls.set(method, times);
+    }
+
+    private maybeFail(method: string): void {
+      const remaining = this.failNextCalls.get(method);
+      if (remaining && remaining > 0) {
+        this.failNextCalls.set(method, remaining - 1);
+        throw new Error(`FakeRedis: injected failure for ${method}`);
+      }
     }
 
     private bump(key: string): void {
@@ -79,6 +95,7 @@ const mocks = vi.hoisted(() => {
     }
 
     async hSet(key: string, fieldValues: Record<string, string>): Promise<number> {
+      this.maybeFail('hSet');
       return this.hSetSync(key, fieldValues);
     }
 
@@ -401,6 +418,25 @@ describe('map.getState 미스터리 박스 시딩', () => {
     const state = await caller.map.getState({ mapId: 'map-1' });
     expect(state.mysteryBoxes).not.toContainEqual({ x: 5, y: 12 });
     expect(state.mysteryBoxes).toContainEqual({ x: 9, y: 1 });
+  });
+
+  it('시딩 도중 hSet이 실패해도 마커가 남지 않아 다음 호출이 자연 복구한다(PR #67 리뷰 회귀, docs/design-docs/move-run-finish-bugfixes.md 8절)', async () => {
+    const caller = createCaller({ userId: 'user-seed-fail' });
+    const date = getKstDateString();
+    const boardKey = itemBoardKey('map-1', date, 'user-seed-fail');
+    const seededKey = itemSeededKey('map-1', date, 'user-seed-fail');
+
+    mocks.redis.failNext('hSet', 1);
+    await expect(caller.map.getState({ mapId: 'map-1' })).rejects.toThrow();
+
+    // 실패 지점이 보드 hSet이라, 마커(itemSeededKey)는 세워지지 않아야 한다 — 마커가 먼저 세워져
+    // 있었다면(수정 전 SET NX 버전) 이 시점에 이미 '1'이라 아래 재호출도 영구히 스킵됐을 것이다.
+    expect(await mocks.redis.get(seededKey)).toBeUndefined();
+    expect(Object.keys(await mocks.redis.hGetAll(boardKey))).toHaveLength(0);
+
+    // 실패 주입 없이 재호출하면 자연 복구되어야 한다.
+    const state = await caller.map.getState({ mapId: 'map-1' });
+    expect(state.mysteryBoxes).toHaveLength(3);
   });
 });
 

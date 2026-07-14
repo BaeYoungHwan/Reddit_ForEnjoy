@@ -119,10 +119,9 @@ async function revealNearbyTraps(
 // 유저별로 독립된 보드라 한 유저의 픽업이 다른 유저의 스폰 여부에 영향을 주지 않는다
 // (고정 스폰 좌표가 맵당 2곳뿐이라 전역 공유였다면 가장 먼저 도착한 유저가 하루치를
 // 다 가져가 버렸을 것 — 함정과 달리 미스터리 박스는 유저마다 독립적으로 존재).
-// 시딩 여부를 "필드 존재"가 아니라 전용 마커 키(NX)로 판정해야 한다 — hSetNX만 쓰면
+// 시딩 여부를 "필드 존재"가 아니라 전용 마커 키(itemSeededKey)로 판정해야 한다 — hSetNX만 쓰면
 // item.pickup의 hDel로 지워진 필드가 다음 map.getState 호출 때 다시 채워져 버려서
-// (재생성 버그) 픽업한 박스가 무한정 재획득 가능해진다. 마커 키는 map.getState가 이미
-// 위치 앵커 초기화에 쓰는 SET NX 1회성 패턴(아래 posKey 초기화 참고)과 동일하다.
+// (재생성 버그) 픽업한 박스가 무한정 재획득 가능해진다.
 // 보드 값 자체엔 타입을 저장하지 않는다 — 결과는 item.pickup이 픽업 시점에 rollMysteryOutcome()으로
 // 결정하므로, 저장 값은 "이 타일에 미확인 박스가 있다"는 존재 표시(placeholder)일 뿐이다.
 //
@@ -143,10 +142,17 @@ async function seedMysteryBoxes(mapId: string, date: string, userId: string): Pr
   });
 }
 
+// PR #67 리뷰 후속(move-run-finish-bugfixes.md 8절): GET으로만 판정하고 실제 시딩(순서 보장 포함)은
+// seedMysteryBoxes에 전량 위임한다 — 예전엔 여기서 SET NX로 마커를 먼저 선점한 뒤 seedMysteryBoxes를
+// 불렀는데, 그러면 이 경로(가장 빈번한 호출 경로)에서만 "마커 먼저, 보드 나중"이 되어 seedMysteryBoxes
+// 내부의 hSet이 실패했을 때 마커가 이미 세워진 채로 남아 자연 복구가 안 됐다(run.finish가 직접 부르는
+// 경로에만 안전 순서가 적용되는 비대칭 버그). GET은 원자적 선점이 아니므로 같은 유저가 다중 탭으로
+// 거의 동시에 호출하면 둘 다 재시딩을 시도할 수 있지만, getMysteryBoxSpawns가 순수함수라 항상 같은
+// 데이터로 멱등 수렴한다(itemSeededKey가 유저별 독립 키라 다른 유저와는 애초에 경쟁하지 않음) — run.finish의
+// 즉시 재시딩이 이미 감수 중인 다중 탭 리스크의 부분집합(노출 창이 더 좁음)이라 별도 대응하지 않는다.
 async function ensureMysteryBoxesSeeded(mapId: string, date: string, userId: string): Promise<void> {
-  // SET NX로 "오늘 이미 시딩했는지"만 판정 — 실제 시딩은 seedMysteryBoxes에 위임한다.
-  const firstSeed = await redis.set(itemSeededKey(mapId, date, userId), '1', { nx: true });
-  if (!firstSeed) return;
+  const alreadySeeded = await redis.get(itemSeededKey(mapId, date, userId));
+  if (alreadySeeded) return;
   await seedMysteryBoxes(mapId, date, userId);
 }
 
