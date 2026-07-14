@@ -1,7 +1,7 @@
 import './index.css';
 
 import Phaser from 'phaser';
-import { StrictMode, useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { StrictMode, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import { exitExpandedMode } from '@devvit/web/client';
 import { getMazeMap, pickDailyMapId, isRegisteredMapId } from '../shared/maps';
@@ -12,6 +12,8 @@ import { trpc } from './trpcClient';
 import { SequentialDispatcher } from './sequentialDispatcher';
 import { LOADOUT_STORAGE_KEY } from './loadout';
 import { resolveTrapEncounters } from './trapResolution';
+import { loadSoundSettings, saveSoundSettings } from './soundSettings';
+import { clearQueueOnMute, decideNextInQueue, decideSfxRequest } from './sfxQueue';
 import type {
   ItemPickupOutput,
   ItemType,
@@ -425,13 +427,34 @@ const SFX_PATHS = {
 } as const;
 type SfxKey = keyof typeof SFX_PATHS;
 
-// 2026-07-11 피드백: 전반적으로 소리가 커서 기존 0.6 대비 20% 낮춤. 단, 리스폰 함정은
+// 2026-07-11 피드백: 전반적으로 소리가 커서 기존 0.6 대비 20% 낮춤(0.48). 리스폰 함정은
 // 페널티가 가장 큰 함정(위치+탐험 기록 전부 초기화)이라 존재감이 있어야 한다는 반대 피드백을
-// 받아 기존 0.6 대비 15% 키움 — 그래서 리스폰만 별도 볼륨을 준다.
-const DEFAULT_SFX_VOLUME = 0.48;
+// 받아 기존 0.6 대비 15% 키움 — 그래서 리스폰만 별도 볼륨을 준다. 2026-07-14: BGM 도입 후 상대적으로
+// 효과음이 작게 느껴진다는 피드백 → 0.48을 다시 0.65로 올림(덕킹으로 BGM이 효과음 재생 중엔
+// 25%까지 낮아지므로, 0.6 시절보다도 더 크게 잡아도 괜찮다고 판단).
+//
+// 리스폰만 0.75→0.9→1.8로 세 번 올려도 여전히 작다는 피드백이 계속돼 원본 파일 자체를
+// decodeAudioData로 직접 분석(analyze-respawn-loudness.mjs, 세션 스크래치패드) — trap-respawn.mp3
+// 원본이 다른 함정음 대비 피크 기준 약 20dB 이상 조용하게 녹음돼 있었다(피크 -24dBFS vs
+// trap-blind -0.0dBFS 등, RMS는 -41.4dBFS vs 나머지 대부분 -13~-24dBFS). volume 배율은 원본
+// 샘플에 곱해지는 값이라, 이 정도 격차는 1.8배 정도로는 거의 못 메운다 — 볼륨을 계속 올리는
+// 미봉책 대신, RMS 기준으로 다른 함정음(trap-blind, DEFAULT_SFX_VOLUME 그대로 재생)과 최종
+// 체감 음량이 비슷해지도록 역산해 7.0으로 재설정(계산: trap-blind 최종 RMS(원본 rms 0.0859 ×
+// DEFAULT_SFX_VOLUME 0.65) ÷ trap-respawn 원본 rms 0.0085 ≈ 6.6, 가장 강한 페널티라는 취지를
+// 살려 그보다 살짝 크게 잡음). 이렇게 큰 배율은 원본의 조용한 배경 잡음(있다면)까지 함께
+// 증폭시킬 수 있어, 들어보고 히스(hiss) 등이 거슬리면 trap-reverse.mp3 때처럼 원본 파일 자체를
+// 다시 정상 음량으로 재소싱하는 게 근본적인 해결책이다 — 이 숫자는 그 전까지의 소프트웨어적
+// 임시 보정.
+const DEFAULT_SFX_VOLUME = 0.65;
 const SFX_VOLUME_OVERRIDES: Partial<Record<SfxKey, number>> = {
-  trapRespawn: 0.69,
+  trapRespawn: 7.0,
 };
+
+// 배경음악(BGM) — 효과음(SFX_PATHS)과 달리 loop:true로 한 번만 만들어 계속 재생하고, 개별
+// 재생마다 destroy/재생성하지 않는다(2026-07-14 도입). 스플래시(splash.tsx)의 BGM과는 다른
+// 트랙 — 화면마다 분위기가 다른 곡을 쓴다(원호가 직접 소싱).
+const BGM_KEY = 'bgmGame';
+const BGM_PATH = '/sounds/bgm-game.mp3';
 
 // ── 아이템 스폰 좌표 ──────────────────────────
 // 2026-07-09: 정상적으로는 loadServerState()가 map.getState 응답(2026-07-12부터
@@ -602,13 +625,22 @@ class MazeScene extends Phaser.Scene {
   // 실제로 재생됨.
   private footstepDelayToken = 0;
 
-  // 지금 재생 중인 "이벤트" 효과음(발걸음 제외 — 함정 발동, 아이템 획득 등) 인스턴스. 함정을
-  // 연달아 밟는 등 이벤트 효과음끼리 겹치면 두 소리가 뒤섞여 들리는 문제가 있어서, 새 이벤트
-  // 효과음이 날 때 이전 것을 끊어 항상 "가장 최근에 발동한 효과음"만 들리게 한다(playSfx 참고).
-  // 반대로 발걸음은 이벤트 효과음을 끊지 않고, 오히려 이벤트 효과음이 아직 재생 중이면 그게
+  // 지금 재생 중인 "이벤트" 효과음(발걸음 제외 — 함정 발동, 아이템 획득 등) 인스턴스. 2026-07-14
+  // 이전엔 새 이벤트 효과음이 날 때 이전 것을 즉시 끊었는데(playSfx 참고), 같은 타일에 설치형
+  // 함정+미스터리 박스가 동시에 있는 경우처럼 한 번의 이동에서 playSfx가 같은 동기 흐름 안에서
+  // 두 번 이상 불리면 먼저 발동한 소리가 재생 시작과 동시에(0ms) 끊겨 사실상 안 들리는 문제가
+  // 있었다(피드백: "일부 효과음이 안 나온다") — sfxQueue로 순서대로 다 들리게 재설계.
+  // 발걸음은 여전히 이벤트 효과음을 끊지 않고, 오히려 이벤트 효과음이 아직 재생 중이면 그게
   // 끝날 때까지 기다렸다가 재생한다(playFootstep 참고) — 아이템을 먹자마자 걸어도 두 소리가
   // 겹치지 않고 순서대로 들리게 하기 위함.
   private lastEventSound: Phaser.Sound.BaseSound | null = null;
+
+  // playSfx가 호출됐을 때 lastEventSound가 아직 재생 중이면 즉시 재생하지 않고 여기 쌓아뒀다가,
+  // 재생 중인 소리가 자연스럽게 끝나면(playSfxNow의 delayedCall) 순서대로 하나씩 꺼내 재생한다
+  // (playSfx/playSfxNow 참고). 플레이어가 매우 빠르게 여러 함정을 연달아 밟는 등 극단적인
+  // 상황에서 큐가 무한정 쌓이지 않도록 상한을 둔다(MAX_SFX_QUEUE_LENGTH).
+  private sfxQueue: SfxKey[] = [];
+  private static readonly MAX_SFX_QUEUE_LENGTH = 5;
 
   // lastEventSound가 재생을 시작한 시각(this.time.now 기준) — 남은 재생 시간을 "duration -
   // 경과 시간"으로 직접 계산하기 위함. `BaseSound.seek`로 경과 시간을 바로 읽을 수도 있지만,
@@ -729,6 +761,13 @@ class MazeScene extends Phaser.Scene {
   // 골인했는지 여부. true가 되면 더 이상 방향키 입력을 받지 않음(테스트용 종료 처리).
   private hasFinished = false;
 
+  // App(React)의 QuitConfirmModal이 떠 있는 동안 true — 이동/함정 발동/아이템 사용을 전부
+  // 막는다. React 오버레이는 Phaser 캔버스 밖에서 그려지기 때문에 모달이 떠 있어도 키보드
+  // 입력은 계속 MazeScene으로 들어온다 — 이 플래그가 없으면 "이 런을 나가시겠습니까?" 확인
+  // 팝업이 떠 있는 동안에도 계속 플레이가 가능해서(심하면 팝업이 뜬 채로 골인까지 가능)
+  // 확인 모달의 의미가 없어진다(2026-07-14 리뷰에서 발견). setInputLocked 참고.
+  private inputLocked = false;
+
   // 이번 판이 시작된 실제 시각(Date.now() 기준 ms) — create()에서 기록, 골인 시
   // clearTimeMs(= 지금 - 이 값)를 계산해 run.finish에 실어 보낸다.
   private runStartTime = 0;
@@ -737,6 +776,27 @@ class MazeScene extends Phaser.Scene {
   // tryMove/slideStep이 실제로 playerGridX/Y를 옮길 때만 증가시킨다. 리스폰 함정의 순간이동은
   // "이동"이 아니라 위치 초기화라 여기 포함하지 않는다.
   private stepCount = 0;
+
+  // 배경음악 인스턴스 — 효과음(playSfx)과 달리 loop:true로 한 번만 만들어 계속 재생, 음소거
+  // 토글(setBgmMuted)에 따라 pause/resume만 한다(2026-07-14 BGM 도입).
+  private bgmSound: Phaser.Sound.BaseSound | null = null;
+
+  // 효과음 음소거/볼륨 배율 — playSfx/playFootstepNow가 매 재생 시 곱해서 쓴다. setupSound()가
+  // create() 시점에 스플래시 사운드 설정(soundSettings.ts)을 한 번 읽어와 채운다. 게임 화면
+  // 자체엔 SFX 조절 UI가 없어(간단한 BGM 음소거 버튼만, App의 SoundToggleButton 참고) 세션
+  // 도중엔 안 바뀐다.
+  private sfxMuted = false;
+  private sfxVolumeMultiplier = 1;
+
+  // BGM 덕킹(효과음이 나는 동안 배경음악을 잠깐 낮췄다가 복원) — 2026-07-14 피드백: 발걸음/함정
+  // 등 게임 효과음이 배경음에 묻힌다는 지적으로 도입. bgmBaseVolume은 setupSound()가 채우는
+  // "평상시(효과음 없을 때) 배경음량" 기준값 — 덕킹 복원 시 이 값으로 되돌아간다. duckToken은
+  // footstepDelayToken과 동일한 패턴(취소 대신 "가장 최근 요청만 인정") — 효과음이 연달아 나면
+  // 매번 새로 덕킹을 걸고, 오직 가장 나중에 건 타이머만 실제로 복원을 수행한다(먼저 건 타이머가
+  // 나중 타이머보다 늦게 실행돼 방금 새로 낮춘 볼륨을 조기에 복원해버리는 걸 방지).
+  private bgmBaseVolume = 1;
+  private duckToken = 0;
+  private static readonly BGM_DUCK_RATIO = 0.25;
 
   constructor() {
     // 'MazeScene'은 이 씬의 이름표. 씬이 여러 개일 때 구분하는 용도라 지금은 큰 의미 없음.
@@ -764,6 +824,7 @@ class MazeScene extends Phaser.Scene {
     this.load.image(ITEM_SLOT_TEXTURE_KEYS.detector, '/sprites/ItemSlot-detector.png');
     this.load.image(ITEM_SLOT_TEXTURE_KEYS.trapInstall, '/sprites/ItemSlot-bomb.png');
     (Object.keys(SFX_PATHS) as SfxKey[]).forEach((key) => this.load.audio(key, SFX_PATHS[key]));
+    this.load.audio(BGM_KEY, BGM_PATH);
   }
 
   // 효과음 재생 공용 헬퍼 — 파일 하나가 로드 실패해도(예: 아직 못 구한 사운드) 게임 전체가
@@ -773,29 +834,75 @@ class MazeScene extends Phaser.Scene {
   // 도착 직후 아이템 획득/함정 발동 효과음이 겹쳐 재생되면 두 소리가 뒤섞여 들리는 문제가
   // 있었다 — 다른 효과음이 날 때는 항상 먼저 남아있는 발걸음 소리를 끊는다.
   //
-  // 마찬가지로, 함정을 연달아 밟는 등 이벤트 효과음끼리 겹치는 경우도 있어서(이전 함정
-  // 효과음이 아직 울리는 중에 새 함정을 밟으면 두 소리가 섞여 들림) 새 이벤트 효과음을 틀기
-  // 전에 이전 이벤트 효과음도 끊는다 — 항상 "가장 최근에 발동한 효과음"만 들리게 함.
-  //
-  // 2026-07-14: 예전엔 여기서 .stop()만 하고 인스턴스를 안 지워서(.destroy() 안 함),
-  // this.sound.add()가 매번 새로 만드는 인스턴스가 Phaser SoundManager 내부 배열(sounds)에
-  // 영구히 쌓이는 문제가 있었다(update()가 매 프레임 이 배열 전체를 순회해 오래 플레이할수록
-  // 프레임당 비용이 늘어남 — /review pr#36 셀프 리뷰로 처음 발견, docs/wbs.md 참고).
-  // BaseSound.destroy()가 내부적으로 stop()을 먼저 호출하고 pendingRemove 플래그를 세우면,
-  // BaseSoundManager.update()가 매 프레임 그 플래그를 보고 배열에서 스플라이스로 제거한다
-  // (Phaser 소스 확인 — .stop()만으론 이 플래그가 절대 안 세워짐). 재생 로직/겹침 처리는
-  // 그대로 두고 "다 쓴 인스턴스 정리"만 추가 — .stop() 대신 .destroy()로 교체.
+  // 2026-07-14 재설계: 예전엔 함정을 연달아 밟는 등 이벤트 효과음끼리 겹치면 새 효과음이 이전
+  // 것을 즉시 끊었는데, 같은 타일에 설치형 함정+미스터리 박스가 동시에 있는 경우(traps.md 0절)
+  // 처럼 resolveArrival이 같은 동기 흐름 안에서 playSfx를 두 번 이상 부르면 먼저 발동한 소리가
+  // 재생 시작과 동시에 끊겨 사실상 한 번도 안 들리는 문제가 있었다("일부 효과음이 안 나온다"
+  // 피드백) — 즉시 끊는 대신 sfxQueue에 순서대로 쌓아뒀다가 재생 중인 소리가 자연스럽게 끝나면
+  // (playSfxNow) 다음 걸 이어서 재생하도록 변경. "지금 재생해도 되는지 / 큐에 쌓아야 하는지"
+  // 판단 자체는 sfxQueue.ts의 decideSfxRequest(순수 함수, vitest로 단위 테스트됨)에 위임하고,
+  // 이 함수는 그 결정에 따라 실제 Phaser 사운드만 다룬다(2026-07-14 PR#66 리뷰 — 이 상태 전이가
+  // 이미 세 번 재설계됐는데도 자동화된 회귀 테스트가 없어서 분리).
   private playSfx(key: SfxKey) {
+    // sfxMuted/sfxVolumeMultiplier는 스플래시 사운드 설정 화면(splash.tsx)에서 저장한 값을
+    // setupSound()가 create() 시점에 한 번 읽어오고, 게임 화면의 효과음 음소거 버튼(setSfxMuted)
+    // 으로도 세션 도중 즉시 바뀔 수 있다.
+    const decision = decideSfxRequest(
+      this.sfxQueue,
+      key,
+      this.sfxMuted,
+      !!this.lastEventSound?.isPlaying,
+      MazeScene.MAX_SFX_QUEUE_LENGTH
+    );
+    this.sfxQueue = decision.queue;
+    if (decision.action === 'muted') return;
+    this.footstepSound?.destroy(); // 이벤트 효과음 요청이 오면(즉시 재생이든 대기열행이든) 발걸음은 항상 바로 끊는다.
+    if (decision.action === 'play') this.playSfxNow(key);
+  }
+
+  // playSfx가 "지금 바로 재생해도 된다"고 판단했을 때(대기열이 비어있고 이전 소리가 이미
+  // 끝났을 때) 실제로 사운드를 만들고 재생하는 부분 — .destroy() 대신 .stop()만 쓰던 예전
+  // 코드는 this.sound.add()가 매번 새로 만드는 인스턴스가 Phaser SoundManager 내부 배열
+  // (sounds)에 영구히 쌓이는 문제가 있었다(update()가 매 프레임 이 배열 전체를 순회해 오래
+  // 플레이할수록 프레임당 비용이 늘어남 — /review pr#36 셀프 리뷰로 처음 발견, docs/wbs.md
+  // 참고). BaseSound.destroy()가 내부적으로 stop()을 먼저 호출하고 pendingRemove 플래그를
+  // 세우면, BaseSoundManager.update()가 매 프레임 그 플래그를 보고 배열에서 스플라이스로
+  // 제거한다(Phaser 소스 확인 — .stop()만으론 이 플래그가 절대 안 세워짐).
+  private playSfxNow(key: SfxKey) {
     try {
-      this.footstepSound?.destroy();
-      this.lastEventSound?.destroy();
       const sound = this.sound.add(key);
       this.lastEventSound = sound;
       this.lastEventSoundStartedAt = this.time.now;
-      sound.play({ volume: SFX_VOLUME_OVERRIDES[key] ?? DEFAULT_SFX_VOLUME });
+      sound.play({ volume: (SFX_VOLUME_OVERRIDES[key] ?? DEFAULT_SFX_VOLUME) * this.sfxVolumeMultiplier });
+      this.duckBgmFor(sound.duration * 1000);
+      // 이 소리가 자연스럽게 끝나는 시점에 큐에 쌓인 다음 소리를 이어서 재생한다. sound와
+      // lastEventSound를 비교하는 이유: 이 타이머가 실행되기 전에 무슨 이유로든(예외적 경로)
+      // lastEventSound가 이미 다른 소리로 바뀌어 있다면, 그 다음 재생은 그 소리의 몫이라
+      // 이 타이머는 아무것도 하지 않아야 한다.
+      this.time.delayedCall(sound.duration * 1000, () => {
+        if (this.lastEventSound !== sound) return;
+        const { next, queue } = decideNextInQueue(this.sfxQueue, this.sfxMuted);
+        this.sfxQueue = queue;
+        if (next) this.playSfxNow(next);
+      });
     } catch (err) {
       console.error(`효과음 재생 실패: ${key}`, err);
+      const { next, queue } = decideNextInQueue(this.sfxQueue, this.sfxMuted);
+      this.sfxQueue = queue;
+      if (next) this.playSfxNow(next);
     }
+  }
+
+  // 골인처럼 "다른 모든 효과음보다 우선해서 바로 들려야 하는" 소리 전용 — playSfx의 대기열
+  // 규칙을 무시하고 밀려있던 큐를 비운 뒤 즉시 재생한다. 시야차단(6초)처럼 긴 함정 효과음이
+  // 아직 재생 중일 때 골인해도, 골인 소리가 그 뒤로 밀려 늦게(또는 거의 안 들리는 것처럼)
+  // 들리는 문제를 막기 위함(2026-07-14 발견).
+  private playSfxImmediately(key: SfxKey) {
+    if (this.sfxMuted) return;
+    this.sfxQueue.length = 0;
+    this.lastEventSound?.destroy();
+    this.footstepSound?.destroy();
+    this.playSfxNow(key);
   }
 
   // 발걸음 재생 요청 — 아이템 획득 등 이벤트 효과음이 아직 재생 중이면 그게 끝날 때까지
@@ -819,15 +926,104 @@ class MazeScene extends Phaser.Scene {
 
   // 발걸음 소리를 실제로 재생. 이전 발걸음이 아직 울리는 중에 새 걸음을 내디디면(연속 이동 시
   // 흔함) 겹쳐 들리지 않게 먼저 끊는다. playSfx와 동일한 이유로 .stop() 대신 .destroy() 사용
-  // (사운드 인스턴스 누적 방지, 2026-07-14).
+  // (사운드 인스턴스 누적 방지, 2026-07-14). 2026-07-14 피드백: 발걸음마다 BGM을 덕킹하면 이동
+  // 중 배경음악이 계속 들썩여서 오히려 거슬린다는 지적 → 발걸음은 덕킹 대상에서 제외(playSfx가
+  // 담당하는 함정/아이템 등 "가끔 나는" 이벤트 효과음만 덕킹, 발걸음처럼 이동 내내 반복되는
+  // 소리는 제외).
   private playFootstepNow() {
+    if (this.sfxMuted) return;
     try {
       this.footstepSound?.destroy();
       this.footstepSound = this.sound.add('footstep');
-      this.footstepSound.play({ volume: DEFAULT_SFX_VOLUME });
+      this.footstepSound.play({ volume: DEFAULT_SFX_VOLUME * this.sfxVolumeMultiplier });
     } catch (err) {
       console.error('효과음 재생 실패: footstep', err);
     }
+  }
+
+  // 배경음악 재생을 시작하고 효과음 볼륨 배율/음소거를 초기화한다 — 스플래시(splash.tsx)의
+  // 사운드 설정 화면에서 저장해둔 값(soundSettings.ts, localStorage)을 create() 시점에 한 번
+  // 읽어온다(별도 웹뷰라 React state로는 못 넘김, loadout.ts와 동일한 패턴).
+  private setupSound() {
+    const settings = loadSoundSettings();
+    this.sfxMuted = settings.sfxMuted;
+    this.sfxVolumeMultiplier = settings.sfxVolume;
+    this.bgmBaseVolume = settings.bgmVolume;
+
+    this.bgmSound = this.sound.add(BGM_KEY, { loop: true, volume: settings.bgmVolume });
+    if (!settings.bgmMuted) this.playBgmIfUnlocked();
+
+    // 모바일 등 브라우저 자동재생 정책으로 재생이 막혀 있으면(this.sound.locked) Phaser가 첫
+    // 사용자 상호작용(탭/클릭)에서 자동으로 잠금을 풀고 이 이벤트를 쏜다 — 그 시점에 음소거가
+    // 아니라면 재생을 다시 시도한다.
+    this.sound.once(Phaser.Sound.Events.UNLOCKED, () => {
+      if (!loadSoundSettings().bgmMuted) this.playBgmIfUnlocked();
+    });
+  }
+
+  private playBgmIfUnlocked() {
+    // 골인 후엔 배경음악을 다시 켜지 않는다(checkGoalReached 참고) — 이 가드가 없으면 골인 화면
+    // 에서 음소거 버튼을 눌러 "해제"할 때 다시 재생돼버린다.
+    if (this.hasFinished) return;
+    const bgm = this.bgmSound;
+    if (!bgm || this.sound.locked || bgm.isPlaying) return;
+    if (bgm.isPaused) bgm.resume();
+    else bgm.play();
+  }
+
+  // App(React)의 SoundToggleButton이 호출하는 유일한 공개 진입점 — Phaser 게임 인스턴스를 통해
+  // 직접 호출한다(game.scene.getScene('MazeScene')). 커스텀 window 이벤트 대신 직접 호출을 쓴
+  // 이유: 이 세션에서 게임 화면이 값을 바꾸는 경로가 이 버튼 하나뿐이라 이벤트 버스를 따로 둘
+  // 필요가 없었음. setupSound()보다 먼저 호출돼도(극히 드문 타이밍) bgmSound가 아직 없으면
+  // 그냥 무시되고, 곧이어 setupSound()가 이미 저장된 최신 localStorage 값을 읽어가므로 최종
+  // 상태는 항상 올바르게 수렴한다.
+  setBgmMuted(muted: boolean) {
+    const bgm = this.bgmSound;
+    if (!bgm) return;
+    if (muted) {
+      if (bgm.isPlaying) bgm.pause();
+    } else {
+      this.playBgmIfUnlocked();
+    }
+  }
+
+  // App(React)의 SoundToggleButton(효과음 쪽)이 호출하는 공개 진입점 — setBgmMuted와 대칭.
+  // 효과음은 BGM과 달리 매번 새로 만들어 짧게 재생되는 구조라(길게 지속되는 인스턴스가 없음)
+  // "지금 재생 중인 소리를 끈다"가 아니라 "다음 재생부터 안 튼다"로 충분하다. 음소거하는
+  // 순간엔 sfxQueue도 함께 비운다(clearQueueOnMute) — 안 비우면 playSfxNow의 대기열 재생
+  // 콜백이 그대로 이어서 재생해버려 "껐는데도 큐에 밀려 있던 소리가 뒤늦게 들리는" 문제가
+  // 있었다(2026-07-14 발견, sfxQueue.test.ts로 회귀 테스트됨). 2026-07-14 리뷰 추가 지적:
+  // 큐만 비우고 지금 재생 중인 소리(lastEventSound)는 그대로 끝까지 뒀었다 — 시야차단(6초)
+  // 처럼 긴 효과음 도중 음소거를 눌러도 몇 초간 계속 들려서 setBgmMuted(즉시 pause)와
+  // 체감이 어긋났다. destroy()로 즉시 끊어 두 토글의 "음소거 = 즉시 조용해짐" 체감을 맞춘다.
+  setSfxMuted(muted: boolean) {
+    this.sfxMuted = muted;
+    this.sfxQueue = clearQueueOnMute(this.sfxQueue, muted);
+    if (muted) this.lastEventSound?.destroy();
+  }
+
+  // App(React)의 QuitConfirmModal이 열리고 닫힐 때 호출된다(inputLocked 필드 설명 참고) —
+  // update()의 이동 처리와 Z/X 키 핸들러(useSelectedItem/cycleSelectedSlot) 양쪽에서 확인한다.
+  setInputLocked(locked: boolean) {
+    this.inputLocked = locked;
+  }
+
+  // 효과음이 재생되는 동안 배경음악 음량을 BGM_DUCK_RATIO로 낮췄다가, durationMs 뒤 평상시
+  // 음량(bgmBaseVolume)으로 되돌린다(2026-07-14 도입 — 발걸음/함정 등 효과음이 배경음에 묻힌다는
+  // 피드백). playSfx/playFootstepNow가 방금 만든 사운드의 실제 재생 길이(sound.duration)를
+  // durationMs로 넘겨 호출한다. setVolume은 BaseSound가 아니라 실제 구현체(WebAudioSound 등)에만
+  // 있는 메서드라 타입을 좁혀서 호출한다 — this.sound.add()가 런타임에 반환하는 값은 항상 이
+  // 구현체 중 하나이므로 안전하다(Phaser 소스/타입 정의 확인, docs/wbs.md 사운드 인스턴스 누수
+  // 수정 때와 동일한 방식으로 BaseSound 표면 아래를 직접 확인함).
+  private duckBgmFor(durationMs: number) {
+    const bgm = this.bgmSound as (Phaser.Sound.BaseSound & { setVolume(value: number): unknown }) | null;
+    if (!bgm) return;
+    const token = ++this.duckToken;
+    bgm.setVolume(this.bgmBaseVolume * MazeScene.BGM_DUCK_RATIO);
+    this.time.delayedCall(durationMs, () => {
+      if (token !== this.duckToken) return; // 그 사이 다른 효과음이 새로 덕킹을 걸었으면 복원은 그쪽 몫
+      bgm.setVolume(this.bgmBaseVolume);
+    });
   }
 
   // create(): 게임이 시작될 때 딱 한 번만 실행됨. 여기서 맵과 캐릭터를 화면에 배치합니다.
@@ -837,6 +1033,7 @@ class MazeScene extends Phaser.Scene {
     // 있었음 — checkGoalReached/reportRunFinish 참고).
     this.runStartTime = Date.now();
     this.stepCount = 0;
+    this.setupSound();
 
     // 맵 크기만큼 타일 상태 배열을 준비한다. 통로와 맞닿은 벽 칸에는 석벽 텍스처 도형을
     // 하나씩 배치(깊은 안쪽 벽 칸은 어차피 안 보일 곳이라 만들지 않음). 벽 텍스처는 안개
@@ -1187,6 +1384,9 @@ class MazeScene extends Phaser.Scene {
 
     // 골인했으면 더 이상 입력을 받지 않음 (테스트용 종료 처리)
     if (this.hasFinished) return;
+
+    // QuitConfirmModal이 떠 있는 동안엔 이동 입력을 막는다(inputLocked 필드 설명 참고).
+    if (this.inputLocked) return;
 
     // 이동 애니메이션이 재생 중이면 새 입력은 무시 (칸 단위로 딱딱 끊어 이동하게 하기 위함)
     if (this.isMoving) return;
@@ -2373,7 +2573,7 @@ class MazeScene extends Phaser.Scene {
   // 있다가 다른 칸에서 Z로 재시도할 수 있다.
   private useSelectedItem() {
     const item = this.heldItems[this.selectedSlotIndex];
-    if (!item || this.hasFinished) return;
+    if (!item || this.hasFinished || this.inputLocked) return;
 
     // 쉴드는 여기 안 옴 — 즉시무장 예외라 애초에 인벤토리에 안 들어간다(applyLoadout/
     // resolveArrival 참고).
@@ -2435,7 +2635,7 @@ class MazeScene extends Phaser.Scene {
   // X키 — 선택을 다음 아이템으로 옮긴다. 들고 있는 게 없으면 아무 일도 하지 않는다(순환할
   // 대상 자체가 없음 — 예전처럼 빈 슬롯을 순환 대상에 포함시키던 개념이 없어짐, 2026-07-13).
   private cycleSelectedSlot() {
-    if (this.heldItems.length === 0) return;
+    if (this.heldItems.length === 0 || this.inputLocked) return;
     this.selectedSlotIndex = (this.selectedSlotIndex + 1) % this.heldItems.length;
     this.refreshItemSlotsUI({ punchIndex: this.selectedSlotIndex });
   }
@@ -2809,9 +3009,14 @@ class MazeScene extends Phaser.Scene {
   private checkGoalReached(x: number, y: number): boolean {
     if (x !== GOAL_POSITION.x || y !== GOAL_POSITION.y) return false;
 
-    this.playSfx('goal');
+    this.playSfxImmediately('goal');
     this.hasFinished = true;
     this.isMoving = false;
+
+    // 2026-07-14 피드백: 골인 화면에선 배경음악을 완전히 끄고 효과음(골인음/이후 순위 공개 등)만
+    // 들리게 해달라는 요청 — 여기서 pause하고, playBgmIfUnlocked도 hasFinished일 땐 재생을
+    // 거부하도록 막아서(아래 참고) 골인 후 음소거 버튼을 눌러도 다시 재생되지 않는다.
+    if (this.bgmSound?.isPlaying) this.bgmSound.pause();
 
     // 슬라이드로 미끄러지다 정확히 골인 칸에 멈추는 경우, slideStep이 원복 호출까지 못
     // 가고 여기서 바로 끝나버려서 캐릭터가 슬라이드 의상을 입은 채로 골인 화면에 남는
@@ -3134,19 +3339,109 @@ const BackToMenuButton = () => (
   </button>
 );
 
+// 플레이 도중 중단하고 메뉴로 돌아가는 버튼(2026-07-14 피드백 — 기존엔 골인해야만(위
+// BackToMenuButton) 메뉴로 돌아갈 방법이 있었음). 실수로 누르는 걸 막기 위해 확인 팝업
+// (QuitConfirmModal)을 한 번 더 띄운다 — 이 게임엔 별도 저장/재개 기능이 없어 중간에 나가면
+// 이번 런의 진행(걸음 수 등)은 리더보드에 남지 않는다. 골인 후엔 BackToMenuButton이 같은 자리
+// 역할을 대신하므로 showBackButton이 true일 때는 이 버튼을 감춘다(App 컴포넌트 참고).
+const QuitToMenuButton = ({ onClick }: { onClick: () => void }) => (
+  <button
+    className="absolute top-4 right-4 z-20 flex items-center justify-center w-11 h-11 rounded-full bg-slate-800/90 border-2 border-slate-950 text-slate-200 shadow-lg cursor-pointer select-none transition active:translate-y-[1px] hover:brightness-110 hover:text-white"
+    onClick={onClick}
+    aria-label="Quit to menu"
+  >
+    ✕
+  </button>
+);
+
+// QuitToMenuButton이 띄우는 확인 팝업 — 브라우저 네이티브 window.confirm() 대신 게임 화면
+// 스타일(RivetPanel류 톤)에 맞춘 오버레이로 화면 정중앙에 띄운다. onConfirm은 이 버튼 클릭
+// 이벤트를 그대로 받아 exitExpandedMode(e.nativeEvent)에 넘긴다 — devvit API가 실제 사용자
+// 클릭에서 곧바로 이어진 이벤트만 신뢰하므로, 팝업을 거치더라도 "Leave" 버튼 클릭 자체가
+// 그 트리거여야 한다(이 함수 내부에서 한 단계 더 비동기로 지연시키면 안 됨).
+const QuitConfirmModal = ({
+  onCancel,
+  onConfirm,
+}: {
+  onCancel: () => void;
+  onConfirm: (e: ReactMouseEvent<HTMLButtonElement>) => void;
+}) => (
+  <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/60 px-4">
+    <div className="flex flex-col items-center gap-4 w-full max-w-xs rounded-2xl bg-slate-900 border-2 border-slate-700 p-5 shadow-2xl">
+      <p className="text-sm text-slate-200 text-center leading-relaxed">
+        Leave the maze and return to the menu?
+        <br />
+        <span className="text-slate-400 text-xs">This run will not be saved.</span>
+      </p>
+      <div className="flex gap-2 w-full">
+        <button
+          className="flex-1 rounded-full border-2 border-slate-700 text-slate-200 text-sm py-2 cursor-pointer transition hover:border-slate-500 hover:text-white"
+          onClick={onCancel}
+        >
+          Cancel
+        </button>
+        <button
+          className="flex-1 rounded-full bg-gradient-to-b from-[#ff7a4d] to-[#d93900] border-b-[3px] border-[#7a2400] text-white text-sm py-2 cursor-pointer transition active:translate-y-[1px] active:border-b-[1px] hover:brightness-110"
+          onClick={onConfirm}
+        >
+          Leave
+        </button>
+      </div>
+    </div>
+  </div>
+);
+
+// BGM/효과음 켜기·끄기 퀵 토글(2026-07-14, 효과음 쪽은 2026-07-14 추가 피드백으로 도입) —
+// 스플래시(splash.tsx)의 전체 볼륨/음소거 조절 패널과 달리, 게임 화면엔 음소거 아이콘만 둔다
+// (볼륨 슬라이더는 플레이 중 잦은 조작이 아니라서 스플래시 전용으로 충분하다는 판단 — 처음엔
+// 효과음 토글 자체도 "실수로 꺼지면 안 되는 핵심 피드백"이라는 이유로 뺐었는데, 이동/함정
+// 효과음이 배경음보다 커진 뒤에도 여전히 줄이고 싶을 때가 있다는 피드백으로 추가). 이모지
+// 아이콘은 PawTrail(🐾) 등 splash.tsx의 기존 관례와 동일.
+const SoundToggleButton = ({
+  muted,
+  onIcon,
+  offIcon,
+  label,
+  onClick,
+}: {
+  muted: boolean;
+  onIcon: string;
+  offIcon: string;
+  label: string;
+  onClick: () => void;
+}) => (
+  <button
+    className="flex items-center justify-center w-11 h-11 rounded-full bg-slate-800/90 border-2 border-slate-950 text-lg shadow-lg cursor-pointer select-none transition active:translate-y-[1px] hover:brightness-110"
+    onClick={onClick}
+    aria-label={label}
+  >
+    {muted ? offIcon : onIcon}
+  </button>
+);
+
 export const App = () => {
   // 골인 후 순위 공개가 끝났을 때만 true — Phaser 씬(MazeScene.revealRankInfo)이
   // window에 쏘는 MAZE_FINISHED_EVENT를 받아서 켠다.
   const [showBackButton, setShowBackButton] = useState(false);
 
+  // SoundToggleButton(React, Phaser 캔버스 밖 오버레이)이 실행 중인 MazeScene의 BGM/효과음을
+  // 직접 제어할 수 있도록 game 인스턴스를 들고 있는다. 초기값은 스플래시에서 저장해둔 설정을
+  // 그대로 읽어와 버튼 아이콘이 실제 재생 상태와 어긋나지 않게 한다.
+  const gameRef = useRef<Phaser.Game | null>(null);
+  const [bgmMuted, setBgmMuted] = useState(() => loadSoundSettings().bgmMuted);
+  const [sfxMuted, setSfxMuted] = useState(() => loadSoundSettings().sfxMuted);
+  const [showQuitConfirm, setShowQuitConfirm] = useState(false);
+
   // useEffect(콜백, [])는 "이 컴포넌트가 화면에 처음 나타났을 때 딱 한 번" 실행됨.
   // React가 화면을 그리는 시점과 Phaser 게임이 시작되는 시점을 여기서 이어주는 역할.
   useEffect(() => {
     const game = new Phaser.Game(phaserConfig);
+    gameRef.current = game;
 
     // 컴포넌트가 화면에서 사라질 때(정리 함수) Phaser 게임도 같이 정리해서 메모리 누수를 막음
     return () => {
       game.destroy(true);
+      gameRef.current = null;
     };
   }, []);
 
@@ -3156,12 +3451,63 @@ export const App = () => {
     return () => window.removeEventListener(MAZE_FINISHED_EVENT, onFinished);
   }, []);
 
+  // QuitConfirmModal(React 오버레이)이 떠 있는 동안 MazeScene의 입력을 잠근다 — 모달 없이도
+  // 캔버스는 그대로 살아있어서, 이 동기화가 없으면 "이 런을 나가시겠습니까?" 팝업이 뜬
+  // 채로도 계속 이동/함정 발동/아이템 사용이 가능했다(2026-07-14 리뷰에서 발견). 열기(Quit
+  // 버튼)/취소(Cancel) 양쪽 모두 이 하나의 effect로 커버된다.
+  useEffect(() => {
+    gameRef.current?.scene.getScene<MazeScene>('MazeScene')?.setInputLocked(showQuitConfirm);
+  }, [showQuitConfirm]);
+
+  const toggleBgmMuted = () => {
+    const next = !bgmMuted;
+    setBgmMuted(next);
+    saveSoundSettings({ ...loadSoundSettings(), bgmMuted: next });
+    gameRef.current?.scene.getScene<MazeScene>('MazeScene')?.setBgmMuted(next);
+  };
+
+  const toggleSfxMuted = () => {
+    const next = !sfxMuted;
+    setSfxMuted(next);
+    saveSoundSettings({ ...loadSoundSettings(), sfxMuted: next });
+    gameRef.current?.scene.getScene<MazeScene>('MazeScene')?.setSfxMuted(next);
+  };
+
   return (
     // Scale.FIT은 부모 요소의 실제 크기를 기준으로 축소 비율을 계산하므로, 부모가 뷰포트
     // 전체를 채우고 있어야(w-screen h-screen) 화면 크기에 맞는 비율이 정확히 나온다.
     <div className="relative flex justify-center items-center w-screen h-screen bg-black">
       <div id="phaser-container" className="w-full h-full" />
-      {showBackButton ? <BackToMenuButton /> : null}
+      <div className="absolute top-4 left-4 z-20 flex flex-col gap-2">
+        <SoundToggleButton
+          muted={bgmMuted}
+          onIcon="🎵"
+          offIcon="🔇"
+          label={bgmMuted ? 'Unmute music' : 'Mute music'}
+          onClick={toggleBgmMuted}
+        />
+        <SoundToggleButton
+          muted={sfxMuted}
+          onIcon="🔊"
+          offIcon="🔈"
+          label={sfxMuted ? 'Unmute sound effects' : 'Mute sound effects'}
+          onClick={toggleSfxMuted}
+        />
+      </div>
+      {showBackButton ? <BackToMenuButton /> : <QuitToMenuButton onClick={() => setShowQuitConfirm(true)} />}
+      {showQuitConfirm ? (
+        <QuitConfirmModal
+          onCancel={() => setShowQuitConfirm(false)}
+          onConfirm={(e) => {
+            try {
+              exitExpandedMode(e.nativeEvent);
+            } catch (err) {
+              console.error('exitExpandedMode 실패 — devvit 환경 밖(로컬 프리뷰 등)에서는 정상', err);
+            }
+            setShowQuitConfirm(false);
+          }}
+        />
+      ) : null}
     </div>
   );
 };
