@@ -16,12 +16,31 @@ const MAP_1_MYSTERY_SPAWNS: Position[] = [
   { x: 15, y: 12 },
 ];
 
+// 2026-07-13 데일리 맵 로테이션 도입 — map-2 좌표는 최단경로(시작→골인 140칸)의 20/50/80%
+// 지점(shared/maps.ts MAP_2_LAYOUT 생성 스크립트 참고)으로, map-1과 동일하게 "초반/중반/후반"
+// 배치 관례를 따른다. game.tsx의 로컬 프리뷰 폴백(TEMP_ITEMS_BY_MAP)과 좌표를 맞춰뒀다.
+const MAP_2_MYSTERY_SPAWNS: Position[] = [
+  { x: 17, y: 1 },
+  { x: 11, y: 8 },
+  { x: 12, y: 19 },
+];
+
 const MYSTERY_SPAWNS: Record<string, Position[]> = {
   'map-1': MAP_1_MYSTERY_SPAWNS,
+  'map-2': MAP_2_MYSTERY_SPAWNS,
 };
 
+// MYSTERY_SPAWNS[mapId] ?? MAP_1_MYSTERY_SPAWNS 형태로 직접 인덱싱하면 MYSTERY_SPAWNS가 일반
+// 객체 리터럴이라 Object.prototype 체인을 탄다 — mapId==='constructor' 같은 값이 Object 생성자
+// 함수(truthy)를 반환해 폴백이 안 걸리고, 이어지는 .map() 호출이 Function엔 없는 메서드라
+// TypeError로 크래시한다. map.getState(trpc.ts)가 화이트리스트 검증 없는 클라이언트 입력
+// (mapId: z.string().min(1))을 그대로 넘기므로 실제로 도달 가능한 경로다 — shared/maps.ts의
+// isRegisteredMapId/getMazeMap과 정확히 같은 취약점 클래스라 같은 방식(hasOwnProperty)으로
+// 막는다(PR#60 리뷰에서 발견).
 export function getMysteryBoxSpawns(mapId: string): Position[] {
-  return MYSTERY_SPAWNS[mapId] ?? MAP_1_MYSTERY_SPAWNS;
+  return Object.prototype.hasOwnProperty.call(MYSTERY_SPAWNS, mapId)
+    ? MYSTERY_SPAWNS[mapId]!
+    : MAP_1_MYSTERY_SPAWNS;
 }
 
 export function rollMysteryOutcome():
