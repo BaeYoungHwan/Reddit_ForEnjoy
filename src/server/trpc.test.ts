@@ -9,6 +9,7 @@ import {
   trapBoardKey,
 } from './core/redisKeys';
 import { getMapExitPosition } from './core/maps';
+import { getMazeMap } from '../shared/maps';
 import type { Position } from '../shared/game-types';
 
 /**
@@ -320,6 +321,25 @@ async function walkAnchorToGoalFromCurrent(
   await walkAnchorToGoal(caller, mapId, parseTile(raw));
 }
 
+// run.finish의 골인 위치 검증이 정확히 일치가 아니라 맨해튼 거리 ≤1을 허용하는 이유(/review 72
+// 회귀 발견) 회귀 테스트용 — 실제 클라이언트는 골인 타일 자체에서는 move.arrive를 호출하지
+// 않아(game.tsx의 checkGoalReached 조기 return) 서버 앵커가 골인 타일 "바로 인접한 칸"에
+// 남아있는 상태로 run.finish가 호출된다. 골인 지점 좌표를 하드코딩하면 맵이 바뀔 때 깨지므로,
+// 그리드에서 실제로 걸을 수 있는(벽이 아닌) 인접 칸을 찾아 반환한다.
+function findAdjacentFloorTile(mapId: string): Position {
+  const map = getMazeMap(mapId);
+  const { exit, grid } = map;
+  const candidates = [
+    { x: exit.x + 1, y: exit.y },
+    { x: exit.x - 1, y: exit.y },
+    { x: exit.x, y: exit.y + 1 },
+    { x: exit.x, y: exit.y - 1 },
+  ];
+  const found = candidates.find(({ x, y }) => grid[y]?.[x] === 'floor');
+  if (!found) throw new Error(`findAdjacentFloorTile: ${mapId}의 골인 지점 주변에 floor 칸이 없음`);
+  return found;
+}
+
 // map-1 그리드 크기(maps.test.ts에서 검증됨) — 아래 offsetWithinBounds가 랜덤 target 기준
 // 오프셋이 그리드를 벗어나지 않게 하는 데 쓴다.
 const MAP_1_WIDTH = 25;
@@ -424,6 +444,22 @@ describe('run.finish 골인 위치 검증 (리더보드 위조 방지 회귀 테
     await expect(caller.run.finish({ mapId: 'map-1', steps: 42, clearTimeMs: 9999 })).resolves.toMatchObject({
       rank: 1,
     });
+  });
+
+  it('골인 지점 바로 인접 칸(맨해튼 거리 1)까지만 이동해도 성공한다 — 실제 클라이언트는 골인 타일 자체에서는 move.arrive를 호출하지 않는다(/review 72 회귀)', async () => {
+    const caller = createCaller({ userId: 'user-adjacent-to-goal' });
+    await caller.map.getState({ mapId: 'map-1' });
+
+    // 골인 타일 자체는 밟지 않고, 바로 옆 칸까지만 이동한다 — game.tsx의 tryMove onComplete가
+    // checkGoalReached에서 true를 반환하면 move.arrive 호출 없이 곧장 run.finish로 넘어가는
+    // 실제 클라이언트 흐름을 그대로 재현한 것(walkAnchorToGoal로 골인 지점까지 직접 걷는
+    // 위 테스트들과 달리, 이 테스트는 "정확히 일치"가 아니라 "인접"이 허용되는지가 핵심).
+    const adjacent = findAdjacentFloorTile('map-1');
+    await walkAnchorTo(caller, 'map-1', MAP_1_START, adjacent);
+
+    await expect(
+      caller.run.finish({ mapId: 'map-1', steps: 120, clearTimeMs: 30000 })
+    ).resolves.toMatchObject({ rank: 1 });
   });
 });
 

@@ -606,14 +606,24 @@ export const appRouter = t.router({
         const date = getKstDateString();
 
         // 리더보드 위조 방지: 입력값(steps/clearTimeMs)을 그대로 신뢰하지 않고, 이동마다
-        // 갱신되는 위치 앵커가 실제로 골인 지점에 있는지 검증한다 — trap.trigger/item.pickup/
+        // 갱신되는 위치 앵커가 실제로 골인 지점 근처에 있는지 검증한다 — trap.trigger/item.pickup/
         // move.arrive가 전부 갖춘 readPositionAnchor 검증이 run.finish에만 빠져있으면, 이
         // 엔드포인트를 직접 호출해 임의의 steps/clearTimeMs로 리더보드를 조작할 수 있다.
-        // 앵커가 없으면(map.getState 없이 호출) NO_SESSION, 골인 지점이 아니면 NOT_AT_GOAL.
+        // 앵커가 없으면(map.getState 없이 호출) NO_SESSION.
+        //
+        // ⚠️ 정확히 골인 지점과 "일치"가 아니라 assertAdjacent와 동일한 허용치(맨해튼 거리 ≤1)로
+        // 검증한다 — 정상 클라이언트는 골인 타일 자체에서는 move.arrive를 호출하지 않는다
+        // (game.tsx의 tryMove onComplete가 checkGoalReached(targetX, targetY)를 먼저 확인해
+        // true면 resolveArrival 호출 없이 곧장 run.finish로 넘어감, checkGoalReached 정의부
+        // 참고). 즉 정상 골인 시 서버 앵커는 골인 타일 "한 칸 전"에 멈춰있다 — 정확히 일치를
+        // 요구하면 정상적으로 골인한 유저가 전부 NOT_AT_GOAL로 거부된다(/review 72로 발견한
+        // 회귀). 맨해튼 거리 ≤1을 허용해도 위협 모델은 그대로 막힌다 — assertAdjacent가
+        // 강제하는 한 칸씩 이동을 거쳐야만 골인 지점 인접까지 도달할 수 있으므로, 임의 좌표에서
+        // 즉시 호출하는 위조는 여전히 불가능하다.
         const posKey = positionAnchorKey(mapId, date, ctx.userId);
         const position = await readPositionAnchor(posKey);
         const goal = getMapExitPosition(mapId);
-        if (position.x !== goal.x || position.y !== goal.y) {
+        if (manhattanDistance(position, goal) > 1) {
           throw new TRPCError({ code: 'BAD_REQUEST', message: 'NOT_AT_GOAL' });
         }
 
