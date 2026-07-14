@@ -1236,9 +1236,28 @@ class MazeScene extends Phaser.Scene {
       // 필드 설명 참고) — mysteryBoxes와 동일하게 위치는 공개, 종류만 비공개.
       this.otherTraps = state.otherTraps;
     } catch (err) {
+      // 2026-07-14 임소리(실서버 아이템 미픽업 조사): 이 catch가 IS_LOCAL_PREVIEW 가드 없이
+      // 무조건 로컬 폴백 좌표를 썼던 게 실서버 버그였다 — reportPosition/reportArrival 등
+      // 다른 서버 호출은 전부 "실서버면 폴백 안 함" 패턴으로 가드돼 있는데 여기만 예외였음.
+      // PR#70(미스터리 박스 랜덤 스폰) 이전엔 서버 스폰도 고정 좌표라 이 하드코딩 폴백이
+      // 우연히 들어맞아 무해했지만, 랜덤 스폰 도입 후엔 폴백 좌표가 실제 서버 보드와 거의
+      // 항상 어긋난다 — map.getState가 세션 중 단 한 번이라도 실패하면(네트워크 일시 장애
+      // 등) remainingItems가 영구히 잘못된 좌표로 고정되고, 마커는 보이지만 밟아도 서버가
+      // hGet으로 못 찾아 picked:false만 반환하는 "밟아도 안 먹힘" 증상으로 이어졌다.
+      if (!IS_LOCAL_PREVIEW) {
+        console.error('map.getState 실패(실서버 환경) — 로컬 폴백 안 함, 빈 상태로 안전하게 처리', err);
+        this.myTraps = [];
+        footprints = [];
+        this.remainingItems = [];
+        this.otherTraps = [];
+        this.renderTrapMarkers();
+        this.renderFootprintMarkers(footprints);
+        this.renderItemMarkers();
+        return;
+      }
+
       // 정적 빌드만 단독으로 띄우는 로컬 프리뷰(백엔드 없음)에서도 마커를 눈으로 확인할 수
-      // 있도록 하는 개발용 폴백. 실제 서버(devvit playtest/배포 환경)가 응답하면 위 try에서
-      // 이미 성공해 여기까지 오지 않는다.
+      // 있도록 하는 개발용 폴백.
       // ⚠️ 아래 좌표들도 TEMP_ITEMS와 마찬가지로 MAIN_MAP(map-1)의 바닥 칸이어야 하며
       // 코드로 검증하지 않는다 — 맵이 바뀌면 같이 확인할 것.
       // 2026-07-10: map-1 레이아웃 4차 재설계에 맞춰 좌표 갱신. myTraps는 실제로는 "내가
@@ -1252,7 +1271,7 @@ class MazeScene extends Phaser.Scene {
       // 이전 칸이 열려있는지 + 그 방향으로 계속 몇 칸 갈 수 있는지"까지 확인해서 재배치 —
       // 아래 (2,19)는 실제로 왼쪽에서 오른쪽으로 걸어 들어오면서 그대로 오른쪽으로 15칸
       // 미끄러지는 지점(맵 하단의 긴 통로 한복판).
-      console.error('map.getState 실패 — 로컬 프리뷰용 임시 데이터로 대체', err);
+      console.error('map.getState 실패(백엔드 없음) — 로컬 프리뷰용 임시 데이터로 대체', err);
       this.myTraps = LOCAL_FALLBACK_TRAPS_BY_MAP[MAP_ID] ?? LOCAL_FALLBACK_TRAPS_BY_MAP['map-1']!;
       // 발자국은 로컬 폴백 임시 좌표를 두지 않는다(2026-07-14 제거, PR#65) — 시작 지점 근처
       // 좌표라 스폰 인트로가 끝나자마자 바로 보여서 "다른 유저 발자국"이라기엔 부자연스러웠음.

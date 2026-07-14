@@ -207,7 +207,15 @@ async function seedMysteryBoxes(mapId: string, date: string, userId: string): Pr
   );
   await tx.expire(boardKey, DATA_SAFETY_TTL_SECONDS);
   const results = await tx.exec();
-  if (!results) {
+  // 2026-07-14 임소리(실서버 아이템 미픽업 조사): 실제 @devvit/redis의 TxClient.exec()
+  // (node_modules/@devvit/redis/RedisClient.js)는 항상 배열을 반환한다 — `let output = []`로
+  // 시작해 response.response를 순회하며 채우는 구조라 WATCH 충돌로 트랜잭션이 취소돼도 null이
+  // 아니라 빈 배열([])로 귀결된다(빈 배열은 JS에서 truthy라 `if (!results)`만으로는 실제
+  // 환경에서 결코 참이 될 수 없었다). trap.install(위 343행)이 이미 쓰고 있던 더 방어적인
+  // 패턴(`!results || results.length === 0`)과 동일하게 맞춘다 — FakeRedis(테스트 목)는 null을
+  // 반환하도록 만들어져 있어 기존 방식으로도 단위테스트는 통과했지만, 그건 목이 실제 계약과
+  // 다르게 구현돼 있었기 때문(테스트 목도 함께 [] 반환으로 수정).
+  if (!results || results.length === 0) {
     return;
   }
 
@@ -546,9 +554,15 @@ export const appRouter = t.router({
             trapInstallerId = parsed.installerId;
           }
         }
-        // 미스터리 박스: 결과는 픽업이 실제로 성사됐는지와 무관하게 미리 굴려도 안전하다(인메모리,
-        // 부수효과 없음) — 아래에서 hDel 성공 여부로 실제 픽업 성사만 별도 확정한다.
-        const rolled = rawItem ? rollMysteryOutcome() : null;
+        // 2026-07-14 임소리(배영환님 승인 하에 수정, 실서버 조사): 결과는 더 이상 픽업 시점에
+        // 굴리지 않는다 — 스폰(시딩) 시점에 seedMysteryBoxes가 이미 굴려서 저장해둔 값을 그대로
+        // 읽는다(item.pickup과 동일한 패턴, 428행 참고). PR#70에서 item.pickup은 이 값을 읽도록
+        // 갱신됐지만 move.arrive는 갱신에서 빠져 있었다 — 함정 탐지기가 픽업 전에 미리 알려준
+        // 종류와 실제로 밟았을 때 나오는 종류가 달라지는(재추첨) 버그였다. rawItem은 hDel 이전에
+        // 이미 읽어둔 값이라 삭제 여부와 무관하게 그대로 유효하다.
+        const rolled = rawItem
+          ? (JSON.parse(rawItem) as { outcome: 'item'; type: ItemType } | { outcome: 'trap'; type: TrapType })
+          : null;
 
         // RT2(조건부): 소모할 게 있는 것만 개별 실행. Promise.allSettled로 서로의 실패를 격리한다 —
         // Promise.all로 묶으면 한쪽이 일시 실패했을 때 이미 성공한 다른 쪽 hDel(Redis에는 이미 반영됨)의
