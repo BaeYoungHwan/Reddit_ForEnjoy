@@ -336,6 +336,7 @@ const INSTALL_FAILURE_MESSAGES: Record<InstallFailureReason, string> = {
 // 타입을 저장하지 않고 픽업 시점에 rollMysteryOutcome()으로 결정)으로 재설계되면서
 // map.getState가 주는 실제 스폰 좌표(state.mysteryBoxes)엔 더 이상 타입이 없다 — type은
 // 백엔드 없는 로컬 프리뷰 폴백(TEMP_ITEMS/reportItemPickup의 catch)에서만 쓰인다.
+// ItemType(4종) 각각의 상세 스펙·확정 배경은 docs/design-docs/items.md 참고.
 type ItemInstance = { x: number; y: number; type?: ItemType };
 
 // fetchItemEncounter()의 반환 타입 — 미스터리 박스가 없었는지, 아이템으로 나왔는지, 함정으로
