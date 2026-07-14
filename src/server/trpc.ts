@@ -641,8 +641,13 @@ export const appRouter = t.router({
         // "중복"으로 오해해 제거하면 이 레이스가 재발한다).
         // isNewRecord 여부와 무관하게 항상 실행 — 새로고침만 하고 이 mutation이 호출 안 된 경우는
         // 애초에 이 코드를 안 타므로 "정상 골인일 때만 리셋" 조건이 자연히 만족된다.
-        // ⚠️ detectorChargeKey/loadoutClaimedKey 리셋 여부는 밸런스 판단이 필요해 미정(item-board-reset.md
-        // 4절) — 이번 변경 범위에서는 건드리지 않는다.
+        // 2026-07-14 임소리: detectorChargeKey/loadoutClaimedKey 리셋 여부가 "밸런스 판단 필요,
+        // 미정"으로 남아있었는데(item-board-reset.md 4절), 실서버 테스트 중 "탐지기 로드아웃을
+        // 골랐는데 적용이 안 된다"는 증상으로 드러남 — loadoutClaimedKey가 하루 1회 NX라 재도전
+        // 때마다 다시 지급받지 못했던 것(정상 동작이었지만 UX상 막힘). 아이템/함정 보드와 동일하게
+        // "매 런은 새로 시작"이 이 게임의 일관된 원칙이라 판단해, 둘 다 여기서 함께 리셋하기로
+        // 확정(임소리 결정). charge만 남기고 클레임만 리셋하면 매 런마다 충전이 계속 쌓이는
+        // 실질적 무제한 충전이 될 수 있어, 반드시 둘을 같이 지운다.
         //
         // 리더보드 기록(zAdd/hSet)은 이미 위에서 커밋됐으므로, 여기서 실패해도 rank/isNewRecord
         // 응답까지 잃지 않도록 try/catch로 감싼다 — 실패를 그대로 던지면 이미 세운 기록의 응답이
@@ -651,6 +656,8 @@ export const appRouter = t.router({
         try {
           await Promise.all([
             redis.del(positionAnchorKey(mapId, date, ctx.userId)),
+            redis.del(loadoutClaimedKey(mapId, date, ctx.userId)),
+            redis.del(detectorChargeKey(mapId, date, ctx.userId)),
             seedMysteryBoxes(mapId, date, ctx.userId),
           ]);
         } catch (err) {

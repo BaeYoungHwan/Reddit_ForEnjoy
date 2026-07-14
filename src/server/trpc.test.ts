@@ -1,5 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { getKstDateString, itemBoardKey, itemSeededKey, tileMember, trapBoardKey } from './core/redisKeys';
+import {
+  detectorChargeKey,
+  getKstDateString,
+  itemBoardKey,
+  itemSeededKey,
+  tileMember,
+  trapBoardKey,
+} from './core/redisKeys';
 import type { Position } from '../shared/game-types';
 
 /**
@@ -467,6 +474,30 @@ describe('run.finish 아이템 보드 리셋 (docs/design-docs/item-board-reset.
     ]);
 
     expect(Object.keys(await mocks.redis.hGetAll(boardKey))).toHaveLength(8);
+  });
+
+  it('run.finish가 탐지기 로드아웃 클레임/충전도 함께 리셋해, 재도전마다 로드아웃을 다시 받을 수 있다(2026-07-14 실서버 회귀 — 로드아웃이 손전등/쉴드와 달리 두 번째 런부터 안 먹히던 문제)', async () => {
+    const caller = createCaller({ userId: 'user-loadout-reset' });
+    await caller.map.getState({ mapId: 'map-1' });
+
+    const first = await caller.item.claimLoadout({ mapId: 'map-1', loadoutId: 'trapDetector' });
+    expect(first.granted).toBe(true);
+
+    // 같은 런 안에서 재클레임은 여전히 막혀야 한다(로드아웃은 한 번만 지급) — run.finish 없이는
+    // NX가 그대로 유지되는지 먼저 확인.
+    const sameRunRetry = await caller.item.claimLoadout({ mapId: 'map-1', loadoutId: 'trapDetector' });
+    expect(sameRunRetry.granted).toBe(false);
+
+    await caller.run.finish({ mapId: 'map-1', steps: 10, clearTimeMs: 5000 });
+
+    // 재도전(다음 런)에서는 다시 클레임할 수 있어야 한다 — 손전등/쉴드처럼 매 런마다 먹혀야 함.
+    const secondRun = await caller.item.claimLoadout({ mapId: 'map-1', loadoutId: 'trapDetector' });
+    expect(secondRun.granted).toBe(true);
+
+    // 충전도 리셋됐어야 한다 — 지우지 않고 클레임만 리셋했다면 여기서 '2'(누적)가 나왔을
+    // 것이다(런마다 무한정 충전이 쌓이는 걸 막기 위해 반드시 둘 다 같이 지운다).
+    const date = getKstDateString();
+    expect(await mocks.redis.get(detectorChargeKey('map-1', date, 'user-loadout-reset'))).toBe('1');
   });
 });
 
