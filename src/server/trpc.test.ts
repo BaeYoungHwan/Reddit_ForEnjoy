@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { getKstDateString, itemBoardKey } from './core/redisKeys';
 
 /**
  * @devvit/web/server의 redis는 실제 Devvit 런타임에서만 접속 가능한 싱글턴이라,
@@ -246,6 +247,23 @@ describe('trap.trigger 위치 앵커 검증 (8.4 회귀 테스트)', () => {
       hit: false,
     });
   });
+
+  it('동일 함정 타일에 두 유저가 동시에 접근하면 한쪽만 hit:true를 받는다(이중발동 회귀, docs/design-docs/move-run-finish-bugfixes.md 2절)', async () => {
+    const installer = createCaller({ userId: 'user-trigger-race-installer' });
+    await installer.trap.install({ mapId: 'map-1', type: 'slow', x: 1, y: 0 });
+
+    const callerA = createCaller({ userId: 'user-trigger-race-a' });
+    const callerB = createCaller({ userId: 'user-trigger-race-b' });
+    await callerA.map.getState({ mapId: 'map-1' });
+    await callerB.map.getState({ mapId: 'map-1' });
+
+    const [resultA, resultB] = await Promise.all([
+      callerA.trap.trigger({ mapId: 'map-1', x: 1, y: 0 }),
+      callerB.trap.trigger({ mapId: 'map-1', x: 1, y: 0 }),
+    ]);
+
+    expect([resultA, resultB].filter((r) => r.hit)).toHaveLength(1);
+  });
 });
 
 describe('map.getState 위치 앵커 (8.1 회귀 테스트)', () => {
@@ -331,6 +349,24 @@ describe('run.finish 아이템 보드 리셋 (docs/design-docs/item-board-reset.
 
     const state = await caller.map.getState({ mapId: 'map-1' });
     expect(state.mysteryBoxes).toContainEqual({ x: 5, y: 12 });
+  });
+
+  it('run.finish 직후, 개입하는 map.getState 호출 없이도 아이템 보드가 즉시 재시딩된다(즉시성 회귀, docs/design-docs/move-run-finish-bugfixes.md 1절)', async () => {
+    const caller = createCaller({ userId: 'user-reset-immediate' });
+    await caller.map.getState({ mapId: 'map-1' });
+    const date = getKstDateString();
+    const boardKey = itemBoardKey('map-1', date, 'user-reset-immediate');
+
+    // 골인 전: 정상 시딩된 상태(맵당 스폰 3곳)
+    expect(Object.keys(await mocks.redis.hGetAll(boardKey))).toHaveLength(3);
+
+    await caller.run.finish({ mapId: 'map-1', steps: 10, clearTimeMs: 5000 });
+
+    // map.getState를 다시 부르지 않고 run.finish 직후 Redis 상태를 직접 확인한다 — 지연
+    // 재시딩(삭제만 하고 다음 map.getState를 기다림)이었다면 여기서 보드가 비어 있어야 하지만,
+    // 즉시 재시딩이므로 개입 호출 없이도 이미 채워져 있어야 한다.
+    const boardAfterFinish = await mocks.redis.hGetAll(boardKey);
+    expect(Object.keys(boardAfterFinish)).toHaveLength(3);
   });
 });
 
@@ -800,6 +836,24 @@ describe('move.arrive 통합 API (trap.trigger + item.pickup 통합, docs/design
     const other = createCaller({ userId: 'user-move-j' });
     await other.map.getState({ mapId: 'map-1' });
     await expect(other.trap.trigger({ mapId: 'map-1', x: 1, y: 0 })).resolves.toEqual({ hit: false });
+  });
+
+  it('동일 함정 타일에 두 유저가 동시에 접근하면 한쪽만 hit:true를 받는다(이중발동 회귀, docs/design-docs/move-run-finish-bugfixes.md 2절)', async () => {
+    const installer = createCaller({ userId: 'user-move-race-installer' });
+    await installer.trap.install({ mapId: 'map-1', type: 'slow', x: 1, y: 0 });
+
+    const callerA = createCaller({ userId: 'user-move-race-a' });
+    const callerB = createCaller({ userId: 'user-move-race-b' });
+    await callerA.map.getState({ mapId: 'map-1' });
+    await callerB.map.getState({ mapId: 'map-1' });
+
+    const [resultA, resultB] = await Promise.all([
+      callerA.move.arrive({ mapId: 'map-1', x: 1, y: 0 }),
+      callerB.move.arrive({ mapId: 'map-1', x: 1, y: 0 }),
+    ]);
+
+    const hits = [resultA, resultB].filter((r) => r.trap.hit);
+    expect(hits).toHaveLength(1);
   });
 });
 

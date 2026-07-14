@@ -113,6 +113,8 @@ move: t.router({
 }),
 ```
 
+> ⚠️ 코드리뷰 후속(2026-07-14)로 위 작업 순서가 재구성됨(위치 커밋을 소모 처리 이후로 미뤄 이중쓰기 제거 + hDel 반환값 기준 게이팅) — 상세는 `docs/design-docs/move-run-finish-bugfixes.md` 참조.
+
 왕복 횟수: 빈 칸(대부분의 이동) = RT1+RT2 **2회**. 함정만 있는 칸 = RT1+RT2+RT3 **3회**. 함정(respawn)+아이템 동시 = RT1+RT2+RT3+RT4 **4회**. 기존엔 두 API 합산 최대 9회 + HTTP 요청 자체가 2회였던 것과 비교하면 큰 폭의 축소다. 부수 효과로, 기존 `trap.trigger`가 `hDel(boardKey)`/`hDel(installerKey)`를 순차 호출하던 것도 병렬화된다. 에러 케이스(`NO_SESSION`, `INVALID_MOVE`)는 `readPositionAnchor`/`assertAdjacent`를 그대로 재사용하므로 동일하게 유지된다.
 
 ## 5. 기존 API 유지/폐기 정책 — 4단계 마이그레이션
