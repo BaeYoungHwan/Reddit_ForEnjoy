@@ -9,6 +9,7 @@ import {
   getKstDateString,
   itemBoardKey,
   itemSeededKey,
+  itemSeedGenerationKey,
   leaderboardDetailKey,
   leaderboardKey,
   loadoutClaimedKey,
@@ -28,7 +29,7 @@ import {
 } from './core/gameConfig';
 import { getMapStartPosition } from './core/maps';
 import { getMysteryBoxSpawns, rollMysteryOutcome } from './core/items';
-import type { Position, TrapInstance, TrapType } from '../shared/game-types';
+import type { ItemType, Position, TrapInstance, TrapType } from '../shared/game-types';
 
 type TrpcContext = { userId: string | undefined };
 
@@ -98,45 +99,118 @@ async function commitPosition(posKey: string, x: number, y: number): Promise<voi
 // 본인이 설치한 함정은 제외한다 — trap.trigger가 이미 설치자 본인을 회피 처리하고
 // 클라이언트도 myTraps로 항상 표시하므로(game.tsx), 여기 포함시키면 같은 함정이 두 번
 // 그려지는 중복 표시가 생긴다.
+//
+// trapBoardKey의 hash 원시값({field: JSON})을 {x,y,type,installerId}[]로 파싱하는 공통 헬퍼.
+// revealNearbyTraps(반경+거리 필터)와 map.getState의 otherTraps(타입 제거, 거리 필터 없음) 양쪽이
+// 같은 원시 스키마를 다른 방식으로 가공만 할 뿐이라 파싱 자체를 여기로 모았다 — 예전엔 두 곳에
+// 각각 JSON.parse가 따로 있어서, trapBoardKey 저장 스키마가 바뀌면 한쪽만 갱신되고 다른 쪽은
+// 방치될 위험이 있었다(2026-07-14 PR#69 리뷰 지적).
+function parseInstalledTraps(
+  rawFields: Record<string, string>
+): Array<{ x: number; y: number; type: TrapType; installerId: string }> {
+  return Object.entries(rawFields).map(([field, raw]) => {
+    const parsed = JSON.parse(raw) as { type: TrapType; installerId: string };
+    return { ...parseTile(field), type: parsed.type, installerId: parsed.installerId };
+  });
+}
+
+// 2026-07-14 임소리(서버 3번): 기존엔 설치형 함정(trapBoardKey)만 탐지 대상이었다 — 스폰형
+// 미스터리 박스는 픽업 전까지 결과가 안 정해져 있어서 애초에 "탐지"가 불가능했다. 서버 2번
+// (스폰 시점 미리 굴리기)으로 저장 값에 이미 결과가 들어있게 됐으므로, 이 유저 본인의
+// 미스터리 박스 보드(itemBoardKey)도 같이 스캔해 outcome이 'trap'인 것만 반경 내 대상에
+// 합친다. 다른 유저의 미스터리 박스 보드는 안 본다 — 애초에 미스터리 박스는 유저별 독립
+// 보드라(§ ensureMysteryBoxesSeeded) "다른 유저 화면의 박스"라는 개념 자체가 없다(내가 아직
+// 안 먹은 박스만 내 보드에 존재).
 async function revealNearbyTraps(
   mapId: string,
   date: string,
   center: { x: number; y: number },
   userId: string
 ): Promise<TrapInstance[]> {
-  const boardKey = trapBoardKey(mapId, date);
-  const allTraps = await redis.hGetAll(boardKey);
-  return Object.entries(allTraps)
-    .map(([field, raw]) => {
-      const parsed = JSON.parse(raw) as { type: TrapType; installerId: string };
-      return { ...parseTile(field), type: parsed.type, installerId: parsed.installerId };
-    })
+  const [allTraps, myMysteryBoxes] = await Promise.all([
+    redis.hGetAll(trapBoardKey(mapId, date)),
+    redis.hGetAll(itemBoardKey(mapId, date, userId)),
+  ]);
+
+  const installedTraps = parseInstalledTraps(allTraps)
     .filter((trap) => trap.installerId !== userId && chebyshevDistance(trap, center) <= DETECTOR_REVEAL_RADIUS)
     .map(({ x, y, type }) => ({ x, y, type }));
+
+  const spawnedTraps = Object.entries(myMysteryBoxes)
+    .map(([field, raw]) => ({ ...parseTile(field), rolled: JSON.parse(raw) as { outcome: string; type: string } }))
+    .filter(
+      (box) => box.rolled.outcome === 'trap' && chebyshevDistance(box, center) <= DETECTOR_REVEAL_RADIUS
+    )
+    .map(({ x, y, rolled }) => ({ x, y, type: rolled.type as TrapType }));
+
+  return [...installedTraps, ...spawnedTraps];
 }
 
-// 해당 맵/날짜/유저의 미스터리 박스 보드를 하루 최초 1회만 고정 스폰 좌표로 채운다.
-// 유저별로 독립된 보드라 한 유저의 픽업이 다른 유저의 스폰 여부에 영향을 주지 않는다
-// (고정 스폰 좌표가 맵당 2곳뿐이라 전역 공유였다면 가장 먼저 도착한 유저가 하루치를
-// 다 가져가 버렸을 것 — 함정과 달리 미스터리 박스는 유저마다 독립적으로 존재).
-// 시딩 여부를 "필드 존재"가 아니라 전용 마커 키(itemSeededKey)로 판정해야 한다 — hSetNX만 쓰면
-// item.pickup의 hDel로 지워진 필드가 다음 map.getState 호출 때 다시 채워져 버려서
-// (재생성 버그) 픽업한 박스가 무한정 재획득 가능해진다.
-// 보드 값 자체엔 타입을 저장하지 않는다 — 결과는 item.pickup이 픽업 시점에 rollMysteryOutcome()으로
-// 결정하므로, 저장 값은 "이 타일에 미확인 박스가 있다"는 존재 표시(placeholder)일 뿐이다.
+// 해당 맵/날짜/유저의 미스터리 박스 보드를 채운다. 유저별로 독립된 보드라 한 유저의 픽업이
+// 다른 유저의 스폰 여부에 영향을 주지 않는다(스폰 좌표가 맵당 8곳뿐이라 전역 공유였다면
+// 가장 먼저 도착한 유저가 하루치를 다 가져가 버렸을 것 — 함정과 달리 미스터리 박스는
+// 유저마다 독립적으로 존재).
 //
 // map.getState(ensureMysteryBoxesSeeded)와 run.finish(아이템 보드 리셋) 양쪽에서 공유하는 시딩 로직
 // (docs/design-docs/move-run-finish-bugfixes.md 1절). 보드를 먼저 채우고 마커(itemSeededKey)는
 // 마지막에 세운다 — 순서를 반대로 하면(마커 먼저) hSet이 중간에 실패했을 때 "seeded=true인데
 // 보드는 빈" 상태가 자정까지 고착될 수 있다. 이 순서면 중간에 끊겨도 "아직 시딩 안 됨"으로 남아
 // 다음 호출이 자연 복구한다.
+//
+// 시드 문자열에 date만 쓰면 모든 유저가 같은 날 정확히 같은 8곳을 보게 된다 — PRD의 "같은
+// 날엔 모든 유저가 같은 맵을 본다"는 map-1/map-2 중 어느 맵을 쓸지(pickDailyMapId)에 대한
+// 별개 규칙일 뿐, 박스 위치까지 유저 간 공유해야 한다는 요구사항은 문서 어디에도 없다(임소리
+// 확인). 그래서 userId + 시딩 횟수(itemSeedGenerationKey)를 시드에 섞어 유저마다 다르게 뽑는다.
+//
+// 2026-07-14 임소리(서버 2번 — 함정 탐지기 확장 준비): 보드 값에 더 이상 존재 표시 placeholder
+// ('1')가 아니라 rollMysteryOutcome() 결과(JSON 직렬화)를 미리 굴려서 저장한다 — 이전엔
+// item.pickup이 픽업하는 그 순간에야 결과를 굴려서, 아직 아무도 안 먹은 박스는 서버 자신도
+// 그게 뭔지 몰랐다(진짜로 미확정 상태). 함정 탐지기가 "저 박스는 무슨 함정이다"를 미리
+// 알려주려면 그 결과가 픽업 전부터 이미 정해져 있어야 하므로, 결정 타이밍을 스폰(시딩)
+// 시점으로 앞당긴다. item.pickup은 이제 이 저장된 값을 그대로 읽기만 한다(아래 참고).
 async function seedMysteryBoxes(mapId: string, date: string, userId: string): Promise<void> {
   const boardKey = itemBoardKey(mapId, date, userId);
-  await redis.hSet(
+  const generationKey = itemSeedGenerationKey(mapId, date, userId);
+  const generation = await redis.incrBy(generationKey, 1);
+  // 2026-07-14 PR#70 리뷰 지적: boardKey/itemSeededKey와 달리 이 카운터 키만 만료 설정이
+  // 빠져 있어서, date가 키에 포함됨에도 영구히 안 지워지고 (유저×맵×날짜) 조합만큼 계속
+  // 쌓이고 있었다 — 다른 하루짜리 키들과 동일하게 DATA_SAFETY_TTL_SECONDS로 맞춘다.
+  await redis.expire(generationKey, DATA_SAFETY_TTL_SECONDS);
+  const spawnSeed = `${date}:${userId}:${generation}`;
+
+  // 2026-07-14 임소리(자체 리뷰 사이클 발견 — run.finish 재도전 테스트 3건이 랜덤 스폰 도입
+  // 후 보드 길이가 8이 아니라 15/20으로 나오면서 드러남): 이 함수는 원래(고정 3좌표 시절)
+  // "항상 같은 필드 키에 hSet하는 멱등 함수"라 run.finish가 별도 삭제 없이 재호출만 해도
+  // 자연히 이전 값을 덮어써서 리셋된 것처럼 보였다(위 "PR #67 리뷰 회귀" 절 주석 참고). 랜덤
+  // 스폰으로 매 시딩(generation)마다 필드 키 자체가 달라지면서 이 전제가 깨졌다 — 삭제 없이
+  // hSet만 하면 이전 세대에 남아있던(아직 안 먹은) 필드가 지워지지 않고 새 8곳 위에 계속
+  // 누적된다(재도전마다 보드가 무한정 커지는 버그). 재시딩은 항상 "완전히 새로운 8곳"이어야
+  // 하므로, hSet 전에 이전 세대 전체를 지운다.
+  //
+  // 2026-07-14 PR#70 리뷰 후속 지적: del과 hSet이 별개의 두 호출이라, run.finish(강제 재시딩)와
+  // 거의 동시에 도착한 ensureMysteryBoxesSeeded(map.getState 경유) 같은 동시 seedMysteryBoxes
+  // 호출이 서로의 del/hSet과 인터리빙되면 두 세대의 필드가 뒤섞여 보드가 다시 8개보다 많아지는
+  // (바로 위에서 고친 것과 같은 종류의) 레이스가 있었다. boardKey를 WATCH해 del+hSet+expire를
+  // 하나의 트랜잭션으로 묶는다 — 우리가 스냅샷을 뜬 뒤 다른 트랜잭션이 먼저 boardKey를
+  // 바꿔놓으면 exec()이 null을 반환(실패)하므로, 이 경우 상대방이 이미 완전한 재시딩(8곳 새로 +
+  // itemSeededKey 설정)을 끝냈다고 보고 우리는 그냥 양보한다 — 재시도 없이 반환해도 안전하다
+  // (trap.install의 WATCH 실패 시 RETRY 응답과 달리, 여긴 호출자에게 돌려줄 응답이 없는 내부
+  // 헬퍼라 "누군가는 성공했다"만 보장되면 충분하다).
+  const tx = await redis.watch(boardKey);
+  await tx.multi();
+  await tx.del(boardKey);
+  await tx.hSet(
     boardKey,
-    Object.fromEntries(getMysteryBoxSpawns(mapId).map((pos) => [tileMember(pos), '1']))
+    Object.fromEntries(
+      getMysteryBoxSpawns(mapId, spawnSeed).map((pos) => [tileMember(pos), JSON.stringify(rollMysteryOutcome())])
+    )
   );
-  await redis.expire(boardKey, DATA_SAFETY_TTL_SECONDS);
+  await tx.expire(boardKey, DATA_SAFETY_TTL_SECONDS);
+  const results = await tx.exec();
+  if (!results) {
+    return;
+  }
+
   await redis.set(itemSeededKey(mapId, date, userId), '1', {
     expiration: new Date(Date.now() + DATA_SAFETY_TTL_SECONDS * 1000),
   });
@@ -192,9 +266,9 @@ export const appRouter = t.router({
       // 설치한 함정 위치를 아예 안 내려줘서 화면에 전혀 안 보였다 — "길인 줄 알고 걸었는데
       // 함정이었다"는 억울함 피드백으로, 위치는 공개하고(박스+물음표 마커) 종류만 비공개로
       // 완화한다. myTraps(본인 설치, 타입 포함)와 달리 타입은 절대 포함하지 않는다.
-      const otherTraps: Position[] = Object.entries(allTrapFields)
-        .filter(([, raw]) => (JSON.parse(raw) as { installerId: string }).installerId !== ctx.userId)
-        .map(([field]) => parseTile(field));
+      const otherTraps: Position[] = parseInstalledTraps(allTrapFields)
+        .filter((trap) => trap.installerId !== ctx.userId)
+        .map(({ x, y }) => ({ x, y }));
 
       return {
         date,
@@ -346,8 +420,14 @@ export const appRouter = t.router({
           return { picked: false as const };
         }
 
-        // 미스터리 박스: 저장된 값엔 타입이 없다 — 여기서 결과를 굴려서 처음으로 결정한다.
-        const rolled = rollMysteryOutcome();
+        // 2026-07-14 임소리(서버 2번): 결과는 더 이상 픽업 시점에 굴리지 않는다 — 스폰(시딩)
+        // 시점에 ensureMysteryBoxesSeeded가 이미 굴려서 저장해둔 값을 그대로 읽는다(함정
+        // 탐지기가 아직 안 먹은 박스의 종류를 미리 알려줄 수 있으려면 그 값이 픽업 전부터
+        // 정해져 있어야 한다). raw는 hDel 이전에 이미 읽어둔 값이라 삭제 여부와 무관하게
+        // 그대로 유효하다.
+        const rolled = JSON.parse(raw) as
+          | { outcome: 'item'; type: ItemType }
+          | { outcome: 'trap'; type: TrapType };
 
         if (rolled.outcome === 'trap') {
           // 스폰형 함정: 설치형(trap.trigger)과 달리 설치자 개념이 없으므로 개수 제한/자기
@@ -546,8 +626,19 @@ export const appRouter = t.router({
         // move-run-finish-bugfixes.md 1절). 예전엔 itemBoardKey/itemSeededKey를 삭제만 하고 다음
         // map.getState가 재시딩하길 기다렸는데(지연 재시딩), 다중 탭 환경에서 동시 map.getState의
         // 시딩과 인터리빙되면 "itemSeededKey는 존재(재시딩 영구 차단) + itemBoardKey는 빈 채"인
-        // 영구 빈 보드가 재현될 수 있었다. seedMysteryBoxes는 항상 같은 최종 데이터(고정 스폰 좌표)를
-        // 쓰는 멱등 함수라, ensureMysteryBoxesSeeded와 동시에 실행돼도 트랜잭션 없이 안전하게 수렴한다.
+        // 영구 빈 보드가 재현될 수 있었다.
+        // 2026-07-14 임소리 정정: 이 주석은 원래 "seedMysteryBoxes는 항상 같은 최종 데이터(고정
+        // 스폰 좌표)를 쓰는 멱등 함수라 트랜잭션 없이 안전하게 수렴한다"고 설명했는데, 랜덤 스폰
+        // 도입으로 그 전제가 깨졌다(매 시딩마다 필드 키 자체가 달라짐 — seedMysteryBoxes 내부의
+        // "PR#67 리뷰 회귀" 주석 참고). "매번 전체 삭제 후 새로 채우기"로만 바꾼 최초 수정본은
+        // del/hSet이 두 호출로 분리돼 있어, run.finish의 강제 재시딩과 거의 동시에 도착한
+        // ensureMysteryBoxesSeeded(map.getState 경유)가 서로의 del/hSet과 인터리빙되면 두 세대의
+        // 필드가 다시 뒤섞이는 레이스가 남아있었다(PR#70 리뷰 후속 발견). 지금은 seedMysteryBoxes
+        // 내부가 boardKey를 WATCH해 del+hSet+expire를 하나의 트랜잭션(MULTI/EXEC)으로 묶고 있으므로
+        // (seedMysteryBoxes 정의부 주석 참고), 여기서 재차 동시성 처리를 할 필요 없이 그냥 재호출만
+        // 해도 안전하다 — "동시 실행돼도 안전하다"는 결론은 유지되지만, 그 근거는 "완전 재시딩"이
+        // 아니라 seedMysteryBoxes 내부의 WATCH 트랜잭션이라는 점에 유의(이 트랜잭션을 나중에
+        // "중복"으로 오해해 제거하면 이 레이스가 재발한다).
         // isNewRecord 여부와 무관하게 항상 실행 — 새로고침만 하고 이 mutation이 호출 안 된 경우는
         // 애초에 이 코드를 안 타므로 "정상 골인일 때만 리셋" 조건이 자연히 만족된다.
         // ⚠️ detectorChargeKey/loadoutClaimedKey 리셋 여부는 밸런스 판단이 필요해 미정(item-board-reset.md
