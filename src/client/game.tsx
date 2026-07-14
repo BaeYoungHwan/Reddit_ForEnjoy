@@ -216,6 +216,17 @@ const PLAYER_TRAP_TEXTURE_KEYS: Record<TrapType, string> = {
 };
 const PLAYER_DETECTOR_TEXTURE_KEY = 'player-character-detector'; // 위 주석 참고 — 아직 미사용
 
+// 함정 탐지기가 반경 내 함정을 밝힐 때(applyDetectorItem) 타입별로 보여주는 아이콘 — 지금까지는
+// TRAP_COLORS 기반 색상 원형 마커였는데, 2026-07-14 임소리가 소싱한 그림으로 교체(파일명은
+// public/sprites/trap-*.png, 슬라이드=슬라이드/역방향=역방향 컨셉으로 고름). slow/reverse는
+// 서버 API 타입 이름과 실제 컨셉 이름이 달라(주석 참고, traps.md) 매핑을 명시적으로 남긴다.
+const TRAP_ICON_TEXTURE_KEYS: Record<TrapType, string> = {
+  slow: 'trap-icon-slow', // 슬라이드 컨셉 — trap-slide.png
+  respawn: 'trap-icon-respawn',
+  blind: 'trap-icon-blind',
+  reverse: 'trap-icon-reverse', // 역방향 컨셉 — trap-reverse.png
+};
+
 // 2026-07-13: 아이템 전체를 "즉시 발동" → "보유 후 Z로 사용"으로 전환하면서 도입한 인벤토리
 // 슬롯 UI. 아이콘은 종류별로 송원호님이 준 png(public/sprites/ItemSlot-*.png, 함정 설치만
 // 폭탄 아이콘이라 파일명이 다름)를 그대로 씀.
@@ -385,11 +396,13 @@ const ITEM_LABELS: Record<ItemType, string> = {
   detector: 'Trap Detector',
 };
 
-// items.md 초안: 반경 3칸 내 함정을 표시(수치는 ⚠️ 가정치, 플레이테스트로 확정 예정).
-// 반경(DETECTOR_REVEAL_RADIUS=3)은 서버가 이미 적용해서 revealedTraps로 필터링해 보내주므로
-// 클라이언트는 "얼마나 오래 화면에 보여줄지"만 관리하면 된다. 5초는 너무 길다는 피드백으로
-// 2026-07-11 임소리 확인 후 3초로 축소.
-const DETECTOR_REVEAL_DISPLAY_MS = 3000;
+// items.md 초안: 반경 내 함정을 표시(수치는 ⚠️ 가정치, 플레이테스트로 확정 예정 — 2026-07-14
+// 실플레이 피드백으로 3칸 → 7칸으로 확대). 반경(DETECTOR_REVEAL_RADIUS, gameConfig.ts)은
+// 서버가 이미 적용해서 revealedTraps로 필터링해 보내주므로 클라이언트는 "얼마나 오래 화면에
+// 보여줄지"만 관리하면 된다. 5초는 너무 길다는 피드백으로 2026-07-11 임소리 확인 후 3초로 축소.
+// 2026-07-14 재조정: 탐지 대상이 설치형+스폰형 통합으로 늘어나면서(서버 3번) 반경 내에 여러
+// 함정이 한꺼번에 뜰 수 있어, 종류를 다 확인하기엔 3초가 너무 짧다는 판단으로 4초로 재확정.
+const DETECTOR_REVEAL_DISPLAY_MS = 4000;
 
 // 스캔 펄스 이펙트(applyDetectorItem)가 퍼지는 반지름(칸 단위). 서버의 정확한
 // DETECTOR_REVEAL_RADIUS 값은 클라이언트로 안 넘어오므로(필터링된 결과만 옴), 순수 연출용으로
@@ -663,7 +676,7 @@ class MazeScene extends Phaser.Scene {
   // this.myTraps(내가 설치한 함정, 항상 표시)와 달리 일정 시간 후 사라져야 하고, 안개(fog)와
   // 무관하게 항상 보여야 의미가 있다(탐지기의 목적 자체가 "아직 안 밝힌 곳의 위험을 미리
   // 알려주는 것") — applyDetectorItem/clearRevealedTrapMarkers 참고.
-  private revealedTrapMarkers: Phaser.GameObjects.Arc[] = [];
+  private revealedTrapMarkers: Phaser.GameObjects.Image[] = [];
 
   // applyDetectorItem이 예약한 "표시 종료" 타이머가 유효한지 판단하는 토큰. 탐지기는 맵당
   // 스폰이 1곳뿐이라 실제로 겹칠 일은 드물지만, flashPlayerTrap 등에서 이미 겪은 "먼저 걸린
@@ -825,6 +838,10 @@ class MazeScene extends Phaser.Scene {
     this.load.image(PLAYER_TRAP_TEXTURE_KEYS.blind, '/sprites/Character-blind.png');
     this.load.image(PLAYER_TRAP_TEXTURE_KEYS.reverse, '/sprites/Character-reverse.png');
     this.load.image(PLAYER_DETECTOR_TEXTURE_KEY, '/sprites/Character-detector.png');
+    this.load.image(TRAP_ICON_TEXTURE_KEYS.slow, '/sprites/trap-slide.png');
+    this.load.image(TRAP_ICON_TEXTURE_KEYS.respawn, '/sprites/trap-respawn.png');
+    this.load.image(TRAP_ICON_TEXTURE_KEYS.blind, '/sprites/trap-blind.png');
+    this.load.image(TRAP_ICON_TEXTURE_KEYS.reverse, '/sprites/trap-reverse.png');
     this.load.image(ITEM_SLOT_TEXTURE_KEYS.flashlight, '/sprites/ItemSlot-flashlight.png');
     this.load.image(ITEM_SLOT_TEXTURE_KEYS.shield, '/sprites/ItemSlot-shield.png');
     this.load.image(ITEM_SLOT_TEXTURE_KEYS.detector, '/sprites/ItemSlot-detector.png');
@@ -2330,8 +2347,8 @@ class MazeScene extends Phaser.Scene {
     this.tweens.add({ targets: [this.shieldCountBadgeBg, this.shieldCountLabel], scale: 1, duration: 180, ease: 'Back.easeOut' });
   }
 
-  // 함정 탐지기 — items.md 초안: 반경 3칸 내 함정을 표시. 반경 필터링은 서버
-  // (revealNearbyTraps, DETECTOR_REVEAL_RADIUS)가 이미 끝낸 결과를 넘겨받으므로, 여기서는
+  // 함정 탐지기 — items.md 초안: 반경 내 함정을 표시(2026-07-14: 3칸 → 7칸으로 확대). 반경
+  // 필터링은 서버(revealNearbyTraps, DETECTOR_REVEAL_RADIUS)가 이미 끝낸 결과를 넘겨받으므로, 여기서는
   // "받은 좌표에 마커를 얼마나 오래 보여줄지"만 담당한다. myTraps(내가 설치한 함정)와 달리
   // 다른 유저의 함정이라 renderTrapMarkers 계열과 완전히 분리된 배열(revealedTrapMarkers)로
   // 관리 — 표시 시간이 끝나면 흔적 없이 사라져야 하고, 그 사이 실제 함정 판정(trap.trigger)
@@ -2367,8 +2384,14 @@ class MazeScene extends Phaser.Scene {
     for (const trap of revealedTraps) {
       const cx = trap.x * TILE_SIZE + TILE_SIZE / 2;
       const cy = trap.y * TILE_SIZE + TILE_SIZE / 2;
-      const marker = this.add.circle(cx, cy, TILE_SIZE * 0.22, TRAP_COLORS[trap.type], 0.35);
-      marker.setStrokeStyle(3, TRAP_COLORS[trap.type], 0.9);
+      // 2026-07-14: 색상 원형 마커 대신 함정 타입별 아이콘(TRAP_ICON_TEXTURE_KEYS)으로 교체 —
+      // 이 자리엔 원래 박스+물음표 마커(buildMysteryBoxMarker)가 이미 떠 있으므로, 그 위에
+      // 겹쳐 그려서 "정체가 밝혀졌다"는 느낌을 준다(표시 종료 시 이 아이콘만 사라지고 원래
+      // 박스+물음표는 계속 남음 — clearRevealedTrapMarkers 참고).
+      const marker = this.add.image(cx, cy, TRAP_ICON_TEXTURE_KEYS[trap.type]).setDisplaySize(
+        ITEM_MARKER_SIZE,
+        ITEM_MARKER_SIZE
+      );
       marker.setDepth(12); // 안개/타일 도형(0~6)보다 위, 손전등 등 나머지 이펙트와 안 겹치는 자리
 
       // 안개(탐색 여부)와 무관하게 항상 보여야 하므로 updateFog의 알파 조정 대상에 넣지 않고

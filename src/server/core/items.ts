@@ -1,46 +1,68 @@
 import type { ItemType, Position, TrapType } from '../../shared/game-types';
+import { computeMandatoryPathTiles, getMazeMap } from '../../shared/maps';
 import { MYSTERY_BOX_OUTCOME_POOL } from './gameConfig';
 
-// items.md "스폰 시각/판정 방식 변경": 스폰 좌표엔 더 이상 타입이 없다 — 미스터리 박스라
-// 아이템/함정 전용 구분 없이 공용 좌표 풀이고, 실제 결과는 rollMysteryOutcome()이 픽업
-// 시점에 결정한다. 실제 랜덤 스폰 로직(좌표 자체를 매일 무작위화하는 것)은 후속 작업으로 남김
-// (wbs.md 1️⃣ "그리드 맵 실데이터 교체" 참조) — 지금은 맵마다 고정 좌표 3곳만 심어둔다.
-// 좌표는 원래 구 map-1 레이아웃 기준 (3,1)/(7,5)/(14,9)였으나, main에 먼저 병합된 map-1
-// 4차 재설계(#36) 이후 (14,9)가 벽으로 막혀버려 develop→main 병합 시(2026-07-12) main이
-// 재설계 후 검증해둔 좌표(5,12)/(9,1)/(15,12)로 교체함 — 각 좌표는 "시작→골인 경로를 따라
-// 기능에 어울리는 지점"으로 배치된 것(초반 보호/중반 교차로 진입 직전/후반 진입 직전)이라
-// 미스터리 박스로 바뀐 지금도 위치 자체는 그대로 재사용한다.
-const MAP_1_MYSTERY_SPAWNS: Position[] = [
-  { x: 5, y: 12 },
-  { x: 9, y: 1 },
-  { x: 15, y: 12 },
-];
+// 2026-07-14 임소리: PRD-v1.md 79행(P1 MVP 핵심 루프)이 "랜덤 스폰"을 명시하는데, 지금까지는
+// 맵마다 고정 좌표 3곳만 심어둔 임시 구현이었다(스폰 "위치"는 고정, "결과"만 rollMysteryOutcome()
+// 으로 픽업 시점에 랜덤 — items.md "스폰 시각/판정 방식 변경" 절). 실서버 QA에서 "박스가 안
+// 보인다"는 반복 보고로 정식 랜덤 스폰을 이번에 구현: 호출부(trpc.ts ensureMysteryBoxesSeeded)가
+// 넘기는 시드 문자열로 의사난수를 고정해, 벽·시작 칸·"무조건 지나가야 하는 칸"(아래 참고)을
+// 제외한 바닥 칸 후보 중 8곳(결과 풀 8종 — 아이템4+함정4 — 과 개수를 맞춤, MYSTERY_BOX_OUTCOME_POOL
+// 참고)을 고른다. 시작→골인 사이 "무조건 지나가야 하는 칸"(computeMandatoryPathTiles,
+// shared/maps.ts)은 후보에서 제외한다 — 그런 칸에 스폰되면 함정 탐지기로 미리 알아도 피할
+// 방법이 없어 탐지기의 의미가 없어진다(다른 유저가 일부러 길목에 설치하는 함정은 이 제약
+// 대상이 아님, 그건 의도된 견제 메커니즘). 시드 문자열 자체(날짜/유저/재도전 횟수를 어떻게
+// 조합할지)는 호출부 책임 — 이 함수는 "같은 시드는 항상 같은 결과"라는 순수 함수 계약만
+// 지킨다(2026-07-14 재검토: 초기엔 맵+날짜로만 시드해 "같은 날 재도전해도 정확히 같은 위치가
+// 다시 나오는" 버그가 있었음 — 재도전마다 결과가 달라야 한다는 요구사항 재확인 후, 시드에
+// 유저+재도전 시각까지 섞도록 호출부를 수정함).
+const MYSTERY_BOX_SPAWN_COUNT = MYSTERY_BOX_OUTCOME_POOL.length;
 
-// 2026-07-13 데일리 맵 로테이션 도입 — map-2 좌표는 최단경로(시작→골인 140칸)의 20/50/80%
-// 지점(shared/maps.ts MAP_2_LAYOUT 생성 스크립트 참고)으로, map-1과 동일하게 "초반/중반/후반"
-// 배치 관례를 따른다. game.tsx의 로컬 프리뷰 폴백(TEMP_ITEMS_BY_MAP)과 좌표를 맞춰뒀다.
-const MAP_2_MYSTERY_SPAWNS: Position[] = [
-  { x: 17, y: 1 },
-  { x: 11, y: 8 },
-  { x: 12, y: 19 },
-];
+/** 시드 고정 의사난수 생성기(mulberry32) — mazePattern.ts와 동일한 패턴, Math.random 대신 사용. */
+function mulberry32(seed: number): () => number {
+  let state = seed;
+  return () => {
+    state |= 0;
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
 
-const MYSTERY_SPAWNS: Record<string, Position[]> = {
-  'map-1': MAP_1_MYSTERY_SPAWNS,
-  'map-2': MAP_2_MYSTERY_SPAWNS,
-};
+function hashSeed(str: string): number {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = (hash * 31 + str.charCodeAt(i)) | 0;
+  }
+  return hash;
+}
 
-// MYSTERY_SPAWNS[mapId] ?? MAP_1_MYSTERY_SPAWNS 형태로 직접 인덱싱하면 MYSTERY_SPAWNS가 일반
-// 객체 리터럴이라 Object.prototype 체인을 탄다 — mapId==='constructor' 같은 값이 Object 생성자
-// 함수(truthy)를 반환해 폴백이 안 걸리고, 이어지는 .map() 호출이 Function엔 없는 메서드라
-// TypeError로 크래시한다. map.getState(trpc.ts)가 화이트리스트 검증 없는 클라이언트 입력
-// (mapId: z.string().min(1))을 그대로 넘기므로 실제로 도달 가능한 경로다 — shared/maps.ts의
-// isRegisteredMapId/getMazeMap과 정확히 같은 취약점 클래스라 같은 방식(hasOwnProperty)으로
-// 막는다(PR#60 리뷰에서 발견).
-export function getMysteryBoxSpawns(mapId: string): Position[] {
-  return Object.prototype.hasOwnProperty.call(MYSTERY_SPAWNS, mapId)
-    ? MYSTERY_SPAWNS[mapId]!
-    : MAP_1_MYSTERY_SPAWNS;
+// mapId는 getMazeMap이 이미 안전하게 화이트리스트 검증(hasOwnProperty 기반, 미등록 시 map-1로
+// 폴백)하므로 여기서 별도 검증이 필요 없다(PR#60 리뷰에서 발견된 프로토타입 오염 취약점과 동일
+// 클래스 방어를 getMazeMap 쪽에서 이미 재사용). seed는 순수하게 난수 고정용 문자열 — 형식
+// 검증은 하지 않는다(호출부가 무엇을 섞어 넣을지 자유롭게 정함, 위 주석 참고).
+export function getMysteryBoxSpawns(mapId: string, seed: string): Position[] {
+  const map = getMazeMap(mapId);
+  const mandatory = computeMandatoryPathTiles(map);
+
+  const candidates: Position[] = [];
+  for (let y = 0; y < map.grid.length; y++) {
+    for (let x = 0; x < map.grid[y]!.length; x++) {
+      if (map.grid[y]![x] !== 'floor') continue;
+      if (x === map.start.x && y === map.start.y) continue;
+      if (mandatory.has(`${x},${y}`)) continue;
+      candidates.push({ x, y });
+    }
+  }
+
+  const rand = mulberry32(hashSeed(`${map.id}:${seed}`));
+  // Fisher-Yates 셔플(시드 고정이라 같은 mapId+seed는 항상 같은 순서) 후 앞에서 필요한 개수만.
+  for (let i = candidates.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [candidates[i], candidates[j]] = [candidates[j]!, candidates[i]!];
+  }
+  return candidates.slice(0, MYSTERY_BOX_SPAWN_COUNT);
 }
 
 export function rollMysteryOutcome():
