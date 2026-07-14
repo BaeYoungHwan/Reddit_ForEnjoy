@@ -371,10 +371,10 @@ const ITEM_LABELS: Record<ItemType, string> = {
   detector: 'Trap Detector',
 };
 
-// items.md 초안: 반경 3칸 내 함정을 표시(수치는 ⚠️ 가정치, 플레이테스트로 확정 예정).
-// 반경(DETECTOR_REVEAL_RADIUS=3)은 서버가 이미 적용해서 revealedTraps로 필터링해 보내주므로
-// 클라이언트는 "얼마나 오래 화면에 보여줄지"만 관리하면 된다. 5초는 너무 길다는 피드백으로
-// 2026-07-11 임소리 확인 후 3초로 축소.
+// items.md 초안: 반경 내 함정을 표시(수치는 ⚠️ 가정치, 플레이테스트로 확정 예정 — 2026-07-14
+// 실플레이 피드백으로 3칸 → 7칸으로 확대). 반경(DETECTOR_REVEAL_RADIUS, gameConfig.ts)은
+// 서버가 이미 적용해서 revealedTraps로 필터링해 보내주므로 클라이언트는 "얼마나 오래 화면에
+// 보여줄지"만 관리하면 된다. 5초는 너무 길다는 피드백으로 2026-07-11 임소리 확인 후 3초로 축소.
 const DETECTOR_REVEAL_DISPLAY_MS = 3000;
 
 // 스캔 펄스 이펙트(applyDetectorItem)가 퍼지는 반지름(칸 단위). 서버의 정확한
@@ -2065,8 +2065,8 @@ class MazeScene extends Phaser.Scene {
     this.tweens.add({ targets: [this.shieldCountBadgeBg, this.shieldCountLabel], scale: 1, duration: 180, ease: 'Back.easeOut' });
   }
 
-  // 함정 탐지기 — items.md 초안: 반경 3칸 내 함정을 표시. 반경 필터링은 서버
-  // (revealNearbyTraps, DETECTOR_REVEAL_RADIUS)가 이미 끝낸 결과를 넘겨받으므로, 여기서는
+  // 함정 탐지기 — items.md 초안: 반경 내 함정을 표시(2026-07-14: 3칸 → 7칸으로 확대). 반경
+  // 필터링은 서버(revealNearbyTraps, DETECTOR_REVEAL_RADIUS)가 이미 끝낸 결과를 넘겨받으므로, 여기서는
   // "받은 좌표에 마커를 얼마나 오래 보여줄지"만 담당한다. myTraps(내가 설치한 함정)와 달리
   // 다른 유저의 함정이라 renderTrapMarkers 계열과 완전히 분리된 배열(revealedTrapMarkers)로
   // 관리 — 표시 시간이 끝나면 흔적 없이 사라져야 하고, 그 사이 실제 함정 판정(trap.trigger)
