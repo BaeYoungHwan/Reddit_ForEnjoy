@@ -630,11 +630,15 @@ export const appRouter = t.router({
         // 2026-07-14 임소리 정정: 이 주석은 원래 "seedMysteryBoxes는 항상 같은 최종 데이터(고정
         // 스폰 좌표)를 쓰는 멱등 함수라 트랜잭션 없이 안전하게 수렴한다"고 설명했는데, 랜덤 스폰
         // 도입으로 그 전제가 깨졌다(매 시딩마다 필드 키 자체가 달라짐 — seedMysteryBoxes 내부의
-        // "PR#67 리뷰 회귀" 주석 참고). seedMysteryBoxes가 이제 hSet 전에 이전 세대 보드를 직접
-        // 지우도록 고쳐져 있으므로("완전 재시딩"), 여기서 재차 델타 계산 없이 그냥 재호출만 해도
-        // 여전히 안전하게 수렴한다 — 멱등성의 근거만 "같은 값 덮어쓰기"에서 "매번 전체 삭제 후
-        // 새로 채우기"로 바뀌었을 뿐, ensureMysteryBoxesSeeded와 동시 실행돼도 안전하다는 결론 자체는
-        // 그대로 유지된다.
+        // "PR#67 리뷰 회귀" 주석 참고). "매번 전체 삭제 후 새로 채우기"로만 바꾼 최초 수정본은
+        // del/hSet이 두 호출로 분리돼 있어, run.finish의 강제 재시딩과 거의 동시에 도착한
+        // ensureMysteryBoxesSeeded(map.getState 경유)가 서로의 del/hSet과 인터리빙되면 두 세대의
+        // 필드가 다시 뒤섞이는 레이스가 남아있었다(PR#70 리뷰 후속 발견). 지금은 seedMysteryBoxes
+        // 내부가 boardKey를 WATCH해 del+hSet+expire를 하나의 트랜잭션(MULTI/EXEC)으로 묶고 있으므로
+        // (seedMysteryBoxes 정의부 주석 참고), 여기서 재차 동시성 처리를 할 필요 없이 그냥 재호출만
+        // 해도 안전하다 — "동시 실행돼도 안전하다"는 결론은 유지되지만, 그 근거는 "완전 재시딩"이
+        // 아니라 seedMysteryBoxes 내부의 WATCH 트랜잭션이라는 점에 유의(이 트랜잭션을 나중에
+        // "중복"으로 오해해 제거하면 이 레이스가 재발한다).
         // isNewRecord 여부와 무관하게 항상 실행 — 새로고침만 하고 이 mutation이 호출 안 된 경우는
         // 애초에 이 코드를 안 타므로 "정상 골인일 때만 리셋" 조건이 자연히 만족된다.
         // ⚠️ detectorChargeKey/loadoutClaimedKey 리셋 여부는 밸런스 판단이 필요해 미정(item-board-reset.md
