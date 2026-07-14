@@ -177,6 +177,16 @@ async function seedMysteryBoxes(mapId: string, date: string, userId: string): Pr
   // 쌓이고 있었다 — 다른 하루짜리 키들과 동일하게 DATA_SAFETY_TTL_SECONDS로 맞춘다.
   await redis.expire(generationKey, DATA_SAFETY_TTL_SECONDS);
   const spawnSeed = `${date}:${userId}:${generation}`;
+
+  // 2026-07-14 임소리(자체 리뷰 사이클 발견 — run.finish 재도전 테스트 3건이 랜덤 스폰 도입
+  // 후 보드 길이가 8이 아니라 15/20으로 나오면서 드러남): 이 함수는 원래(고정 3좌표 시절)
+  // "항상 같은 필드 키에 hSet하는 멱등 함수"라 run.finish가 별도 삭제 없이 재호출만 해도
+  // 자연히 이전 값을 덮어써서 리셋된 것처럼 보였다(위 "PR #67 리뷰 회귀" 절 주석 참고). 랜덤
+  // 스폰으로 매 시딩(generation)마다 필드 키 자체가 달라지면서 이 전제가 깨졌다 — 삭제 없이
+  // hSet만 하면 이전 세대에 남아있던(아직 안 먹은) 필드가 지워지지 않고 새 8곳 위에 계속
+  // 누적된다(재도전마다 보드가 무한정 커지는 버그). 재시딩은 항상 "완전히 새로운 8곳"이어야
+  // 하므로, hSet 전에 이전 세대 전체를 지운다.
+  await redis.del(boardKey);
   await redis.hSet(
     boardKey,
     Object.fromEntries(
@@ -599,8 +609,15 @@ export const appRouter = t.router({
         // move-run-finish-bugfixes.md 1절). 예전엔 itemBoardKey/itemSeededKey를 삭제만 하고 다음
         // map.getState가 재시딩하길 기다렸는데(지연 재시딩), 다중 탭 환경에서 동시 map.getState의
         // 시딩과 인터리빙되면 "itemSeededKey는 존재(재시딩 영구 차단) + itemBoardKey는 빈 채"인
-        // 영구 빈 보드가 재현될 수 있었다. seedMysteryBoxes는 항상 같은 최종 데이터(고정 스폰 좌표)를
-        // 쓰는 멱등 함수라, ensureMysteryBoxesSeeded와 동시에 실행돼도 트랜잭션 없이 안전하게 수렴한다.
+        // 영구 빈 보드가 재현될 수 있었다.
+        // 2026-07-14 임소리 정정: 이 주석은 원래 "seedMysteryBoxes는 항상 같은 최종 데이터(고정
+        // 스폰 좌표)를 쓰는 멱등 함수라 트랜잭션 없이 안전하게 수렴한다"고 설명했는데, 랜덤 스폰
+        // 도입으로 그 전제가 깨졌다(매 시딩마다 필드 키 자체가 달라짐 — seedMysteryBoxes 내부의
+        // "PR#67 리뷰 회귀" 주석 참고). seedMysteryBoxes가 이제 hSet 전에 이전 세대 보드를 직접
+        // 지우도록 고쳐져 있으므로("완전 재시딩"), 여기서 재차 델타 계산 없이 그냥 재호출만 해도
+        // 여전히 안전하게 수렴한다 — 멱등성의 근거만 "같은 값 덮어쓰기"에서 "매번 전체 삭제 후
+        // 새로 채우기"로 바뀌었을 뿐, ensureMysteryBoxesSeeded와 동시 실행돼도 안전하다는 결론 자체는
+        // 그대로 유지된다.
         // isNewRecord 여부와 무관하게 항상 실행 — 새로고침만 하고 이 mutation이 호출 안 된 경우는
         // 애초에 이 코드를 안 타므로 "정상 골인일 때만 리셋" 조건이 자연히 만족된다.
         // ⚠️ detectorChargeKey/loadoutClaimedKey 리셋 여부는 밸런스 판단이 필요해 미정(item-board-reset.md

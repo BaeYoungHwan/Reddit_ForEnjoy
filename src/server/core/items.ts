@@ -56,6 +56,18 @@ export function getMysteryBoxSpawns(mapId: string, seed: string): Position[] {
     }
   }
 
+  // 2026-07-14 PR#70 리뷰 지적: 후보가 MYSTERY_BOX_SPAWN_COUNT(8)보다 적으면 아래 slice가
+  // 에러 없이 그보다 적은 개수를 조용히 반환한다 — 지금 등록된 맵(25x21 안팎)에선 후보가
+  // 항상 8개보다 훨씬 많아 실제로 발생하지 않지만, 나중에 더 작은 맵이 추가되면 "스폰 8곳
+  // 보장"이 소리 없이 깨질 수 있으므로 개발 중 알아챌 수 있게 경고만 남긴다(런타임 동작은
+  // 그대로 유지 — 이 함수는 순수 함수 계약을 지켜야 해서 여기서 에러를 던지지 않는다).
+  if (candidates.length < MYSTERY_BOX_SPAWN_COUNT) {
+    console.warn(
+      `getMysteryBoxSpawns: 맵 "${map.id}"의 스폰 후보(${candidates.length}개)가 필요한 개수` +
+        `(${MYSTERY_BOX_SPAWN_COUNT}개)보다 적습니다 — 스폰이 ${candidates.length}곳만 채워집니다.`
+    );
+  }
+
   const rand = mulberry32(hashSeed(`${map.id}:${seed}`));
   // Fisher-Yates 셔플(시드 고정이라 같은 mapId+seed는 항상 같은 순서) 후 앞에서 필요한 개수만.
   for (let i = candidates.length - 1; i > 0; i--) {
