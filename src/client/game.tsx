@@ -13,6 +13,7 @@ import { SequentialDispatcher } from './sequentialDispatcher';
 import { LOADOUT_STORAGE_KEY } from './loadout';
 import { resolveTrapEncounters } from './trapResolution';
 import { loadSoundSettings, saveSoundSettings } from './soundSettings';
+import { clearQueueOnMute, decideNextInQueue, decideSfxRequest } from './sfxQueue';
 import type {
   ItemPickupOutput,
   ItemType,
@@ -831,21 +832,25 @@ class MazeScene extends Phaser.Scene {
   // 처럼 resolveArrival이 같은 동기 흐름 안에서 playSfx를 두 번 이상 부르면 먼저 발동한 소리가
   // 재생 시작과 동시에 끊겨 사실상 한 번도 안 들리는 문제가 있었다("일부 효과음이 안 나온다"
   // 피드백) — 즉시 끊는 대신 sfxQueue에 순서대로 쌓아뒀다가 재생 중인 소리가 자연스럽게 끝나면
-  // (playSfxNow) 다음 걸 이어서 재생하도록 변경. 실제 재생 로직은 playSfxNow로 옮기고, 이
-  // 함수는 "지금 재생해도 되는지 / 큐에 쌓아야 하는지"만 판단한다.
+  // (playSfxNow) 다음 걸 이어서 재생하도록 변경. "지금 재생해도 되는지 / 큐에 쌓아야 하는지"
+  // 판단 자체는 sfxQueue.ts의 decideSfxRequest(순수 함수, vitest로 단위 테스트됨)에 위임하고,
+  // 이 함수는 그 결정에 따라 실제 Phaser 사운드만 다룬다(2026-07-14 PR#66 리뷰 — 이 상태 전이가
+  // 이미 세 번 재설계됐는데도 자동화된 회귀 테스트가 없어서 분리).
   private playSfx(key: SfxKey) {
     // sfxMuted/sfxVolumeMultiplier는 스플래시 사운드 설정 화면(splash.tsx)에서 저장한 값을
     // setupSound()가 create() 시점에 한 번 읽어오고, 게임 화면의 효과음 음소거 버튼(setSfxMuted)
     // 으로도 세션 도중 즉시 바뀔 수 있다.
-    if (this.sfxMuted) return;
+    const decision = decideSfxRequest(
+      this.sfxQueue,
+      key,
+      this.sfxMuted,
+      !!this.lastEventSound?.isPlaying,
+      MazeScene.MAX_SFX_QUEUE_LENGTH
+    );
+    this.sfxQueue = decision.queue;
+    if (decision.action === 'muted') return;
     this.footstepSound?.destroy(); // 이벤트 효과음 요청이 오면(즉시 재생이든 대기열행이든) 발걸음은 항상 바로 끊는다.
-
-    if (this.lastEventSound?.isPlaying) {
-      if (this.sfxQueue.length >= MazeScene.MAX_SFX_QUEUE_LENGTH) this.sfxQueue.shift(); // 너무 빨리 여러 번 밟으면 오래된 것부터 버림
-      this.sfxQueue.push(key);
-      return;
-    }
-    this.playSfxNow(key);
+    if (decision.action === 'play') this.playSfxNow(key);
   }
 
   // playSfx가 "지금 바로 재생해도 된다"고 판단했을 때(대기열이 비어있고 이전 소리가 이미
@@ -868,14 +873,15 @@ class MazeScene extends Phaser.Scene {
       // lastEventSound가 이미 다른 소리로 바뀌어 있다면, 그 다음 재생은 그 소리의 몫이라
       // 이 타이머는 아무것도 하지 않아야 한다.
       this.time.delayedCall(sound.duration * 1000, () => {
-        if (this.lastEventSound !== sound || this.sfxMuted) return;
-        const next = this.sfxQueue.shift();
+        if (this.lastEventSound !== sound) return;
+        const { next, queue } = decideNextInQueue(this.sfxQueue, this.sfxMuted);
+        this.sfxQueue = queue;
         if (next) this.playSfxNow(next);
       });
     } catch (err) {
       console.error(`효과음 재생 실패: ${key}`, err);
-      if (this.sfxMuted) return;
-      const next = this.sfxQueue.shift();
+      const { next, queue } = decideNextInQueue(this.sfxQueue, this.sfxMuted);
+      this.sfxQueue = queue;
       if (next) this.playSfxNow(next);
     }
   }
@@ -977,12 +983,12 @@ class MazeScene extends Phaser.Scene {
   // App(React)의 SoundToggleButton(효과음 쪽)이 호출하는 공개 진입점 — setBgmMuted와 대칭.
   // 효과음은 BGM과 달리 매번 새로 만들어 짧게 재생되는 구조라(길게 지속되는 인스턴스가 없음)
   // "지금 재생 중인 소리를 끈다"가 아니라 "다음 재생부터 안 튼다"로 충분하다. 음소거하는
-  // 순간엔 sfxQueue도 함께 비운다 — 안 비우면 playSfxNow의 대기열 재생 콜백(플래그를 확인 안
-  // 함, 아래 참고)이 그대로 이어서 재생해버려 "껐는데도 큐에 밀려 있던 소리가 뒤늦게 들리는"
-  // 문제가 있었다(2026-07-14 발견).
+  // 순간엔 sfxQueue도 함께 비운다(clearQueueOnMute) — 안 비우면 playSfxNow의 대기열 재생
+  // 콜백이 그대로 이어서 재생해버려 "껐는데도 큐에 밀려 있던 소리가 뒤늦게 들리는" 문제가
+  // 있었다(2026-07-14 발견, sfxQueue.test.ts로 회귀 테스트됨).
   setSfxMuted(muted: boolean) {
     this.sfxMuted = muted;
-    if (muted) this.sfxQueue.length = 0;
+    this.sfxQueue = clearQueueOnMute(this.sfxQueue, muted);
   }
 
   // 효과음이 재생되는 동안 배경음악 음량을 BGM_DUCK_RATIO로 낮췄다가, durationMs 뒤 평상시
