@@ -13,6 +13,7 @@ import { LOADOUT_STORAGE_KEY } from './loadout';
 import { resolveTrapEncounters } from './trapResolution';
 import type {
   ItemPickupOutput,
+  ItemType,
   ItemUseDetectorOutput,
   Position,
   RunFinishOutput,
@@ -330,12 +331,6 @@ const INSTALL_FAILURE_MESSAGES: Record<InstallFailureReason, string> = {
   TILE_OCCUPIED: 'There is already a trap here',
   RETRY: 'Placement failed, please try again',
 };
-
-// items.md 기준 아이템 4종 중 서버 연동된 3종(손전등/쉴드/함정 탐지기) + 클라이언트 전용
-// 'trapInstall'(서버 스폰 데이터가 아직 없어 로컬 폴백 경로로만 테스트 가능 — docs/wbs.md
-// 전체 블로커 참고). 2026-07-13: 함정 탐지기는 item.useDetector로 Z 발동 시점에 라이브
-// 스캔하는 방식으로 바뀜(아래 HeldItem 주석 참고) — applyDetectorItem 참고.
-type ItemType = 'flashlight' | 'shield' | 'trapInstall' | 'detector';
 
 // 아이템 좌표(+로컬 폴백 전용 종류). 2026-07-12: 서버가 미스터리 박스 방식(개별 스폰에
 // 타입을 저장하지 않고 픽업 시점에 rollMysteryOutcome()으로 결정)으로 재설계되면서
