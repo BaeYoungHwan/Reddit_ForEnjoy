@@ -1912,7 +1912,20 @@ class MazeScene extends Phaser.Scene {
       // 미루면 언어 스펙상 "현재 대기 중인 모든 마이크로태스크가 완전히 소진된 뒤에만" 실행되는
       // 게 보장되므로 hop 수와 무관하게 확실하다 — this.time.delayedCall(0, ...)으로 다음 프레임
       // 틱까지 미룬다.
-      this.time.delayedCall(0, () => this.reconcilePositionWithServer(output.finalPosition));
+      //
+      // /review(PR#83 리뷰, 3차) 지적: reconcilePositionWithServer 내부는 "응답 도착 시점의
+      // 현재 화면 위치"와 finalPosition을 비교하는데, 배치 왕복이 진행되는 동안 플레이어가
+      // 계속 이동하면(다음 배치가 아직 버퍼에 쌓이고 있는 중) 이 둘은 정상적으로도 늘 어긋나
+      // 있을 수 있다 — applySlideTrap에 적용한 것과 같은 종류의 "낡은 정보" 문제. 이 배치가
+      // 실제로 문제없이 끝까지 처리됐다면 finalPosition은 항상 이 배치가 보낸 마지막 좌표와
+      // 정확히 같아야 한다는 점을 이용해, "지금 어디 있는지"가 아니라 "이 배치가 예상대로
+      // 끝났는지"만으로 판단한다 — 그러면 그 사이 플레이어가 얼마나 더 이동했는지와 무관하게
+      // 정확히 이 배치 자체의 이상 유무만 확인할 수 있다. 문제가 있었을 때(stoppedEarly로
+      // 예상 밖 좌표에서 멈췄을 때)만 보정을 예약한다.
+      const expectedEnd = waypoints[waypoints.length - 1]!;
+      if (output.finalPosition.x !== expectedEnd.x || output.finalPosition.y !== expectedEnd.y) {
+        this.time.delayedCall(0, () => this.reconcilePositionWithServer(output.finalPosition));
+      }
     } catch (err) {
       console.error('move.arriveBatch 실패(실서버 환경, 재시도 소진) — 이번 배치는 전부 판정 실패로 처리', err);
       resolvers.forEach((resolver) => resolver.resolve({ trap: { hit: false }, item: { picked: false } }));
@@ -1949,7 +1962,14 @@ class MazeScene extends Phaser.Scene {
     console.warn(
       `move.arriveBatch: 화면 위치(${this.playerGridX},${this.playerGridY})와 서버 위치(${finalPosition.x},${finalPosition.y})가 어긋나 보정합니다.`
     );
+    // 실서버 QA로 발견된 소프트락 버그: killTweensOf는 진행 중인 트윈을 강제로 멈추지만 그
+    // 트윈의 onComplete는 실행시키지 않는다 — 그런데 isMoving을 다시 false로 푸는 코드가 바로
+    // 그 onComplete 안에 있다(tryMove 참고). 배치 지연으로 이 함수가 하필 "다음 칸으로 이동
+    // 중인" 트윈이 진행 중일 때 불리면, 그 트윈을 끊어버리면서도 isMoving은 계속 true로 남아
+    // update()의 "이동 중엔 입력 무시" 가드에 영원히 걸려 캐릭터가 방향키에 반응하지 않게
+    // 된다. 여기서 명시적으로 false로 되돌려 이 락을 막는다.
     this.tweens.killTweensOf(this.playerImg);
+    this.isMoving = false;
     if (this.isSliding) {
       this.isSliding = false;
       this.cameras.main.shakeEffect.reset();
@@ -2287,7 +2307,14 @@ class MazeScene extends Phaser.Scene {
   private async resolveArrival(x: number, y: number, dx: number, dy: number) {
     const resolution = await this.resolveTrapAndItem(x, y, () => this.applyReverseTrap());
 
-    if (resolution?.effectsToApply.includes('slow')) {
+    // 2026-07-15(배치 도입 후 실서버 QA로 발견): 배치 처리로 이 응답이 도착하기까지 오래 걸릴
+    // 수 있다(같은 이동 burst 전체가 끝나야 흘려보내지므로) — 그 사이 플레이어가 이미 이 칸(x,y)을
+    // 지나 훨씬 앞으로 가 있을 수 있다. applySlideTrap은 "지금 서 있는 위치"부터 미끄러지므로,
+    // 그 상태로 그냥 발동시키면 엉뚱한(전혀 관계없는) 위치에서 느닷없이 미끄러지기 시작해버린다 —
+    // 그 방향이 하필 벽이면 아무 이유 없이 튕기고 멈추는 것처럼 보인다(실서버 QA에서 재현됨).
+    // 아직 이 칸에 그대로 서 있을 때만(플레이어가 그 사이 더 이동하지 않았을 때만) 발동시킨다 —
+    // 이미 멀리 갔으면 이 슬라이드 페널티는 조용히 넘어간다(엉뚱한 위치에서 튀는 것보다 낫다).
+    if (resolution?.effectsToApply.includes('slow') && this.playerGridX === x && this.playerGridY === y) {
       this.applySlideTrap(dx, dy); // 슬라이드는 killTweensOf로 진행 중인 이동을 이기고 스스로 다시 잠금
     }
   }
@@ -3104,7 +3131,15 @@ class MazeScene extends Phaser.Scene {
     // 불릴 땐(네트워크 응답 도착 후) 이미 다음 이동 트윈이 진행 중일 수 있다. 그 트윈을
     // 먼저 죽이지 않으면 아래에서 강제로 맞추는 playerImg 좌표를 트윈이 다음 프레임에
     // 다시 덮어써서 캐릭터가 엉뚱한 위치에서 튀는 예전 버그가 재발한다.
+    //
+    // 2026-07-15(배치 도입 후 실서버 QA로 발견 — 소프트락): killTweensOf는 트윈을 강제로
+    // 멈추지만 그 트윈의 onComplete는 실행시키지 않는다 — isMoving을 다시 false로 푸는 코드가
+    // 바로 그 onComplete 안에 있다(tryMove 참고). 이 함수가 하필 "다음 칸으로 이동 중인" 트윈이
+    // 진행 중일 때 불리면(배치 지연으로 이 함수 호출 자체가 훨씬 늦어질 수 있어 발생 확률이
+    // 커짐), 그 트윈을 끊으면서도 isMoving은 계속 true로 남아 update()의 "이동 중엔 입력 무시"
+    // 가드에 영원히 걸려 캐릭터가 방향키에 반응하지 않게 된다 — 명시적으로 되돌려 막는다.
     this.tweens.killTweensOf(this.playerImg);
+    this.isMoving = false;
 
     // 슬라이드 도중 리스폰 함정 칸을 지나간 경우(2026-07-15) — 슬라이드가 계속 이 함수를
     // 몰랐던 채로 이어지면 화면엔 슬라이드 의상이 남고 흔들림도 안 멈춘다. 위 killTweensOf로
