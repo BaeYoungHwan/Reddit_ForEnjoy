@@ -13,6 +13,7 @@ import {
   leaderboardDetailKey,
   leaderboardKey,
   loadoutClaimedKey,
+  moveFailureStreakKey,
   parseTile,
   positionAnchorKey,
   tileMember,
@@ -25,6 +26,7 @@ import {
   FOOTPRINT_CAP_PER_MAP,
   PER_TYPE_TRAP_CAP,
   POSITION_ANCHOR_TTL_SECONDS,
+  STUCK_SESSION_FAILURE_THRESHOLD,
   TOTAL_TRAP_CAP,
 } from './core/gameConfig';
 import { getMapExitPosition, getMapStartPosition } from './core/maps';
@@ -82,6 +84,32 @@ async function readPositionAnchor(posKey: string): Promise<{ x: number; y: numbe
 function assertAdjacent(last: { x: number; y: number }, next: { x: number; y: number }): void {
   if (manhattanDistance(last, next) > 1) {
     throw new TRPCError({ code: 'BAD_REQUEST', message: 'INVALID_MOVE' });
+  }
+}
+
+// assertAdjacent 실패 횟수를 카운터에 기록한다(docs/design-docs/position-anchor-permanent-lock.md).
+// 정상 플레이에서는 거의 없는 이벤트라, 이 카운터가 쌓인 세션은 위치 앵커가 실제로 얼어붙어
+// 자력 복구가 불가능한 상태라는 신호로 run.finish가 참고한다. 실패 경로에서만 추가 왕복이
+// 생기고(성공 경로는 그대로), assertAdjacent 자체는 순수 함수로 유지해 기존 호출부와의 계약을
+// 그대로 지킨다.
+async function assertAdjacentTracked(
+  streakKey: string,
+  last: { x: number; y: number },
+  next: { x: number; y: number }
+): Promise<void> {
+  try {
+    assertAdjacent(last, next);
+  } catch (err) {
+    try {
+      await redis.incrBy(streakKey, 1);
+      await redis.expire(streakKey, POSITION_ANCHOR_TTL_SECONDS);
+    } catch (trackingErr) {
+      // 실패 스트릭 기록 자체가 실패해도(드문 Redis 일시 오류 등) 원래 에러(INVALID_MOVE 등)를
+      // 가리면 안 된다 — run.finish의 리셋 블록과 동일한 원칙(부가 효과 실패가 응답 계약을 깨지
+      // 않게 함, /review 79 지적).
+      console.error(`assertAdjacentTracked: 실패 스트릭 기록 실패 (streakKey=${streakKey})`, trackingErr);
+    }
+    throw err;
   }
 }
 
@@ -367,9 +395,13 @@ export const appRouter = t.router({
         const boardKey = trapBoardKey(mapId, date);
         const field = tileMember({ x, y });
 
+        const streakKey = moveFailureStreakKey(mapId, date, ctx.userId);
         const [last, raw] = await Promise.all([readPositionAnchor(posKey), redis.hGet(boardKey, field)]);
-        assertAdjacent(last, { x, y });
-        await commitPosition(posKey, x, y);
+        await assertAdjacentTracked(streakKey, last, { x, y });
+        // 성공한 이동은 실패 스트릭을 리셋한다 — 안 지우면 "연속 실패"가 아니라 "세션 내 누적
+        // 실패"가 되어, 서로 무관한 시점에 자연 복구된 실패가 여러 번 쌓여 임계값을 넘으면
+        // 정상 진행 중인 세션도 run.finish에서 오탐으로 리셋될 수 있다(/review 79 지적).
+        await Promise.all([commitPosition(posKey, x, y), redis.del(streakKey)]);
 
         if (!raw) {
           return { hit: false as const };
@@ -412,9 +444,11 @@ export const appRouter = t.router({
         const boardKey = itemBoardKey(mapId, date, ctx.userId);
         const field = tileMember({ x, y });
 
+        const streakKey = moveFailureStreakKey(mapId, date, ctx.userId);
         const [last, raw] = await Promise.all([readPositionAnchor(posKey), redis.hGet(boardKey, field)]);
-        assertAdjacent(last, { x, y });
-        await commitPosition(posKey, x, y);
+        await assertAdjacentTracked(streakKey, last, { x, y });
+        // 성공한 이동은 실패 스트릭을 리셋한다 — 자세한 이유는 trap.trigger와 동일(/review 79 지적).
+        await Promise.all([commitPosition(posKey, x, y), redis.del(streakKey)]);
 
         if (!raw) {
           return { picked: false as const };
@@ -542,7 +576,10 @@ export const appRouter = t.router({
           redis.hGet(trapBoard, field),
           redis.hGet(itemBoard, field),
         ]);
-        assertAdjacent(last, { x, y }); // 오라클 방지 — 커밋 여부와 무관하게 앵커 검증은 여기서 끝난다.
+        // 오라클 방지 — 커밋 여부와 무관하게 앵커 검증은 여기서 끝난다. 실패 시 카운터를 남겨
+        // run.finish가 "진짜로 얼어붙은 세션"을 구분할 수 있게 한다(moveFailureStreakKey).
+        const streakKey = moveFailureStreakKey(mapId, date, ctx.userId);
+        await assertAdjacentTracked(streakKey, last, { x, y });
 
         let trapType: TrapType | undefined;
         let trapInstallerId: string | undefined;
@@ -596,10 +633,13 @@ export const appRouter = t.router({
         const needsDetectorCharge = item.picked && item.outcome === 'item' && item.type === 'detector';
 
         // RT3: 위치 커밋은 이 시점에 단 1회만 — 목적지를 미리 정해서 쓰므로 이중쓰기가 없다.
+        // 성공한 이동이므로 실패 스트릭도 함께 리셋한다(/review 79 지적 — 안 지우면 세션 내
+        // 누적 실패가 되어 정상 진행 중인 세션도 run.finish에서 오탐으로 리셋될 수 있음).
         const destination = needsRespawn ? getMapStartPosition(mapId) : { x, y };
         await Promise.all([
           commitPosition(posKey, destination.x, destination.y),
           needsDetectorCharge ? redis.incrBy(detectorChargeKey(mapId, date, ctx.userId), 1) : Promise.resolve(),
+          redis.del(streakKey),
         ]);
 
         return { trap, item };
@@ -635,31 +675,66 @@ export const appRouter = t.router({
         // 강제하는 한 칸씩 이동을 거쳐야만 골인 지점 인접까지 도달할 수 있으므로, 임의 좌표에서
         // 즉시 호출하는 위조는 여전히 불가능하다.
         const posKey = positionAnchorKey(mapId, date, ctx.userId);
-        const position = await readPositionAnchor(posKey);
+        const streakKey = moveFailureStreakKey(mapId, date, ctx.userId);
+        const [position, failureStreakRaw] = await Promise.all([readPositionAnchor(posKey), redis.get(streakKey)]);
         const goal = getMapExitPosition(mapId);
-        if (manhattanDistance(position, goal) > 1) {
-          throw new TRPCError({ code: 'BAD_REQUEST', message: 'NOT_AT_GOAL' });
+        const atGoal = manhattanDistance(position, goal) <= 1;
+
+        // 2026-07-15 배영환(임소리 리포트 반영, docs/design-docs/position-anchor-permanent-lock.md):
+        // 골인 검증에 실패해도(NOT_AT_GOAL) 위치 앵커가 "실제로 얼어붙은 세션"이면 아래 리셋
+        // 블록을 실행한다(리더보드 기록은 여전히 건너뜀). 예전엔 검증 실패 시 여기서 곧장
+        // throw해 리셋 블록에 아예 도달하지 못했다 — move.arrive 요청 하나가 유실되면(네트워크
+        // 순간 끊김, 모바일 백그라운드 전환 등) 위치 앵커가 그 자리에 얼어붙고, 그 이후 모든
+        // 이동이 연쇄로 INVALID_MOVE 처리되며, run.finish도 항상 NOT_AT_GOAL로 거부돼 리셋에
+        // 도달할 방법이 없어 위치 앵커 TTL(2시간) 만료까지 세션이 영구 고착됐다.
+        //
+        // 다만 "NOT_AT_GOAL이면 무조건 리셋"은 두 가지 부작용이 있어 채택하지 않았다(구현 중
+        // 회귀 테스트로 발견):
+        // (1) 골인 전에 run.finish를 시험 삼아 호출해도(실서버에선 발생하지 않지만 이 테스트
+        //     스위트의 "위조 시도" 시나리오처럼) 세션 전체가 리셋돼, 계속 걸어서 정상적으로
+        //     완주하려던 진행 상황(앵커/아이템)까지 잃게 된다 — ARRIVAL_IDLE_TIMEOUT_MS 레이스
+        //     (game.tsx reportRunFinish 주석 참고, 마지막 커밋이 아직 안 반영된 채로 run.finish가
+        //     호출되는 좁은 타이밍)도 같은 피해를 입는다.
+        // (2) 고의로 assertAdjacent를 한 번 실패시킨 뒤 run.finish를 불러 자기 아이템 보드를
+        //     원하는 때에 리롤하는 악용이 가능해진다.
+        // 그래서 moveFailureStreakKey(assertAdjacent 실패 횟수)가 임계값 이상 쌓인 경우에만
+        // "진짜로 얼어붙은 세션"으로 간주해 리셋한다 — 실제로 앵커가 멈추면 그 뒤 모든 이동이
+        // 계속 실패하므로 몇 걸음만 더 걸어도 금방 임계값을 넘지만, 위 (1)의 정상/경합 케이스는
+        // 선행 실패가 전혀 없어(streak=0) 리셋되지 않고 기존처럼 그냥 거부된다.
+        //
+        // "연속 실패 시 클라이언트가 임의 좌표로 위치 재동기화를 요청" 안은 기각했다 — 서버가
+        // 클라이언트가 제시한 좌표를 그대로 앵커로 받아들이면, 원하는 곳으로 앵커를 옮긴 뒤 인접
+        // 타일에 move.arrive를 호출해 함정 유무를 알아내는 오라클 공격이 가능해져 assertAdjacent가
+        // 지켜온 방어 설계 전체가 무력화된다. 리셋은 항상 "이번 런을 포기하고 시작 좌표로 되돌리는
+        // 것"뿐이라 이 문제가 없다.
+        const failureStreak = Number(failureStreakRaw) || 0;
+        const isStuckSession = failureStreak >= STUCK_SESSION_FAILURE_THRESHOLD;
+        const shouldReset = atGoal || isStuckSession;
+
+        let rank: number | undefined;
+        let isNewRecord = false;
+
+        if (atGoal) {
+          const key = leaderboardKey(mapId, date);
+          const score = encodeLeaderboardScore(steps, clearTimeMs);
+
+          const prevScore = await redis.zScore(key, ctx.userId);
+          isNewRecord = prevScore === undefined || score < prevScore;
+          if (isNewRecord) {
+            // 스코어는 랭킹 정렬 전용 인코딩 값이라 화면에 표시할 원본 걸음 수/시간은
+            // leaderboardDetailKey에 따로 보관한다(leaderboard.get 참고). 두 키가 원자적 트랜잭션으로
+            // 묶여있지 않아 동시 요청 사이 레이스가 있을 수 있는데, detail을 zAdd보다 먼저 써두면
+            // "zRange가 새 스코어를 보는 시점"엔 detail이 이미 존재할 가능성이 높아져 그 창이 줄어든다.
+            const detailKey = leaderboardDetailKey(mapId, date);
+            await redis.hSet(detailKey, { [ctx.userId]: JSON.stringify({ steps, clearTimeMs }) });
+            await redis.expire(detailKey, DATA_SAFETY_TTL_SECONDS);
+            await redis.zAdd(key, { member: ctx.userId, score });
+            await redis.expire(key, DATA_SAFETY_TTL_SECONDS);
+          }
+
+          rank = await redis.zRank(key, ctx.userId);
         }
-
-        const key = leaderboardKey(mapId, date);
-        const score = encodeLeaderboardScore(steps, clearTimeMs);
-
-        const prevScore = await redis.zScore(key, ctx.userId);
-        const isNewRecord = prevScore === undefined || score < prevScore;
-        if (isNewRecord) {
-          // 스코어는 랭킹 정렬 전용 인코딩 값이라 화면에 표시할 원본 걸음 수/시간은
-          // leaderboardDetailKey에 따로 보관한다(leaderboard.get 참고). 두 키가 원자적 트랜잭션으로
-          // 묶여있지 않아 동시 요청 사이 레이스가 있을 수 있는데, detail을 zAdd보다 먼저 써두면
-          // "zRange가 새 스코어를 보는 시점"엔 detail이 이미 존재할 가능성이 높아져 그 창이 줄어든다.
-          const detailKey = leaderboardDetailKey(mapId, date);
-          await redis.hSet(detailKey, { [ctx.userId]: JSON.stringify({ steps, clearTimeMs }) });
-          await redis.expire(detailKey, DATA_SAFETY_TTL_SECONDS);
-          await redis.zAdd(key, { member: ctx.userId, score });
-          await redis.expire(key, DATA_SAFETY_TTL_SECONDS);
-        }
-
-        const rank = await redis.zRank(key, ctx.userId);
-        // 런 종료 — 위치 앵커를 지우고 유저별 아이템 보드를 즉시 재시딩한다(docs/design-docs/
+        // 런 종료(성공/실패 무관) — 위치 앵커를 지우고 유저별 아이템 보드를 즉시 재시딩한다(docs/design-docs/
         // move-run-finish-bugfixes.md 1절). 예전엔 itemBoardKey/itemSeededKey를 삭제만 하고 다음
         // map.getState가 재시딩하길 기다렸는데(지연 재시딩), 다중 탭 환경에서 동시 map.getState의
         // 시딩과 인터리빙되면 "itemSeededKey는 존재(재시딩 영구 차단) + itemBoardKey는 빈 채"인
@@ -676,8 +751,8 @@ export const appRouter = t.router({
         // 해도 안전하다 — "동시 실행돼도 안전하다"는 결론은 유지되지만, 그 근거는 "완전 재시딩"이
         // 아니라 seedMysteryBoxes 내부의 WATCH 트랜잭션이라는 점에 유의(이 트랜잭션을 나중에
         // "중복"으로 오해해 제거하면 이 레이스가 재발한다).
-        // isNewRecord 여부와 무관하게 항상 실행 — 새로고침만 하고 이 mutation이 호출 안 된 경우는
-        // 애초에 이 코드를 안 타므로 "정상 골인일 때만 리셋" 조건이 자연히 만족된다.
+        // isNewRecord/atGoal 여부와 무관하게 shouldReset이면 항상 실행(2026-07-15 갱신: 위치 앵커가
+        // 얼어붙은 세션이면 atGoal이 false여도 실행하도록 바뀌었다 — 위 shouldReset 산출 주석 참고).
         // 2026-07-14 임소리: detectorChargeKey/loadoutClaimedKey 리셋 여부가 "밸런스 판단 필요,
         // 미정"으로 남아있었는데(item-board-reset.md 4절), 실서버 테스트 중 "탐지기 로드아웃을
         // 골랐는데 적용이 안 된다"는 증상으로 드러남 — loadoutClaimedKey가 하루 1회 NX라 재도전
@@ -690,15 +765,26 @@ export const appRouter = t.router({
         // 응답까지 잃지 않도록 try/catch로 감싼다 — 실패를 그대로 던지면 이미 세운 기록의 응답이
         // 통째로 유실되고, 클라이언트가 재시도하면 score가 이미 같아 isNewRecord가 잘못 false로
         // 계산된다(move-run-finish-bugfixes.md 3절).
-        try {
-          await Promise.all([
-            redis.del(posKey),
-            redis.del(loadoutClaimedKey(mapId, date, ctx.userId)),
-            redis.del(detectorChargeKey(mapId, date, ctx.userId)),
-            seedMysteryBoxes(mapId, date, ctx.userId),
-          ]);
-        } catch (err) {
-          console.error(`run.finish: 위치 앵커/아이템 보드 정리 실패 (userId=${ctx.userId}, mapId=${mapId})`, err);
+        if (shouldReset) {
+          try {
+            await Promise.all([
+              redis.del(posKey),
+              redis.del(streakKey),
+              redis.del(loadoutClaimedKey(mapId, date, ctx.userId)),
+              redis.del(detectorChargeKey(mapId, date, ctx.userId)),
+              seedMysteryBoxes(mapId, date, ctx.userId),
+            ]);
+          } catch (err) {
+            console.error(`run.finish: 위치 앵커/아이템 보드 정리 실패 (userId=${ctx.userId}, mapId=${mapId})`, err);
+          }
+        }
+
+        if (!atGoal) {
+          // isStuckSession이었다면 리셋은 위에서 이미 실행됐으므로, 여기서 던져도 클라이언트가
+          // 새로고침하면 정상적으로 새 런을 시작할 수 있다 — 리더보드 기록만 없는 채로 실패
+          // 응답을 받는다(기존과 동일). isStuckSession이 아니었다면(streak=0) 리셋 없이 기존과
+          // 완전히 동일하게 거부만 되고, 세션은 그대로 살아있어 계속 걸어서 완주할 수 있다.
+          throw new TRPCError({ code: 'BAD_REQUEST', message: 'NOT_AT_GOAL' });
         }
         return { rank: (rank ?? 0) + 1, isNewRecord };
       }),

@@ -4,6 +4,7 @@ import {
   getKstDateString,
   itemBoardKey,
   itemSeededKey,
+  moveFailureStreakKey,
   parseTile,
   positionAnchorKey,
   tileMember,
@@ -432,6 +433,121 @@ describe('run.finish 골인 위치 검증 (리더보드 위조 방지 회귀 테
     await expect(caller.run.finish({ mapId: 'map-1', steps: 10, clearTimeMs: 5000 })).rejects.toMatchObject({
       message: 'NOT_AT_GOAL',
     });
+  });
+
+  it('move.arrive 연속 실패로 위치 앵커가 얼어붙은 세션은 NOT_AT_GOAL로 거부돼도 위치 앵커/아이템 보드/로드아웃/탐지기 충전이 리셋된다(2026-07-15 위치 앵커 영구 락 회귀, docs/design-docs/position-anchor-permanent-lock.md)', async () => {
+    const caller = createCaller({ userId: 'user-stuck-anchor' });
+    await caller.map.getState({ mapId: 'map-1' }); // 앵커: 시작 좌표(1,1)
+    await caller.item.claimLoadout({ mapId: 'map-1', loadoutId: 'trapDetector' });
+
+    // move.arrive 요청 유실로 앵커가 얼어붙으면 그 뒤 모든 이동이 연쇄로 계속 실패한다 —
+    // STUCK_SESSION_FAILURE_THRESHOLD(3)번 이상 실패시켜 "진짜로 막힌 세션"임을 재현한다.
+    for (let i = 0; i < 3; i++) {
+      await expect(caller.move.arrive({ mapId: 'map-1', x: 9, y: 9 })).rejects.toMatchObject({
+        message: 'INVALID_MOVE',
+      });
+    }
+
+    // 앵커는 시작 좌표에 그대로 있으므로 골인 검증에도 실패한다.
+    await expect(
+      caller.run.finish({ mapId: 'map-1', steps: 10, clearTimeMs: 5000 })
+    ).rejects.toMatchObject({ message: 'NOT_AT_GOAL' });
+
+    // 리셋 전이었다면 앵커가 시작 좌표에 남아 SET NX가 막혀 재초기화되지 않았겠지만, 이번
+    // 수정으로 앵커가 삭제됐으므로 다음 map.getState가 시작 좌표로 다시 초기화한다 — 시작
+    // 좌표와 인접하지 않은 좌표로 이동을 시도해 INVALID_MOVE가 나면 재초기화를 확인한 것이다.
+    await caller.map.getState({ mapId: 'map-1' });
+    await expect(caller.trap.trigger({ mapId: 'map-1', x: 5, y: 5 })).rejects.toMatchObject({
+      message: 'INVALID_MOVE',
+    });
+
+    // 아이템 보드도 재시딩되어 있어야 한다.
+    const date = getKstDateString();
+    const boardKey = itemBoardKey('map-1', date, 'user-stuck-anchor');
+    expect(Object.keys(await mocks.redis.hGetAll(boardKey))).toHaveLength(8);
+
+    // 로드아웃 클레임/탐지기 충전도 리셋되어 있어야 다시 받을 수 있다(리셋 전이었다면
+    // granted:false — 하루 1회 NX가 그대로 남아있었을 것).
+    const secondClaim = await caller.item.claimLoadout({ mapId: 'map-1', loadoutId: 'trapDetector' });
+    expect(secondClaim.granted).toBe(true);
+  });
+
+  it('실패 횟수가 임계값 미만이면(진짜로 얼어붙은 세션이 아니면) NOT_AT_GOAL로 거부돼도 리셋되지 않아 세션이 계속 살아있다 — 조기 호출/타이밍 경합에서 진행 상황을 잃지 않기 위한 안전장치', async () => {
+    const caller = createCaller({ userId: 'user-not-stuck-yet' });
+    await caller.map.getState({ mapId: 'map-1' }); // 앵커: 시작 좌표(1,1)
+
+    // STUCK_SESSION_FAILURE_THRESHOLD(3)보다 적게만 실패시킨다.
+    await expect(caller.move.arrive({ mapId: 'map-1', x: 9, y: 9 })).rejects.toMatchObject({
+      message: 'INVALID_MOVE',
+    });
+
+    await expect(
+      caller.run.finish({ mapId: 'map-1', steps: 10, clearTimeMs: 5000 })
+    ).rejects.toMatchObject({ message: 'NOT_AT_GOAL' });
+
+    // 리셋되지 않았으므로 앵커는 여전히 시작 좌표에 남아있다 — 인접 좌표 이동은 그대로 성공하고,
+    // 계속 걸어서 실제로 완주하면 정상적으로 리더보드에 반영될 수 있어야 한다(세션이 죽지 않음).
+    await walkAnchorToGoal(caller, 'map-1', MAP_1_START);
+    await expect(
+      caller.run.finish({ mapId: 'map-1', steps: 42, clearTimeMs: 9999 })
+    ).resolves.toMatchObject({ rank: 1 });
+  });
+
+  it('실패 스트릭이 임계값 이상 쌓여 있어도, 실제로 골인하면 리더보드 기록/리셋이 정상 동작하고 스트릭도 함께 지워진다 — atGoal이 스트릭과 무관하게 리더보드 기록을 독립적으로 결정함을 확인(/review 79 커버리지 보강)', async () => {
+    const caller = createCaller({ userId: 'user-recovered-then-goal' });
+    await caller.map.getState({ mapId: 'map-1' }); // 앵커: 시작 좌표(1,1)
+
+    // STUCK_SESSION_FAILURE_THRESHOLD(3) 이상으로 실패 스트릭을 쌓아둔다 — 앵커 자체는 시작
+    // 좌표에 그대로 남아있다(실패한 호출은 커밋되지 않으므로).
+    for (let i = 0; i < 3; i++) {
+      await expect(caller.move.arrive({ mapId: 'map-1', x: 9, y: 9 })).rejects.toMatchObject({
+        message: 'INVALID_MOVE',
+      });
+    }
+
+    // 스트릭이 임계값 이상인 상태에서, 실제로 걸어서 골인 지점까지 도달한다.
+    await walkAnchorToGoal(caller, 'map-1', MAP_1_START);
+
+    // atGoal이 true이므로 스트릭 값과 무관하게 리더보드에 정상 반영돼야 한다(shouldReset과
+    // isNewRecord/rank 계산이 서로 다른 조건임을 확인 — atGoal만으로 리더보드 기록 여부가 결정됨).
+    await expect(
+      caller.run.finish({ mapId: 'map-1', steps: 15, clearTimeMs: 7000 })
+    ).resolves.toMatchObject({ rank: 1, isNewRecord: true });
+
+    // 정상 골인 리셋에 스트릭 카운터도 포함되어 있어야, 재도전 시 이전 세션의 스트릭이
+    // 새 런까지 이어져 오탐으로 리셋되는 일이 없다.
+    const date = getKstDateString();
+    expect(await mocks.redis.get(moveFailureStreakKey('map-1', date, 'user-recovered-then-goal'))).toBeUndefined();
+  });
+
+  it('실패 후 정상 이동이 있으면 실패 스트릭이 리셋되어, 서로 무관한 시점에 흩어진 실패가 세션 내내 누적되지 않는다(임소리 리뷰 지적 — 스트릭 리셋 누락 회귀)', async () => {
+    const caller = createCaller({ userId: 'user-streak-reset' });
+    await caller.map.getState({ mapId: 'map-1' }); // 앵커: 시작 좌표(1,1)
+
+    // "실패 1회 → 정상 이동으로 자연 복구"를 STUCK_SESSION_FAILURE_THRESHOLD(3)번 반복한다.
+    // 스트릭이 리셋 없이 누적되는 버그가 있었다면 이 시점에 이미 임계값에 도달했겠지만, 매
+    // 성공한 이동마다 리셋되므로 실제로는 도달하지 않아야 한다.
+    for (let i = 0; i < 3; i++) {
+      await expect(caller.move.arrive({ mapId: 'map-1', x: 9, y: 9 })).rejects.toMatchObject({
+        message: 'INVALID_MOVE',
+      });
+      // 앵커와 같은 좌표로 "이동"(맨해튼 거리 0, assertAdjacent 통과) — 실제 앵커 위치는
+      // 바뀌지 않지만, 정상적으로 처리된 이동이 있었다는 뜻이라 스트릭이 리셋되어야 한다.
+      await caller.trap.trigger({ mapId: 'map-1', x: 1, y: 1 });
+    }
+
+    // 스트릭이 매번 제대로 리셋됐다면(고쳐진 코드) 아직 임계값 미만이라, 골인 전 run.finish는
+    // 리셋 없이 그냥 거부만 되고 세션은 계속 살아있어야 한다. 리셋이 안 됐다면(버그) 스트릭이
+    // 이미 3에 도달해 여기서 리셋이 발생하고, 아래 walkAnchorToGoal이 삭제된 앵커 때문에
+    // NO_SESSION으로 실패해 이 테스트 자체가 깨진다.
+    await expect(
+      caller.run.finish({ mapId: 'map-1', steps: 10, clearTimeMs: 5000 })
+    ).rejects.toMatchObject({ message: 'NOT_AT_GOAL' });
+
+    await walkAnchorToGoal(caller, 'map-1', MAP_1_START);
+    await expect(
+      caller.run.finish({ mapId: 'map-1', steps: 50, clearTimeMs: 12345 })
+    ).resolves.toMatchObject({ rank: 1 });
   });
 
   // 이 테스트가 막는 위협은 "골인 지점 근처에 한 번도 안 가고 임의 좌표에서 즉시 호출"뿐이다.

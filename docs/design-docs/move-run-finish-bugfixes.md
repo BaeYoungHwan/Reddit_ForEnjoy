@@ -212,4 +212,4 @@ private maybeFail(method: string): void {
 
 - `detectorChargeKey`/`loadoutClaimedKey` 리셋 여부 등 `item-board-reset.md`에 이미 열려있던 미결 항목 — 이번 발견들과 무관, 별도 논의 필요.
 - 클라이언트(`game.tsx`) 쪽 dispatcher 통합, "재도전" 버튼/흐름 자체의 부재 — 임소리 담당, 이 문서는 서버 API 계약까지만 책임진다.
-- 🟡 위치 커밋 지연으로 인한 `INVALID_MOVE` 오탐 가능성(2절에 이미 확인 필요로 기록) — PR #67 리뷰어도 동의만 표함, 추가 액션 없음.
+- ✅ 위치 커밋 지연으로 인한 `INVALID_MOVE` 오탐 가능성(2절에 이미 확인 필요로 기록) — 2026-07-15 실서버에서 실제로 재현됨(임소리 리포트, 다른 팀원들도 동일 증상). 원인 분석과 수정은 `docs/design-docs/position-anchor-permanent-lock.md` 참고.
