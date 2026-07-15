@@ -1904,15 +1904,15 @@ class MazeScene extends Phaser.Scene {
       // 낙관적 이동(화면이 항상 서버보다 앞서있는 설계)이 stoppedEarly로 인해 실제 서버 위치와
       // 어긋났을 수 있다 — 화면을 서버의 진짜 최종 위치로 사후 보정한다.
       //
-      // /review(다른 세션) 지적: resolve()는 대기 중이던 각 웨이포인트의 이어지는 코드(리스폰이면
-      // applyRespawnTrap 포함)를 마이크로태스크로 예약만 할 뿐 즉시 실행하지 않는다 — 바로 다음
-      // 줄에서 reconcilePositionWithServer를 곧장 부르면, 그 마이크로태스크들이 실행되기도 전에
-      // (아직 리스폰이 반영 안 된) 화면 위치를 먼저 비교해버려 정식 리스폰 이펙트보다 먼저 조용히
-      // 스냅되는 논리적 중복이 생긴다. queueMicrotask로 한 틱 미뤄서, 위 forEach가 예약한 웨이포인트
-      // 콜백들이 전부 실행(리스폰이면 applyRespawnTrap까지 완료)된 뒤에 비교하도록 한다 — 그러면
-      // 정상 케이스에선 이미 위치가 일치해 조용히 아무 일도 안 하고, 진짜 어긋난 경우(응답 유실 등
-      // 드문 케이스)만 실제로 보정한다.
-      queueMicrotask(() => this.reconcilePositionWithServer(output.finalPosition));
+      // /review(다른 세션) 지적, 2차: resolve()부터 실제 이펙트 적용(resolveTrapAndItem의
+      // applyRespawnTrap() 등)까지는 reportArrival이 반환하는 프라미스 → fetchArrival의 await →
+      // resolveTrapAndItem의 await, 총 2단계 async 경계(마이크로태스크 2틱)를 거친다 — 처음엔
+      // queueMicrotask로 1틱만 미뤘었는데, 그러면 이 체인의 2번째 hop보다 먼저 실행될 여지가
+      // 남는다(1차 리뷰 지적은 이 부분을 놓침). 마이크로태스크 개수를 세는 대신, 매크로태스크로
+      // 미루면 언어 스펙상 "현재 대기 중인 모든 마이크로태스크가 완전히 소진된 뒤에만" 실행되는
+      // 게 보장되므로 hop 수와 무관하게 확실하다 — this.time.delayedCall(0, ...)으로 다음 프레임
+      // 틱까지 미룬다.
+      this.time.delayedCall(0, () => this.reconcilePositionWithServer(output.finalPosition));
     } catch (err) {
       console.error('move.arriveBatch 실패(실서버 환경, 재시도 소진) — 이번 배치는 전부 판정 실패로 처리', err);
       resolvers.forEach((resolver) => resolver.resolve({ trap: { hit: false }, item: { picked: false } }));
