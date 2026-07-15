@@ -395,9 +395,13 @@ export const appRouter = t.router({
         const boardKey = trapBoardKey(mapId, date);
         const field = tileMember({ x, y });
 
+        const streakKey = moveFailureStreakKey(mapId, date, ctx.userId);
         const [last, raw] = await Promise.all([readPositionAnchor(posKey), redis.hGet(boardKey, field)]);
-        await assertAdjacentTracked(moveFailureStreakKey(mapId, date, ctx.userId), last, { x, y });
-        await commitPosition(posKey, x, y);
+        await assertAdjacentTracked(streakKey, last, { x, y });
+        // 성공한 이동은 실패 스트릭을 리셋한다 — 안 지우면 "연속 실패"가 아니라 "세션 내 누적
+        // 실패"가 되어, 서로 무관한 시점에 자연 복구된 실패가 여러 번 쌓여 임계값을 넘으면
+        // 정상 진행 중인 세션도 run.finish에서 오탐으로 리셋될 수 있다(/review 79 지적).
+        await Promise.all([commitPosition(posKey, x, y), redis.del(streakKey)]);
 
         if (!raw) {
           return { hit: false as const };
@@ -440,9 +444,11 @@ export const appRouter = t.router({
         const boardKey = itemBoardKey(mapId, date, ctx.userId);
         const field = tileMember({ x, y });
 
+        const streakKey = moveFailureStreakKey(mapId, date, ctx.userId);
         const [last, raw] = await Promise.all([readPositionAnchor(posKey), redis.hGet(boardKey, field)]);
-        await assertAdjacentTracked(moveFailureStreakKey(mapId, date, ctx.userId), last, { x, y });
-        await commitPosition(posKey, x, y);
+        await assertAdjacentTracked(streakKey, last, { x, y });
+        // 성공한 이동은 실패 스트릭을 리셋한다 — 자세한 이유는 trap.trigger와 동일(/review 79 지적).
+        await Promise.all([commitPosition(posKey, x, y), redis.del(streakKey)]);
 
         if (!raw) {
           return { picked: false as const };
@@ -572,7 +578,8 @@ export const appRouter = t.router({
         ]);
         // 오라클 방지 — 커밋 여부와 무관하게 앵커 검증은 여기서 끝난다. 실패 시 카운터를 남겨
         // run.finish가 "진짜로 얼어붙은 세션"을 구분할 수 있게 한다(moveFailureStreakKey).
-        await assertAdjacentTracked(moveFailureStreakKey(mapId, date, ctx.userId), last, { x, y });
+        const streakKey = moveFailureStreakKey(mapId, date, ctx.userId);
+        await assertAdjacentTracked(streakKey, last, { x, y });
 
         let trapType: TrapType | undefined;
         let trapInstallerId: string | undefined;
@@ -626,10 +633,13 @@ export const appRouter = t.router({
         const needsDetectorCharge = item.picked && item.outcome === 'item' && item.type === 'detector';
 
         // RT3: 위치 커밋은 이 시점에 단 1회만 — 목적지를 미리 정해서 쓰므로 이중쓰기가 없다.
+        // 성공한 이동이므로 실패 스트릭도 함께 리셋한다(/review 79 지적 — 안 지우면 세션 내
+        // 누적 실패가 되어 정상 진행 중인 세션도 run.finish에서 오탐으로 리셋될 수 있음).
         const destination = needsRespawn ? getMapStartPosition(mapId) : { x, y };
         await Promise.all([
           commitPosition(posKey, destination.x, destination.y),
           needsDetectorCharge ? redis.incrBy(detectorChargeKey(mapId, date, ctx.userId), 1) : Promise.resolve(),
+          redis.del(streakKey),
         ]);
 
         return { trap, item };
