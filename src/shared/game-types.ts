@@ -22,9 +22,6 @@ export type LeaderboardEntry = {
 export type MapStateInput = { mapId: string };
 export type MapStateOutput = {
   date: string;
-  // 새로고침/재접속 시 클라이언트가 실제 서버 위치로 캐릭터를 복원하는 데 쓴다 — 이게 없으면
-  // 클라이언트는 항상 시작 좌표로 가정해, 진행 중이던 세션에서 새로고침하면 위치가 어긋난다.
-  position: Position;
   footprints: Position[];
   myTraps: TrapInstance[];
   // 미스터리 박스: 먹기 전엔 아이템/함정 여부조차 알 수 없으므로 좌표만 내려주고
