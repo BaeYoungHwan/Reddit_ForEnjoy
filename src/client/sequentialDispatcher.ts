@@ -11,12 +11,26 @@
  */
 export class SequentialDispatcher<T> {
   private tail: Promise<void> = Promise.resolve();
+  private pending = 0;
+
+  /** 아직 settle되지 않은(enqueue됐지만 완료 안 된) 작업 개수 — 호출자가 백프레셔를 걸 때 참고. */
+  get pendingCount(): number {
+    return this.pending;
+  }
 
   enqueue(task: () => Promise<T>): Promise<T> {
+    this.pending++;
     const result = this.tail.then(task);
+    // pending 감소를 기존 tail 갱신 체인(이미 성공/실패 양쪽 다 처리돼 있음)에 얹는다 — result에
+    // 별도로 .finally()를 붙이면 result가 reject할 때 그 finally 체인 자체가 또 하나의 미처리
+    // Promise rejection이 돼버린다(테스트에서 실제로 unhandled rejection으로 확인됨).
     this.tail = result.then(
-      () => undefined,
-      () => undefined
+      () => {
+        this.pending--;
+      },
+      () => {
+        this.pending--;
+      }
     );
     return result;
   }

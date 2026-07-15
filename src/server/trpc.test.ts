@@ -1371,6 +1371,36 @@ describe('move.arrive 통합 API (trap.trigger + item.pickup 통합, docs/design
   });
 });
 
+describe('move.resync (2026-07-15 원호 QA 후속, docs/wbs.md 95행 — 클라이언트 위치 재동기화용 조회)', () => {
+  it('map.getState 없이 호출하면 NO_SESSION 오류(readPositionAnchor 재사용 확인)', async () => {
+    const caller = createCaller({ userId: 'user-resync-a' });
+    await expect(caller.move.resync({ mapId: 'map-1' })).rejects.toMatchObject({
+      message: 'NO_SESSION',
+    });
+  });
+
+  it('여러 번 이동한 뒤 실제로 커밋된 위치 앵커를 그대로 반환한다', async () => {
+    const caller = createCaller({ userId: 'user-resync-b' });
+    await caller.map.getState({ mapId: 'map-1' });
+
+    const target = { x: 1, y: 3 };
+    await walkAnchorTo(caller, 'map-1', MAP_1_START, target);
+
+    await expect(caller.move.resync({ mapId: 'map-1' })).resolves.toEqual(target);
+  });
+
+  it('move.arrive가 INVALID_MOVE로 실패해도 앵커 자체는 안 바뀌므로 resync는 실패 이전 위치를 그대로 반환한다', async () => {
+    const caller = createCaller({ userId: 'user-resync-c' });
+    await caller.map.getState({ mapId: 'map-1' }); // 앵커: MAP_1_START
+
+    await expect(caller.move.arrive({ mapId: 'map-1', x: 9, y: 9 })).rejects.toMatchObject({
+      message: 'INVALID_MOVE',
+    });
+
+    await expect(caller.move.resync({ mapId: 'map-1' })).resolves.toEqual(MAP_1_START);
+  });
+});
+
 describe('leaderboard.get username 매핑', () => {
   it('reddit.getUserById로 조회된 username을 entry에 채운다', async () => {
     mocks.users.set('user-g', { username: 'maze-runner' });

@@ -111,4 +111,59 @@ describe('SequentialDispatcher', () => {
       expect(idleResolved).toBe(true); // 여전히 true — 새 작업이 idle을 되돌리지 않음
     });
   });
+
+  // 2026-07-15(docs/wbs.md 95행, 원호 QA 후속) 회귀 테스트 — game.tsx의 tryMove가
+  // MAX_INFLIGHT_ARRIVALS 백프레셔 가드를 걸 때 이 카운터를 참고한다. enqueue된 작업이 아직
+  // settle되지 않은 개수를 정확히 추적해야 가드가 의미를 갖는다.
+  describe('pendingCount', () => {
+    it('아무것도 enqueue하지 않았으면 0이다', () => {
+      const dispatcher = new SequentialDispatcher<string>();
+      expect(dispatcher.pendingCount).toBe(0);
+    });
+
+    it('enqueue 시 즉시 증가하고, 성공적으로 settle되면 감소한다', async () => {
+      const dispatcher = new SequentialDispatcher<string>();
+      const pending = deferred<string>();
+      const task = dispatcher.enqueue(() => pending.promise);
+
+      expect(dispatcher.pendingCount).toBe(1);
+
+      pending.resolve('done');
+      await task;
+      expect(dispatcher.pendingCount).toBe(0);
+    });
+
+    it('실패로 settle돼도 감소한다(큐는 안 멈추지만 카운트는 정확해야 함)', async () => {
+      const dispatcher = new SequentialDispatcher<string>();
+      const pending = deferred<string>();
+      const task = dispatcher.enqueue(() => pending.promise);
+
+      pending.reject(new Error('boom'));
+      await expect(task).rejects.toThrow('boom');
+      expect(dispatcher.pendingCount).toBe(0);
+    });
+
+    it('여러 개를 연달아 enqueue하면 아직 시작 안 한 작업도 카운트에 포함된다(직렬화 대기 중이라도)', async () => {
+      const dispatcher = new SequentialDispatcher<string>();
+      const first = deferred<string>();
+      const second = deferred<string>();
+      const third = deferred<string>();
+
+      const t1 = dispatcher.enqueue(() => first.promise);
+      const t2 = dispatcher.enqueue(() => second.promise);
+      const t3 = dispatcher.enqueue(() => third.promise);
+
+      expect(dispatcher.pendingCount).toBe(3);
+
+      first.resolve('a');
+      await t1;
+      expect(dispatcher.pendingCount).toBe(2); // second는 아직 실행 시작도 안 했지만 카운트엔 남아있음
+
+      second.resolve('b');
+      await t2;
+      third.resolve('c');
+      await t3;
+      expect(dispatcher.pendingCount).toBe(0);
+    });
+  });
 });

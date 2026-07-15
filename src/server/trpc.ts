@@ -644,6 +644,17 @@ export const appRouter = t.router({
 
         return { trap, item };
       }),
+
+    // move.arrive 실패(INVALID_MOVE, 네트워크 장애 등) 후 클라이언트가 낙관적으로 앞서간 좌표와
+    // 서버 앵커가 어긋났을 때, 진짜 위치로 재동기화하기 위한 읽기 전용 조회. 실패가 한 번이라도
+    // 나면 그 뒤 모든 이동이 계속 INVALID_MOVE로 연쇄 실패하던 문제(docs/design-docs/
+    // position-anchor-permanent-lock.md 원인 체인)를 클라이언트가 이 응답으로 즉시 복구하도록
+    // 한다 — 새 로직 없이 기존 readPositionAnchor를 그대로 재사용.
+    resync: protectedProcedure.input(mapIdSchema).query(async ({ ctx, input }) => {
+      const date = getKstDateString();
+      const posKey = positionAnchorKey(input.mapId, date, ctx.userId);
+      return await readPositionAnchor(posKey);
+    }),
   }),
 
   run: t.router({
