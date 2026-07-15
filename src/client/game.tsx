@@ -1903,7 +1903,16 @@ class MazeScene extends Phaser.Scene {
       });
       // 낙관적 이동(화면이 항상 서버보다 앞서있는 설계)이 stoppedEarly로 인해 실제 서버 위치와
       // 어긋났을 수 있다 — 화면을 서버의 진짜 최종 위치로 사후 보정한다.
-      this.reconcilePositionWithServer(output.finalPosition);
+      //
+      // /review(다른 세션) 지적: resolve()는 대기 중이던 각 웨이포인트의 이어지는 코드(리스폰이면
+      // applyRespawnTrap 포함)를 마이크로태스크로 예약만 할 뿐 즉시 실행하지 않는다 — 바로 다음
+      // 줄에서 reconcilePositionWithServer를 곧장 부르면, 그 마이크로태스크들이 실행되기도 전에
+      // (아직 리스폰이 반영 안 된) 화면 위치를 먼저 비교해버려 정식 리스폰 이펙트보다 먼저 조용히
+      // 스냅되는 논리적 중복이 생긴다. queueMicrotask로 한 틱 미뤄서, 위 forEach가 예약한 웨이포인트
+      // 콜백들이 전부 실행(리스폰이면 applyRespawnTrap까지 완료)된 뒤에 비교하도록 한다 — 그러면
+      // 정상 케이스에선 이미 위치가 일치해 조용히 아무 일도 안 하고, 진짜 어긋난 경우(응답 유실 등
+      // 드문 케이스)만 실제로 보정한다.
+      queueMicrotask(() => this.reconcilePositionWithServer(output.finalPosition));
     } catch (err) {
       console.error('move.arriveBatch 실패(실서버 환경, 재시도 소진) — 이번 배치는 전부 판정 실패로 처리', err);
       resolvers.forEach((resolver) => resolver.resolve({ trap: { hit: false }, item: { picked: false } }));
@@ -1931,6 +1940,10 @@ class MazeScene extends Phaser.Scene {
   // 안전망일 뿐이다 — 실제로 값이 다를 때만(예: 응답만 유실된 뒤 재시도로 어긋난 극히 드문
   // 케이스) 화면을 튀겨서라도 서버와 다시 맞춘다.
   private reconcilePositionWithServer(finalPosition: Position) {
+    // /review(다른 세션) 지적: 이 함수는 reportRunFinish(골인 후, hasFinished가 이미 true인
+    // 시점)에서도 호출된다 — resolveTrapAndItem의 기존 hasFinished 가드와 동일한 원칙으로,
+    // 골인 화면이 뜬 뒤에는 화면/안개를 더 이상 건드리지 않는다.
+    if (this.hasFinished) return;
     if (this.playerGridX === finalPosition.x && this.playerGridY === finalPosition.y) return;
 
     console.warn(
