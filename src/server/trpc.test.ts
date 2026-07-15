@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  detectorChargeKey,
   getKstDateString,
   itemBoardKey,
   itemSeededKey,
@@ -208,10 +209,14 @@ const mocks = vi.hoisted(() => {
           queued.push(() => undefined);
           return Promise.resolve(tx);
         },
-        exec: async (): Promise<unknown[] | null> => {
+        exec: async (): Promise<unknown[]> => {
           // 체크~적용 사이에 await가 없어야 다른 트랜잭션의 exec()이 끼어들 수 없다(원자성).
+          // 2026-07-14 임소리(실서버 아이템 미픽업 조사): 실제 @devvit/redis의 TxClient.exec()는
+          // WATCH 충돌 시에도 null이 아니라 빈 배열을 반환한다(RedisClient.js 실측 확인) — 이
+          // 목이 원래 null을 반환하도록 돼 있어서, 그 계약 차이를 가정한 프로덕션 코드의 버그가
+          // 단위테스트로는 안 잡히고 있었다. 실제 계약에 맞게 빈 배열을 반환하도록 수정.
           for (const [key, version] of snapshot) {
-            if (this.version(key) !== version) return null;
+            if (this.version(key) !== version) return [];
           }
           return queued.map((op) => op());
         },
@@ -588,6 +593,32 @@ describe('run.finish 아이템 보드 리셋 (docs/design-docs/item-board-reset.
     ]);
 
     expect(Object.keys(await mocks.redis.hGetAll(boardKey))).toHaveLength(8);
+  });
+
+  it('run.finish가 탐지기 로드아웃 클레임/충전도 함께 리셋해, 재도전마다 로드아웃을 다시 받을 수 있다(2026-07-14 실서버 회귀 — 로드아웃이 손전등/쉴드와 달리 두 번째 런부터 안 먹히던 문제)', async () => {
+    const caller = createCaller({ userId: 'user-loadout-reset' });
+    await caller.map.getState({ mapId: 'map-1' });
+
+    const first = await caller.item.claimLoadout({ mapId: 'map-1', loadoutId: 'trapDetector' });
+    expect(first.granted).toBe(true);
+
+    // 같은 런 안에서 재클레임은 여전히 막혀야 한다(로드아웃은 한 번만 지급) — run.finish 없이는
+    // NX가 그대로 유지되는지 먼저 확인.
+    const sameRunRetry = await caller.item.claimLoadout({ mapId: 'map-1', loadoutId: 'trapDetector' });
+    expect(sameRunRetry.granted).toBe(false);
+
+    // run.finish의 골인 위치 검증(2026-07-14 추가, PR #72) 회귀 대응 — 앵커를 골인 인접까지 옮겨야 한다.
+    await walkAnchorToGoalFromCurrent(caller, 'map-1', 'user-loadout-reset');
+    await caller.run.finish({ mapId: 'map-1', steps: 10, clearTimeMs: 5000 });
+
+    // 재도전(다음 런)에서는 다시 클레임할 수 있어야 한다 — 손전등/쉴드처럼 매 런마다 먹혀야 함.
+    const secondRun = await caller.item.claimLoadout({ mapId: 'map-1', loadoutId: 'trapDetector' });
+    expect(secondRun.granted).toBe(true);
+
+    // 충전도 리셋됐어야 한다 — 지우지 않고 클레임만 리셋했다면 여기서 '2'(누적)가 나왔을
+    // 것이다(런마다 무한정 충전이 쌓이는 걸 막기 위해 반드시 둘 다 같이 지운다).
+    const date = getKstDateString();
+    expect(await mocks.redis.get(detectorChargeKey('map-1', date, 'user-loadout-reset'))).toBe('1');
   });
 });
 
@@ -1103,18 +1134,20 @@ describe('move.arrive 통합 API (trap.trigger + item.pickup 통합, docs/design
     });
   });
 
-  it('아이템만 있는 칸은 rollMysteryOutcome 결과를 item에 담아 반환한다(트랩 필드는 항상 false)', async () => {
+  it('아이템만 있는 칸은 스폰 시점에 미리 정해진 결과를 item에 담아 반환한다(트랩 필드는 항상 false)', async () => {
     const caller = createCaller({ userId: 'user-move-g' });
+    // 2026-07-14(배영환님 승인 하에 수정): 결과는 픽업이 아니라 스폰(map.getState의 시딩)
+    // 시점에 정해지므로, Math.random은 move.arrive가 아니라 map.getState를 감싸야 한다.
+    const seedSpy = vi.spyOn(Math, 'random').mockReturnValue(0.5 / 8); // 결과를 flashlight로 고정
     const { mysteryBoxes } = await caller.map.getState({ mapId: 'map-1' });
+    seedSpy.mockRestore();
     const target = mysteryBoxes[0]!;
     // trap.trigger는 아이템 보드를 안 건드리므로, target까지 미리 밟아둬도(walkAnchorTo) 이
     // 자리의 미스터리 박스는 그대로 남는다 — 이후 같은 좌표로 move.arrive를 다시 호출해도
     // 앵커 거리는 0이라 assertAdjacent를 통과한다(manhattanDistance > 1일 때만 거부).
     await walkAnchorTo(caller, 'map-1', MAP_1_START, target);
 
-    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.5 / 8); // 결과를 flashlight로 고정
     const result = await caller.move.arrive({ mapId: 'map-1', x: target.x, y: target.y });
-    randomSpy.mockRestore();
 
     expect(result).toEqual({
       trap: { hit: false },
@@ -1124,7 +1157,11 @@ describe('move.arrive 통합 API (trap.trigger + item.pickup 통합, docs/design
 
   it('한 칸에 함정(respawn)과 미스터리 박스(detector)가 동시에 있으면 위치 앵커 리셋과 탐지기 충전이 중복 없이 함께 처리된다', async () => {
     const picker = createCaller({ userId: 'user-move-h' });
+    // 2026-07-14(배영환님 승인 하에 수정): 결과는 픽업이 아니라 스폰(map.getState의 시딩)
+    // 시점에 정해지므로, Math.random은 move.arrive가 아니라 map.getState를 감싸야 한다.
+    const seedSpy = vi.spyOn(Math, 'random').mockReturnValue(2.5 / 8); // 결과를 detector로 고정
     const { mysteryBoxes } = await picker.map.getState({ mapId: 'map-1' }); // 앵커: (1,1)
+    seedSpy.mockRestore();
     const target = mysteryBoxes[0]!;
 
     const installer = createCaller({ userId: 'user-move-h-installer' });
@@ -1137,9 +1174,7 @@ describe('move.arrive 통합 API (trap.trigger + item.pickup 통합, docs/design
       await picker.trap.trigger({ mapId: 'map-1', x: step.x, y: step.y });
     }
 
-    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(2.5 / 8); // 결과를 detector로 고정
     const result = await picker.move.arrive({ mapId: 'map-1', x: target.x, y: target.y });
-    randomSpy.mockRestore();
 
     expect(result).toEqual({
       trap: { hit: true, type: 'respawn' },
@@ -1159,6 +1194,30 @@ describe('move.arrive 통합 API (trap.trigger + item.pickup 통합, docs/design
 
     // 탐지기 충전도 함께 기록됐는지 확인(NO_CHARGE로 거부되지 않고 1회 성공).
     await picker.item.useDetector({ mapId: 'map-1' });
+  });
+
+  it('탐지기가 미리 알려준 스폰형 함정 종류가 move.arrive로 실제 밟았을 때와 일치한다(2026-07-14 재추첨 버그 회귀 — 배영환님 승인 하에 수정)', async () => {
+    const picker = createCaller({ userId: 'user-move-detector-consistency' });
+    const seedSpy = vi.spyOn(Math, 'random').mockReturnValue(6.5 / 8); // 결과를 blind 함정으로 고정
+    const { mysteryBoxes } = await picker.map.getState({ mapId: 'map-1' });
+    seedSpy.mockRestore();
+    const target = mysteryBoxes[0]!;
+
+    // target 직전 칸까지만 trap.trigger로 이동(아이템 보드는 안 건드림) — 반경 내 도달만
+    // 되면 탐지기가 미리 알려줄 수 있다.
+    for (const step of computeWalkPath(MAP_1_START, target).slice(0, -1)) {
+      await picker.trap.trigger({ mapId: 'map-1', x: step.x, y: step.y });
+    }
+
+    await picker.item.claimLoadout({ mapId: 'map-1', loadoutId: 'trapDetector' });
+    const { revealedTraps } = await picker.item.useDetector({ mapId: 'map-1' });
+    const revealed = revealedTraps.find((t) => t.x === target.x && t.y === target.y);
+    expect(revealed?.type).toBe('blind');
+
+    // move.arrive가 픽업 시점에 다시 굴렸다면(수정 전 버그) 여기서 blind가 아닌 다른 결과가
+    // 나올 수 있었다 — 탐지기가 알려준 값과 정확히 같아야 한다.
+    const result = await picker.move.arrive({ mapId: 'map-1', x: target.x, y: target.y });
+    expect(result.item).toEqual({ picked: true, outcome: 'trap', type: 'blind' });
   });
 
   it('기존 trap.trigger/item.pickup과 보드를 공유한다 — move.arrive로 소모된 함정은 trap.trigger에서도 재발동하지 않는다', async () => {
