@@ -24,6 +24,7 @@ import {
   DATA_SAFETY_TTL_SECONDS,
   DETECTOR_REVEAL_RADIUS,
   FOOTPRINT_CAP_PER_MAP,
+  MOVE_ARRIVE_BATCH_MAX_WAYPOINTS,
   PER_TYPE_TRAP_CAP,
   POSITION_ANCHOR_TTL_SECONDS,
   STUCK_SESSION_FAILURE_THRESHOLD,
@@ -31,7 +32,7 @@ import {
 } from './core/gameConfig';
 import { getMapExitPosition, getMapStartPosition } from './core/maps';
 import { getMysteryBoxSpawns, rollMysteryOutcome } from './core/items';
-import type { ItemType, Position, TrapInstance, TrapType } from '../shared/game-types';
+import type { ItemType, MoveArriveOutput, Position, TrapInstance, TrapType } from '../shared/game-types';
 
 type TrpcContext = { userId: string | undefined };
 
@@ -172,6 +173,78 @@ async function revealNearbyTraps(
     .map(({ x, y, rolled }) => ({ x, y, type: rolled.type as TrapType }));
 
   return [...installedTraps, ...spawnedTraps];
+}
+
+// move.arrive(단일 칸)/arriveBatch(여러 칸) 공용 — 한 칸의 함정/아이템 판정·소모만 담당하고
+// 위치 커밋/스트릭 처리는 호출자에게 맡긴다(배치 처리 시 그 두 가지는 배치 전체에서 단 1회만
+// 실행해야 하므로 이 함수 안에 넣으면 안 된다). 순수하게 "이 칸에 뭐가 있었는지 확인하고
+// 소모까지 끝내는 것"까지만 책임진다.
+async function resolveArrivalTile(
+  mapId: string,
+  date: string,
+  userId: string,
+  tile: { x: number; y: number }
+): Promise<{
+  trap: { hit: boolean; type?: TrapType };
+  item:
+    | { picked: false }
+    | { picked: true; outcome: 'item'; type: ItemType }
+    | { picked: true; outcome: 'trap'; type: TrapType };
+  needsRespawn: boolean;
+  needsDetectorCharge: boolean;
+}> {
+  const trapBoard = trapBoardKey(mapId, date);
+  const itemBoard = itemBoardKey(mapId, date, userId);
+  const field = tileMember(tile);
+
+  const [rawTrap, rawItem] = await Promise.all([redis.hGet(trapBoard, field), redis.hGet(itemBoard, field)]);
+
+  let trapType: TrapType | undefined;
+  let trapInstallerId: string | undefined;
+  if (rawTrap) {
+    const parsed = JSON.parse(rawTrap) as { type: TrapType; installerId: string };
+    if (parsed.installerId !== userId) {
+      // 설치자 본인은 자기 함정을 회피한다 — 소모되지 않음(trap.trigger와 동일 규칙).
+      trapType = parsed.type;
+      trapInstallerId = parsed.installerId;
+    }
+  }
+  // 결과는 픽업 시점에 굴리지 않는다 — 스폰(시딩) 시점에 seedMysteryBoxes가 이미 굴려서
+  // 저장해둔 값을 그대로 읽는다(재추첨 방지, docs/wbs.md 참고). rawItem은 hDel 이전에 이미
+  // 읽어둔 값이라 삭제 여부와 무관하게 그대로 유효하다.
+  const rolled = rawItem
+    ? (JSON.parse(rawItem) as { outcome: 'item'; type: ItemType } | { outcome: 'trap'; type: TrapType })
+    : null;
+
+  // 소모할 게 있는 것만 개별 실행. Promise.allSettled로 서로의 실패를 격리한다 — Promise.all로
+  // 묶으면 한쪽이 일시 실패했을 때 이미 성공한 다른 쪽 hDel(Redis에는 이미 반영됨)의 결과를
+  // 응답으로 돌려주지 못하고 통째로 에러가 돼, 소모된 자원이 유실된 것처럼 보인다.
+  const [trapBoardResult, , itemResult] = await Promise.allSettled([
+    trapType ? redis.hDel(trapBoard, [field]) : Promise.resolve(0),
+    // trapInstallerKey는 설치자 UI(myTraps) 표시용 부기일 뿐이라 게이팅에 쓰지 않는다.
+    trapType ? redis.hDel(trapInstallerKey(mapId, date, trapInstallerId!), [field]) : Promise.resolve(0),
+    rawItem ? redis.hDel(itemBoard, [field]) : Promise.resolve(0),
+  ]);
+
+  // 게이팅: hGet 스냅샷이 아니라 hDel의 실제 반환값(fulfilled && count>0)으로만 소모 성사를
+  // 인정한다 — 같은 함정 타일에 두 유저가 거의 동시에 접근해도 한쪽만 hit:true를 받게 된다.
+  const trapDeleted = trapBoardResult.status === 'fulfilled' ? trapBoardResult.value : 0;
+  const itemDeleted = itemResult.status === 'fulfilled' ? itemResult.value : 0;
+
+  const trap =
+    trapType && trapDeleted > 0 ? ({ hit: true, type: trapType } as const) : ({ hit: false } as const);
+  const item =
+    rawItem && itemDeleted > 0 && rolled
+      ? rolled.outcome === 'trap'
+        ? ({ picked: true, outcome: 'trap', type: rolled.type } as const)
+        : ({ picked: true, outcome: 'item', type: rolled.type } as const)
+      : ({ picked: false } as const);
+
+  const needsRespawn =
+    (trap.hit && trap.type === 'respawn') || (item.picked && item.outcome === 'trap' && item.type === 'respawn');
+  const needsDetectorCharge = item.picked && item.outcome === 'item' && item.type === 'detector';
+
+  return { trap, item, needsRespawn, needsDetectorCharge };
 }
 
 // 해당 맵/날짜/유저의 미스터리 박스 보드를 채운다. 유저별로 독립된 보드라 한 유저의 픽업이
@@ -564,85 +637,111 @@ export const appRouter = t.router({
         const { mapId, x, y } = input;
         const date = getKstDateString();
         const posKey = positionAnchorKey(mapId, date, ctx.userId);
-        const trapBoard = trapBoardKey(mapId, date);
-        const itemBoard = itemBoardKey(mapId, date, ctx.userId);
-        const field = tileMember({ x, y });
+        const streakKey = moveFailureStreakKey(mapId, date, ctx.userId);
 
-        // RT1: 위치 앵커 + 함정보드 + 아이템보드 조회는 서로 의존관계가 없어 3방향 병렬. 위치는
-        // 아직 커밋하지 않는다 — 최종 목적지(그대로 vs respawn 시작 좌표)를 알기 전에 커밋하면
-        // respawn 타일마다 같은 키에 두 번 쓰는 낭비가 생긴다(docs/design-docs/move-run-finish-bugfixes.md 2절).
-        const [last, rawTrap, rawItem] = await Promise.all([
-          readPositionAnchor(posKey),
-          redis.hGet(trapBoard, field),
-          redis.hGet(itemBoard, field),
-        ]);
+        const last = await readPositionAnchor(posKey);
         // 오라클 방지 — 커밋 여부와 무관하게 앵커 검증은 여기서 끝난다. 실패 시 카운터를 남겨
         // run.finish가 "진짜로 얼어붙은 세션"을 구분할 수 있게 한다(moveFailureStreakKey).
-        const streakKey = moveFailureStreakKey(mapId, date, ctx.userId);
         await assertAdjacentTracked(streakKey, last, { x, y });
 
-        let trapType: TrapType | undefined;
-        let trapInstallerId: string | undefined;
-        if (rawTrap) {
-          const parsed = JSON.parse(rawTrap) as { type: TrapType; installerId: string };
-          if (parsed.installerId !== ctx.userId) {
-            // 설치자 본인은 자기 함정을 회피한다 — 소모되지 않음(trap.trigger와 동일 규칙).
-            trapType = parsed.type;
-            trapInstallerId = parsed.installerId;
-          }
-        }
-        // 2026-07-14 임소리(배영환님 승인 하에 수정, 실서버 조사): 결과는 더 이상 픽업 시점에
-        // 굴리지 않는다 — 스폰(시딩) 시점에 seedMysteryBoxes가 이미 굴려서 저장해둔 값을 그대로
-        // 읽는다(item.pickup과 동일한 패턴, 428행 참고). PR#70에서 item.pickup은 이 값을 읽도록
-        // 갱신됐지만 move.arrive는 갱신에서 빠져 있었다 — 함정 탐지기가 픽업 전에 미리 알려준
-        // 종류와 실제로 밟았을 때 나오는 종류가 달라지는(재추첨) 버그였다. rawItem은 hDel 이전에
-        // 이미 읽어둔 값이라 삭제 여부와 무관하게 그대로 유효하다.
-        const rolled = rawItem
-          ? (JSON.parse(rawItem) as { outcome: 'item'; type: ItemType } | { outcome: 'trap'; type: TrapType })
-          : null;
+        const result = await resolveArrivalTile(mapId, date, ctx.userId, { x, y });
 
-        // RT2(조건부): 소모할 게 있는 것만 개별 실행. Promise.allSettled로 서로의 실패를 격리한다 —
-        // Promise.all로 묶으면 한쪽이 일시 실패했을 때 이미 성공한 다른 쪽 hDel(Redis에는 이미 반영됨)의
-        // 결과를 응답으로 돌려주지 못하고 통째로 에러가 돼, 소모된 자원이 유실된 것처럼 보인다.
-        const [trapBoardResult, , itemResult] = await Promise.allSettled([
-          trapType ? redis.hDel(trapBoard, [field]) : Promise.resolve(0),
-          // trapInstallerKey는 설치자 UI(myTraps) 표시용 부기일 뿐이라 게이팅에 쓰지 않는다
-          // (trap.trigger와 동일 — 실패해도 DATA_SAFETY_TTL_SECONDS로 자연 소멸).
-          trapType ? redis.hDel(trapInstallerKey(mapId, date, trapInstallerId!), [field]) : Promise.resolve(0),
-          rawItem ? redis.hDel(itemBoard, [field]) : Promise.resolve(0),
-        ]);
-
-        // 게이팅: hGet 스냅샷이 아니라 hDel의 실제 반환값(fulfilled && count>0)으로만 소모 성사를
-        // 인정한다 — 이전엔 hGet에서 봤다는 사실만으로 hit:true를 반환해, 같은 함정 타일에 두 유저가
-        // 거의 동시에 접근하면 둘 다 hit:true를 받는 이중발동이 가능했다.
-        const trapDeleted = trapBoardResult.status === 'fulfilled' ? trapBoardResult.value : 0;
-        const itemDeleted = itemResult.status === 'fulfilled' ? itemResult.value : 0;
-
-        const trap =
-          trapType && trapDeleted > 0 ? ({ hit: true, type: trapType } as const) : ({ hit: false } as const);
-        const item =
-          rawItem && itemDeleted > 0 && rolled
-            ? rolled.outcome === 'trap'
-              ? ({ picked: true, outcome: 'trap', type: rolled.type } as const)
-              : ({ picked: true, outcome: 'item', type: rolled.type } as const)
-            : ({ picked: false } as const);
-
-        const needsRespawn =
-          (trap.hit && trap.type === 'respawn') ||
-          (item.picked && item.outcome === 'trap' && item.type === 'respawn');
-        const needsDetectorCharge = item.picked && item.outcome === 'item' && item.type === 'detector';
-
-        // RT3: 위치 커밋은 이 시점에 단 1회만 — 목적지를 미리 정해서 쓰므로 이중쓰기가 없다.
-        // 성공한 이동이므로 실패 스트릭도 함께 리셋한다(/review 79 지적 — 안 지우면 세션 내
-        // 누적 실패가 되어 정상 진행 중인 세션도 run.finish에서 오탐으로 리셋될 수 있음).
-        const destination = needsRespawn ? getMapStartPosition(mapId) : { x, y };
+        // 위치 커밋은 이 시점에 단 1회만 — 목적지를 미리 정해서 쓰므로 이중쓰기가 없다. 성공한
+        // 이동이므로 실패 스트릭도 함께 리셋한다(/review 79 지적 — 안 지우면 세션 내 누적 실패가
+        // 되어 정상 진행 중인 세션도 run.finish에서 오탐으로 리셋될 수 있음).
+        const destination = result.needsRespawn ? getMapStartPosition(mapId) : { x, y };
         await Promise.all([
           commitPosition(posKey, destination.x, destination.y),
-          needsDetectorCharge ? redis.incrBy(detectorChargeKey(mapId, date, ctx.userId), 1) : Promise.resolve(),
+          result.needsDetectorCharge
+            ? redis.incrBy(detectorChargeKey(mapId, date, ctx.userId), 1)
+            : Promise.resolve(),
           redis.del(streakKey),
         ]);
 
-        return { trap, item };
+        return { trap: result.trap, item: result.item };
+      }),
+
+    // 2026-07-15(픽업 지연 완화, docs/wbs.md): move.arrive는 이동 1칸당 서버 왕복 1회가 여전히
+    // 필요한데, 여러 칸을 빠르게 연속 이동하면 클라이언트가 이 요청을 순서대로 하나씩만 보내는
+    // 구조(오라클 방지 — 순서를 안 지키면 임의 좌표를 먼저 주장한 뒤 인접 검증만 통과시키는
+    // 공격이 가능해짐)라 왕복이 그대로 누적된다(N칸 = N회 왕복). arriveBatch는 여러 칸(웨이포인트)을
+    // 요청 1회로 받아 서버 내부에서 한 칸씩 순서대로 검증·판정한다 — 오라클 방지(한 칸씩만 검증)는
+    // 그대로 유지하면서 네트워크 왕복 횟수만 줄인다.
+    arriveBatch: protectedProcedure
+      .input(
+        z.object({
+          mapId: z.string().min(1),
+          waypoints: z.array(positionSchema).min(1).max(MOVE_ARRIVE_BATCH_MAX_WAYPOINTS),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { mapId, waypoints } = input;
+        const date = getKstDateString();
+        const posKey = positionAnchorKey(mapId, date, ctx.userId);
+        const streakKey = moveFailureStreakKey(mapId, date, ctx.userId);
+
+        let last = await readPositionAnchor(posKey);
+        const results: MoveArriveOutput[] = [];
+        let stoppedEarly = false;
+        // 인접성 검증 실패로 멈춘 것(진짜 실패)과 리스폰으로 멈춘 것(정상적인 게임 이벤트)은
+        // 반드시 구분해야 한다 — 리스폰까지 "실패"로 세면 정상 플레이에서도 스트릭이 계속
+        // 쌓여 run.finish의 "얼어붙은 세션" 오탐을 유발할 수 있다(/review 79에서 이미 겪은
+        // 종류의 문제, position-anchor-permanent-lock.md 3.3절 참고).
+        let hadInvalidMove = false;
+        // 카운터로 관리 — 배치 안에서 탐지기 아이템을 여러 번 주울 수 있으므로 boolean으로
+        // "있었는지 여부"만 기록하면 2회 이상 주웠을 때 충전이 1회분만 반영되는 버그가 된다.
+        let detectorChargesToAdd = 0;
+
+        // 웨이포인트를 반드시 순서대로 처리한다(Promise.all 병렬 불가) — 각 칸의 인접성 검증이
+        // "직전 웨이포인트가 실제로 유효했다"는 전제에 의존하기 때문이다. 하나라도 인접성
+        // 검증에 실패하거나 리스폰이 나오면 그 지점에서 즉시 멈춘다 — 리스폰이면 그 이후
+        // 웨이포인트는 "실제로는 그 위치에 도달하지 않은 것"이 되므로 처리할 이유가 없고,
+        // 인접성 실패는 클라이언트가 보낸 배열 구성 자체가 이미 어긋났다는 뜻이라 더 진행해도
+        // 의미가 없다.
+        for (const waypoint of waypoints) {
+          try {
+            assertAdjacent(last, waypoint);
+          } catch {
+            stoppedEarly = true;
+            hadInvalidMove = true;
+            break;
+          }
+
+          const tileResult = await resolveArrivalTile(mapId, date, ctx.userId, waypoint);
+          results.push({ trap: tileResult.trap, item: tileResult.item });
+          if (tileResult.needsDetectorCharge) detectorChargesToAdd += 1;
+
+          if (tileResult.needsRespawn) {
+            last = getMapStartPosition(mapId);
+            stoppedEarly = true;
+            break;
+          }
+          last = waypoint;
+        }
+
+        // 위치 커밋은 배치 전체에서 단 1회만 — 마지막으로 실제 도달한 좌표(또는 리스폰 시
+        // 시작 좌표) 기준. 인접성 실패가 한 번도 없었으면(전부 처리됐거나 리스폰으로 정상
+        // 중단됐으면) 스트릭을 리셋하고, 인접성 실패로 멈췄으면 move.arrive 단일 실패와 동일한
+        // 원칙으로 스트릭을 1 증가시킨다(웨이포인트별로 증가시키면 배치가 클수록 스트릭이
+        // 과도하게 누적되므로 배치 전체를 "실패 1회"로 취급).
+        await Promise.all([
+          commitPosition(posKey, last.x, last.y),
+          detectorChargesToAdd > 0
+            ? redis.incrBy(detectorChargeKey(mapId, date, ctx.userId), detectorChargesToAdd)
+            : Promise.resolve(),
+          hadInvalidMove
+            ? (async () => {
+                try {
+                  await redis.incrBy(streakKey, 1);
+                  await redis.expire(streakKey, POSITION_ANCHOR_TTL_SECONDS);
+                } catch (trackingErr) {
+                  console.error(`arriveBatch: 실패 스트릭 기록 실패 (streakKey=${streakKey})`, trackingErr);
+                }
+              })()
+            : redis.del(streakKey),
+        ]);
+
+        return { results, stoppedEarly, finalPosition: last };
       }),
   }),
 

@@ -18,6 +18,7 @@ import type {
   ItemPickupOutput,
   ItemType,
   ItemUseDetectorOutput,
+  MoveArriveBatchOutput,
   MoveArriveOutput,
   Position,
   RunFinishOutput,
@@ -371,6 +372,11 @@ const MOVE_ARRIVE_RETRY_WORST_CASE_MS =
   MOVE_ARRIVE_RETRY_ATTEMPTS * ASSUMED_WORST_CASE_RTT_MS +
   (MOVE_ARRIVE_RETRY_ATTEMPTS - 1) * MOVE_ARRIVE_RETRY_DELAY_MS;
 
+// move.arriveBatch로 한 번에 보낼 수 있는 최대 좌표 수 — 서버 상한(MOVE_ARRIVE_BATCH_MAX_WAYPOINTS,
+// gameConfig.ts, 40)보다 여유 있게 낮춰 잡는다. 이 상한에 도달하면 방향키를 계속 누르고 있어도
+// 그 시점에서 한 번 흘려보내고 새로 모으기 시작한다(끝없이 커지는 배치 방지).
+const CLIENT_ARRIVAL_BATCH_MAX_WAYPOINTS = 25;
+
 // 2026-07-15(/review pr#78 지적): reportRunFinish가 run.finish 호출 전 arrivalDispatcher가
 // 비워지길 기다리는데(whenIdle), 직전 move.arrive 요청이 네트워크 장애로 응답 자체가 영영
 // 안 오면 이 대기가 무한정 걸려 골인 화면은 뜨는데 순위 정보(revealRankInfo)가 영영 안 뜨는
@@ -663,6 +669,22 @@ class MazeScene extends Phaser.Scene {
   // 커밋을 1회만 하고 함정/아이템 판정을 한 응답에 함께 반환해 이동 1칸당 서버 왕복을 2회→1회로
   // 줄인다. 큐도 하나로 합쳐서 같은 이유(응답 순서 역전 시 위치 앵커 오판정 방지)로 계속 직렬화한다.
   private arrivalDispatcher = new SequentialDispatcher<MoveArriveOutput>();
+
+  // 2026-07-15(픽업 지연 완화, docs/wbs.md): 실서버에서는 위 arrivalDispatcher로 매 칸 개별
+  // 요청을 순차 전송하는 대신, 이동이 끊기는 시점(방향키 뗌/벽 충돌/골인/버퍼 상한)까지 좌표를
+  // 모아뒀다가 move.arriveBatch 요청 1회로 묶어 보낸다 — 오라클 방지(서버가 배치 내부에서도
+  // 한 칸씩 순서대로 검증)는 그대로 유지하면서 네트워크 왕복 횟수만 줄인다. 배치 요청 자체는
+  // 여전히 순서대로만 나가야 하므로(연속된 두 배치가 응답 순서 역전되면 안 됨) 별도 큐로
+  // 직렬화 — arrivalDispatcher는 로컬 프리뷰(IS_LOCAL_PREVIEW, 배치 없이 매 칸 즉시 처리)
+  // 전용으로 남겨둔다.
+  private arrivalBatchDispatcher = new SequentialDispatcher<MoveArriveBatchOutput>();
+  // 아직 서버로 안 보내고 모아두고 있는 좌표들 + 각 좌표의 fetchArrival 호출자에게 결과를
+  // 돌려줄 resolve/reject. flushArrivalBatch가 이 두 배열을 함께 소비한다(인덱스가 대응).
+  private pendingBatchWaypoints: Position[] = [];
+  private pendingBatchResolvers: Array<{
+    resolve: (output: MoveArriveOutput) => void;
+    reject: (err: unknown) => void;
+  }> = [];
 
   // 지금 재생 중인 발걸음 소리 인스턴스 — 다음 발걸음이 날 때 아직 안 끝났으면 끊어서 겹쳐
   // 들리지 않게 한다(playFootstepNow 참고).
@@ -1473,7 +1495,13 @@ class MazeScene extends Phaser.Scene {
     }
 
     const pressed = this.getPressedDirection();
-    if (!pressed) return; // 아무 방향키도 안 눌렸으면 아무 것도 안 함
+    if (!pressed) {
+      // 방향키가 안 눌려있다는 건 이번 이동 burst가 끝났다는 뜻 — 그동안 쌓인 좌표를 지금
+      // 흘려보낸다(픽업 지연 완화, flushArrivalBatch 참고). 쌓인 게 없으면 조용히 반환되므로
+      // 매 프레임 불러도 비용이 거의 없다.
+      void this.flushArrivalBatch();
+      return;
+    }
 
     let { dx, dy } = pressed;
 
@@ -1729,6 +1757,10 @@ class MazeScene extends Phaser.Scene {
     // 조작감 폴리싱).
     if (!this.isWalkable(targetX, targetY)) {
       this.bumpIntoWall(dx, dy);
+      // 벽에 막혀 이 방향으로는 더 이상 진행할 수 없다는 뜻이므로, 그동안 쌓인 좌표가 있으면
+      // 지금 흘려보낸다(방향키를 계속 누르고 있어도 매 프레임 반복 부딪히는 동안 배치가
+      // 무기한 안 흘러가는 것을 방지).
+      void this.flushArrivalBatch();
       return;
     }
 
@@ -1801,24 +1833,25 @@ class MazeScene extends Phaser.Scene {
   // 합쳤다 — 서버가 이미 위치 앵커 검증/커밋을 1회로 묶어서 처리하는 API를 제공하고 있었는데
   // 클라이언트만 옛 방식(2회 왕복)을 계속 쓰고 있었다.
   //
-  // 2026-07-15(위치 앵커 영구 락 대응): 실서버에서는 바로 포기하지 않고 같은 요청을 몇 번 더
-  // 시도한다(requestArrivalWithRetry) — arrivalDispatcher가 이 작업이 완전히 끝날 때까지 다음
-  // 칸의 요청을 시작하지 않으므로, 재시도가 끝나기 전에 다음 이동 요청이 먼저 나가 순서가
-  // 꼬이는 일은 없다. 로컬 프리뷰는 백엔드 자체가 없어 실패가 정상 경로라 재시도 대상에서
-  // 제외(재시도하면 로컬 개발 중 매 이동마다 불필요하게 느려진다).
+  // 2026-07-15(픽업 지연 완화): 실서버에서는 더 이상 이 칸만 즉시 요청하지 않는다 — 좌표를
+  // pendingBatchWaypoints에 쌓아두고 promise만 돌려준 뒤, flushArrivalBatch가 나중에(이동이
+  // 끊기는 시점) 한 번에 처리한다. 여러 칸을 빠르게 지나가도 서버 왕복이 1회로 줄어 판정
+  // 지연이 크게 준다. 로컬 프리뷰는 백엔드 자체가 없어 배치가 의미 없으므로 기존처럼 매 칸
+  // 즉시 처리(실패 시 로컬 폴백)를 유지한다.
   private async reportArrival(x: number, y: number): Promise<MoveArriveOutput> {
-    try {
-      return await this.arrivalDispatcher.enqueue(() =>
-        IS_LOCAL_PREVIEW
-          ? trpc.move.arrive.mutate({ mapId: MAP_ID, x, y })
-          : this.requestArrivalWithRetry(x, y)
-      );
-    } catch (err) {
-      if (!IS_LOCAL_PREVIEW) {
-        console.error('move.arrive 실패(실서버 환경, 재시도 소진) — 이번 칸은 판정 실패로 처리', err);
-        return { trap: { hit: false }, item: { picked: false } };
-      }
+    if (!IS_LOCAL_PREVIEW) {
+      return new Promise<MoveArriveOutput>((resolve, reject) => {
+        this.pendingBatchWaypoints.push({ x, y });
+        this.pendingBatchResolvers.push({ resolve, reject });
+        if (this.pendingBatchWaypoints.length >= CLIENT_ARRIVAL_BATCH_MAX_WAYPOINTS) {
+          void this.flushArrivalBatch();
+        }
+      });
+    }
 
+    try {
+      return await this.arrivalDispatcher.enqueue(() => trpc.move.arrive.mutate({ mapId: MAP_ID, x, y }));
+    } catch (err) {
       console.error('move.arrive 실패(백엔드 없음) — 로컬 함정/아이템 목록으로 직접 판정', err);
       const localTrap = this.myTraps.find((t) => t.x === x && t.y === y);
       // 실서버의 "설치자 본인은 회피"(trpc.ts trap.trigger/move.arrive, installerId 비교)를
@@ -1842,23 +1875,77 @@ class MazeScene extends Phaser.Scene {
     }
   }
 
-  // reportArrival(실서버 전용)이 쓰는 재시도 루프 — 같은 좌표로 같은 요청을 다시 보낼 뿐, 클라이언트가
-  // 임의의 위치를 서버에 우겨넣는 게 아니라서 assertAdjacent의 오라클 방지 설계와 충돌하지 않는다.
-  // 마지막 시도까지 실패하면 그대로 던져 호출자(reportArrival)의 catch가 처리하게 한다.
-  private async requestArrivalWithRetry(x: number, y: number): Promise<MoveArriveOutput> {
+  // 지금까지 쌓인 pendingBatchWaypoints를 move.arriveBatch 요청 1회로 흘려보낸다. 이동이 끊기는
+  // 자연스러운 시점(방향키 뗌, 벽 충돌, 슬라이드 종료, 골인, 버퍼 상한)마다 호출된다 — 아무것도
+  // 안 쌓여있으면 조용히 반환. 배치 자체는 arrivalBatchDispatcher로 직렬화해 연속된 두 배치의
+  // 응답 순서가 역전되지 않게 한다(오라클 방지와 무관하게, 위치 커밋 순서 보장을 위함).
+  private async flushArrivalBatch(): Promise<void> {
+    if (this.pendingBatchWaypoints.length === 0) return;
+
+    const waypoints = this.pendingBatchWaypoints;
+    const resolvers = this.pendingBatchResolvers;
+    this.pendingBatchWaypoints = [];
+    this.pendingBatchResolvers = [];
+
+    try {
+      const output = await this.arrivalBatchDispatcher.enqueue(() =>
+        this.requestArrivalBatchWithRetry(waypoints)
+      );
+      // results는 waypoints 앞부분과 순서대로 1:1 대응한다 — stoppedEarly로 중간에 멈췄으면
+      // 그 이후 좌표들은 서버가 애초에 처리하지 않은 것이므로, 각 호출자(resolveTrapAndItem)가
+      // "아무 일도 없었다"로 안전하게 처리하도록 기본값으로 해소한다.
+      resolvers.forEach((resolver, i) => {
+        const result = output.results[i];
+        resolver.resolve(result ?? { trap: { hit: false }, item: { picked: false } });
+      });
+      // 낙관적 이동(화면이 항상 서버보다 앞서있는 설계)이 stoppedEarly로 인해 실제 서버 위치와
+      // 어긋났을 수 있다 — 화면을 서버의 진짜 최종 위치로 사후 보정한다.
+      this.reconcilePositionWithServer(output.finalPosition);
+    } catch (err) {
+      console.error('move.arriveBatch 실패(실서버 환경, 재시도 소진) — 이번 배치는 전부 판정 실패로 처리', err);
+      resolvers.forEach((resolver) => resolver.resolve({ trap: { hit: false }, item: { picked: false } }));
+    }
+  }
+
+  // flushArrivalBatch가 쓰는 재시도 루프 — 같은 좌표 배열을 다시 보낼 뿐, 클라이언트가 임의의
+  // 위치를 서버에 우겨넣는 게 아니라서 assertAdjacent의 오라클 방지 설계와 충돌하지 않는다.
+  // 마지막 시도까지 실패하면 그대로 던져 호출자(flushArrivalBatch)의 catch가 처리하게 한다.
+  private async requestArrivalBatchWithRetry(waypoints: Position[]): Promise<MoveArriveBatchOutput> {
     for (let attempt = 1; ; attempt++) {
       try {
-        return await trpc.move.arrive.mutate({ mapId: MAP_ID, x, y });
+        return await trpc.move.arriveBatch.mutate({ mapId: MAP_ID, waypoints });
       } catch (err) {
         if (attempt >= MOVE_ARRIVE_RETRY_ATTEMPTS) throw err;
-        // /review pr#80 지적: 재시도로 복구될 수 있는 정상 경로라 error가 아니라 warn — 진짜
-        // 실패는 재시도를 다 소진했을 때(reportArrival의 catch)만 error로 남긴다.
-        // 분모를 attempt(1부터 시작하는 "몇 번째 시도")와 맞춰 "시도 1/3"처럼 전체 시도 횟수
-        // 기준으로 표기(팀원 리뷰 지적 — 기존 "재시도 1/2"는 분모가 재시도 횟수라 혼동 여지 있었음).
-        console.warn(`move.arrive 실패 — 시도 ${attempt}/${MOVE_ARRIVE_RETRY_ATTEMPTS}`, err);
+        console.warn(`move.arriveBatch 실패 — 시도 ${attempt}/${MOVE_ARRIVE_RETRY_ATTEMPTS}`, err);
         await new Promise<void>((resolve) => this.time.delayedCall(MOVE_ARRIVE_RETRY_DELAY_MS, resolve));
       }
     }
+  }
+
+  // flushArrivalBatch 응답의 finalPosition과 화면(playerGridX/Y)이 다르면 화면을 서버 기준으로
+  // 강제 보정한다. 리스폰이 배치 중간에 걸렸을 때는 applyRespawnTrap이 이미 정확히 같은 좌표
+  // (SPAWN_POSITION = getMapStartPosition)로 옮겨둔 상태라 보통은 아무 일도 안 일어나는
+  // 안전망일 뿐이다 — 실제로 값이 다를 때만(예: 응답만 유실된 뒤 재시도로 어긋난 극히 드문
+  // 케이스) 화면을 튀겨서라도 서버와 다시 맞춘다.
+  private reconcilePositionWithServer(finalPosition: Position) {
+    if (this.playerGridX === finalPosition.x && this.playerGridY === finalPosition.y) return;
+
+    console.warn(
+      `move.arriveBatch: 화면 위치(${this.playerGridX},${this.playerGridY})와 서버 위치(${finalPosition.x},${finalPosition.y})가 어긋나 보정합니다.`
+    );
+    this.tweens.killTweensOf(this.playerImg);
+    if (this.isSliding) {
+      this.isSliding = false;
+      this.cameras.main.shakeEffect.reset();
+    }
+    this.playerGridX = finalPosition.x;
+    this.playerGridY = finalPosition.y;
+    this.playerImg.setPosition(
+      finalPosition.x * TILE_SIZE + TILE_SIZE / 2,
+      finalPosition.y * TILE_SIZE + TILE_SIZE / 2
+    );
+    this.refreshPlayerTrapVisual();
+    this.updateFog();
   }
 
   // 함정을 밟았을 때 캐릭터 색을 잠깐 바꿔서 "뭔가 발동했다"는 걸 보여주는 간단한 이펙트.
@@ -2925,6 +3012,8 @@ class MazeScene extends Phaser.Scene {
         this.pendingReverseAfterSlide = false;
         this.applyReverseTrap();
       }
+      // 슬라이드가 끝났으니 그동안 지나온 칸들의 판정을 지금 흘려보낸다(픽업 지연 완화).
+      void this.flushArrivalBatch();
       return;
     }
 
@@ -2942,6 +3031,8 @@ class MazeScene extends Phaser.Scene {
         this.pendingReverseAfterSlide = false;
         this.applyReverseTrap();
       }
+      // 슬라이드가 끝났으니 그동안 지나온 칸들의 판정을 지금 흘려보낸다(픽업 지연 완화).
+      void this.flushArrivalBatch();
       return;
     }
 
@@ -3279,12 +3370,20 @@ class MazeScene extends Phaser.Scene {
   // 위험을 감수하고서라도 run.finish를 진행한다(이 경우 정말로 NOT_AT_GOAL이 날 수 있지만,
   // 그래도 catch에서 "Record not saved"로 실패를 명확히 알리는 기존 동작으로 자연스럽게
   // 수렴한다 — 화면이 무한정 멈춰있는 것보다 낫다).
+  //
+  // 2026-07-15(픽업 지연 완화로 배치 도입): B의 판정 요청이 이제 즉시 나가지 않고
+  // pendingBatchWaypoints에 잠깐 머물 수 있다 — arrivalBatchDispatcher가 비워지길 기다리기
+  // 전에, 먼저 flushArrivalBatch로 그 버퍼부터 실제 요청으로 흘려보내야 한다(안 그러면
+  // whenIdle()이 "보낼 것 자체가 없다"고 즉시 통과해버려 B의 커밋을 전혀 기다리지 않는다).
   private async reportRunFinish(rankText: Phaser.GameObjects.Text, statsText: Phaser.GameObjects.Text) {
     // clearTimeMs는 실제로 골인한 순간 기준이어야 하므로, 아래 대기가 끝나기 전에 먼저
     // 계산해둔다 — 순서를 바꾸면 대기 시간만큼 클리어 시간이 부풀려진다.
     const clearTimeMs = Date.now() - this.runStartTime;
     await Promise.race([
-      this.arrivalDispatcher.whenIdle(),
+      (async () => {
+        await this.flushArrivalBatch();
+        await Promise.all([this.arrivalDispatcher.whenIdle(), this.arrivalBatchDispatcher.whenIdle()]);
+      })(),
       new Promise<void>((resolve) => this.time.delayedCall(ARRIVAL_IDLE_TIMEOUT_MS, resolve)),
     ]);
     try {

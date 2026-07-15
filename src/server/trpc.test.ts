@@ -11,6 +11,7 @@ import {
   trapBoardKey,
 } from './core/redisKeys';
 import { getMapExitPosition } from './core/maps';
+import { MOVE_ARRIVE_BATCH_MAX_WAYPOINTS } from './core/gameConfig';
 import { getMazeMap } from '../shared/maps';
 import type { Position } from '../shared/game-types';
 
@@ -1368,6 +1369,136 @@ describe('move.arrive 통합 API (trap.trigger + item.pickup 통합, docs/design
 
     const hits = [resultA, resultB].filter((r) => r.trap.hit);
     expect(hits).toHaveLength(1);
+  });
+});
+
+describe('move.arriveBatch (픽업 지연 완화, docs/wbs.md)', () => {
+  it('빈 칸 여러 개를 한 번에 처리하면 전부 hit:false/picked:false를 순서대로 반환하고 앵커가 마지막 칸으로 이동한다', async () => {
+    const caller = createCaller({ userId: 'user-batch-a' });
+    await caller.map.getState({ mapId: 'map-1' }); // 앵커: (1,1)
+
+    const waypoints = computeWalkPath(MAP_1_START, { x: 1, y: 4 });
+    const { results, stoppedEarly } = await caller.move.arriveBatch({ mapId: 'map-1', waypoints });
+
+    expect(stoppedEarly).toBe(false);
+    expect(results).toHaveLength(waypoints.length);
+    expect(results.every((r) => !r.trap.hit && !r.item.picked)).toBe(true);
+
+    // 앵커가 실제로 마지막 웨이포인트까지 이동했는지 — 그 다음 칸은 인접이라 성공해야 한다.
+    await expect(caller.move.arrive({ mapId: 'map-1', x: 1, y: 5 })).resolves.toEqual({
+      trap: { hit: false },
+      item: { picked: false },
+    });
+  });
+
+  it('배치 중간 칸에 있는 함정도 정상적으로 판정·소모되어 결과 배열의 정확한 위치에 반영된다', async () => {
+    const installer = createCaller({ userId: 'user-batch-b-installer' });
+    await installer.trap.install({ mapId: 'map-1', type: 'slow', x: 1, y: 2 });
+
+    const caller = createCaller({ userId: 'user-batch-b' });
+    await caller.map.getState({ mapId: 'map-1' });
+
+    const waypoints = computeWalkPath(MAP_1_START, { x: 1, y: 4 }); // (1,2)/(1,3)/(1,4)
+    const { results, stoppedEarly } = await caller.move.arriveBatch({ mapId: 'map-1', waypoints });
+
+    expect(stoppedEarly).toBe(false);
+    expect(results[0]).toEqual({ trap: { hit: true, type: 'slow' }, item: { picked: false } });
+    expect(results[1]).toEqual({ trap: { hit: false }, item: { picked: false } });
+    expect(results[2]).toEqual({ trap: { hit: false }, item: { picked: false } });
+
+    // 소모됐으므로 재방문해도 재발동하지 않는다.
+    const other = createCaller({ userId: 'user-batch-b-other' });
+    await other.map.getState({ mapId: 'map-1' });
+    await expect(other.move.arrive({ mapId: 'map-1', x: 1, y: 2 })).resolves.toEqual({
+      trap: { hit: false },
+      item: { picked: false },
+    });
+  });
+
+  it('중간 칸에서 리스폰이 나오면 그 지점에서 처리를 멈추고 앵커는 시작 좌표로, 이후 웨이포인트는 처리되지 않는다', async () => {
+    const installer = createCaller({ userId: 'user-batch-c-installer' });
+    await installer.trap.install({ mapId: 'map-1', type: 'respawn', x: 1, y: 2 });
+
+    const caller = createCaller({ userId: 'user-batch-c' });
+    await caller.map.getState({ mapId: 'map-1' });
+
+    const waypoints = computeWalkPath(MAP_1_START, { x: 1, y: 4 }); // (1,2)=respawn, (1,3), (1,4)
+    const { results, stoppedEarly } = await caller.move.arriveBatch({ mapId: 'map-1', waypoints });
+
+    expect(stoppedEarly).toBe(true);
+    // 리스폰이 걸린 칸까지만 결과가 채워진다 — 그 이후 웨이포인트는 처리 안 됨.
+    expect(results).toHaveLength(1);
+    expect(results[0]).toEqual({ trap: { hit: true, type: 'respawn' }, item: { picked: false } });
+
+    // 앵커가 시작 좌표로 리셋됐는지 — (1,2)/(1,3) 근처는 더 이상 인접하지 않고, 시작 좌표
+    // 인접 칸(1,0)은 정상 처리돼야 한다.
+    await expect(caller.move.arrive({ mapId: 'map-1', x: 1, y: 3 })).rejects.toMatchObject({
+      message: 'INVALID_MOVE',
+    });
+    await expect(caller.move.arrive({ mapId: 'map-1', x: 1, y: 0 })).resolves.toEqual({
+      trap: { hit: false },
+      item: { picked: false },
+    });
+
+    // 리스폰은 정상적인 게임 이벤트라 실패 스트릭이 증가하면 안 된다.
+    const date = getKstDateString();
+    expect(await mocks.redis.get(moveFailureStreakKey('map-1', date, 'user-batch-c'))).toBeUndefined();
+  });
+
+  it('중간에 인접하지 않은 좌표가 섞여 있으면 그 지점에서 멈추고 실패 스트릭이 증가한다', async () => {
+    const caller = createCaller({ userId: 'user-batch-d' });
+    await caller.map.getState({ mapId: 'map-1' }); // 앵커: (1,1)
+
+    const waypoints = [{ x: 1, y: 2 }, { x: 1, y: 3 }, { x: 9, y: 9 }, { x: 1, y: 4 }]; // 3번째가 비인접
+
+    const { results, stoppedEarly } = await caller.move.arriveBatch({ mapId: 'map-1', waypoints });
+
+    expect(stoppedEarly).toBe(true);
+    expect(results).toHaveLength(2); // (1,2), (1,3)까지만 처리됨
+
+    const date = getKstDateString();
+    expect(await mocks.redis.get(moveFailureStreakKey('map-1', date, 'user-batch-d'))).toBe('1');
+
+    // 앵커는 마지막으로 실제 처리된 (1,3)에 남아있어야 한다.
+    await expect(caller.move.arrive({ mapId: 'map-1', x: 1, y: 4 })).resolves.toEqual({
+      trap: { hit: false },
+      item: { picked: false },
+    });
+  });
+
+  it('배치 크기 상한(MOVE_ARRIVE_BATCH_MAX_WAYPOINTS)을 넘는 요청은 거부된다', async () => {
+    const caller = createCaller({ userId: 'user-batch-e' });
+    await caller.map.getState({ mapId: 'map-1' });
+
+    const tooMany = Array.from({ length: MOVE_ARRIVE_BATCH_MAX_WAYPOINTS + 1 }, (_, i) => ({ x: 1, y: i }));
+    await expect(caller.move.arriveBatch({ mapId: 'map-1', waypoints: tooMany })).rejects.toThrow();
+  });
+
+  it('배치 안에서 탐지기 아이템을 두 번 주우면 충전이 2회 반영된다(boolean이 아니라 카운트여야 함)', async () => {
+    const caller = createCaller({ userId: 'user-batch-f' });
+    const seedSpy = vi.spyOn(Math, 'random').mockReturnValue(2.5 / 8); // 결과를 detector로 고정
+    const { mysteryBoxes } = await caller.map.getState({ mapId: 'map-1' });
+    seedSpy.mockRestore();
+
+    // 같은 시드 결과라도 스폰 좌표(mysteryBoxes)는 서로 다른 칸에 8개 배치되므로, 그중 서로
+    // 다른 두 칸을 지나가는 경로를 하나 골라 배치에 담는다.
+    const [first, second] = mysteryBoxes;
+    if (!first || !second) throw new Error('테스트 전제 실패: 미스터리 박스가 2개 미만');
+
+    const waypoints = [
+      ...computeWalkPath(MAP_1_START, first),
+      ...computeWalkPath(first, second),
+    ];
+    const { results } = await caller.move.arriveBatch({ mapId: 'map-1', waypoints });
+
+    const detectorPickups = results.filter(
+      (r) => r.item.picked && r.item.outcome === 'item' && r.item.type === 'detector'
+    );
+    expect(detectorPickups).toHaveLength(2);
+
+    // 충전 2회 → useDetector를 2번 연속 호출해도 NO_CHARGE가 안 나야 한다.
+    await caller.item.useDetector({ mapId: 'map-1' });
+    await expect(caller.item.useDetector({ mapId: 'map-1' })).resolves.toBeDefined();
   });
 });
 
