@@ -1280,6 +1280,13 @@ class MazeScene extends Phaser.Scene {
       // 2026-07-14: 다른 유저 설치 함정도 좌표만(타입 제외) otherTraps로 받아온다(otherTraps
       // 필드 설명 참고) — mysteryBoxes와 동일하게 위치는 공개, 종류만 비공개.
       this.otherTraps = state.otherTraps;
+      // 2026-07-15(새로고침 시 위치 미동기화 버그 수정): create()는 캐릭터를 무조건 시작 좌표에
+      // 놓고 시작한다 — 진행 중이던 세션 중간에 새로고침하면 서버 앵커는 실제 위치에 그대로
+      // 있는데 화면만 시작 좌표로 되돌아가 어긋났다(그 다음 이동부터 전부 거부되는 연쇄로 이어짐).
+      // map.getState가 이제 실제 앵커(position)를 함께 내려주므로, 여기서 화면을 그 위치로
+      // 맞춘다 — reconcilePositionWithServer가 이미 "다르면만 스냅, 진행 중 트윈 정리"를 안전하게
+      // 처리해준다.
+      this.reconcilePositionWithServer(state.position);
     } catch (err) {
       // 2026-07-14 임소리(실서버 아이템 미픽업 조사): 이 catch가 IS_LOCAL_PREVIEW 가드 없이
       // 무조건 로컬 폴백 좌표를 썼던 게 실서버 버그였다 — reportArrival 등 다른 서버 호출은

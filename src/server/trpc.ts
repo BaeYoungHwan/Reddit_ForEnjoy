@@ -325,19 +325,6 @@ async function seedMysteryBoxes(mapId: string, date: string, userId: string): Pr
   });
 }
 
-// PR #67 리뷰 후속(move-run-finish-bugfixes.md 8절): GET으로만 판정하고 실제 시딩(순서 보장 포함)은
-// seedMysteryBoxes에 전량 위임한다 — 예전엔 여기서 SET NX로 마커를 먼저 선점한 뒤 seedMysteryBoxes를
-// 불렀는데, 그러면 이 경로(가장 빈번한 호출 경로)에서만 "마커 먼저, 보드 나중"이 되어 seedMysteryBoxes
-// 내부의 hSet이 실패했을 때 마커가 이미 세워진 채로 남아 자연 복구가 안 됐다(run.finish가 직접 부르는
-// 경로에만 안전 순서가 적용되는 비대칭 버그). GET은 원자적 선점이 아니므로 같은 유저가 다중 탭으로
-// 거의 동시에 호출하면 둘 다 재시딩을 시도할 수 있지만, getMysteryBoxSpawns가 순수함수라 항상 같은
-// 데이터로 멱등 수렴한다(itemSeededKey가 유저별 독립 키라 다른 유저와는 애초에 경쟁하지 않음) — run.finish의
-// 즉시 재시딩이 이미 감수 중인 다중 탭 리스크의 부분집합(노출 창이 더 좁음)이라 별도 대응하지 않는다.
-async function ensureMysteryBoxesSeeded(mapId: string, date: string, userId: string): Promise<void> {
-  const alreadySeeded = await redis.get(itemSeededKey(mapId, date, userId));
-  if (alreadySeeded) return;
-  await seedMysteryBoxes(mapId, date, userId);
-}
 
 export const appRouter = t.router({
   // 리더보드에서 "내 순위" 강조(splash.tsx)를 위해 클라이언트가 자기 userId를 알아야 해서
@@ -352,9 +339,33 @@ export const appRouter = t.router({
       const date = getKstDateString();
       const { mapId } = input;
 
-      // 미스터리 박스는 유저별 독립 보드 — 밟는 위치는 비밀이 아니지만(오라클 방지 대상 아님),
-      // 스폰 좌표가 소수라 전역 공유하면 먼저 도착한 유저가 하루치를 다 가져가 버린다.
-      await ensureMysteryBoxesSeeded(mapId, date, ctx.userId);
+      // 2026-07-15(사용자 요청 — "새로고침하면 항상 새 게임처럼"): 클라이언트는 map.getState를
+      // Phaser 씬이 새로 create()될 때 딱 한 번만 호출한다(game.tsx loadServerState 호출부 확인
+      // — 세션 중 재호출 없음). 즉 이 호출이 오는 시점은 항상 "새로고침/재접속으로 완전히 새로
+      // 시작하는 순간"이라고 봐도 된다 — run.finish의 리셋(위치 앵커/스트릭/로드아웃/탐지기
+      // 충전 삭제 + 아이템 보드 강제 재시딩)과 동일한 리셋을 여기서도 매번 실행한다. 예전엔
+      // 위치 앵커를 SET NX로 "이미 진행 중이면 보존"했었는데, 그러면 게임 도중 새로고침 시
+      // 화면(항상 시작 좌표로 다시 그려짐)과 서버 앵커(진행 중이던 위치)가 어긋나 그 뒤 이동이
+      // 전부 거부되는 버그로 이어졌었다 — 매번 리셋하면 이 어긋남 자체가 발생하지 않는다.
+      const posKey = positionAnchorKey(mapId, date, ctx.userId);
+      const streakKey = moveFailureStreakKey(mapId, date, ctx.userId);
+      try {
+        await Promise.all([
+          redis.del(posKey),
+          redis.del(streakKey),
+          redis.del(loadoutClaimedKey(mapId, date, ctx.userId)),
+          redis.del(detectorChargeKey(mapId, date, ctx.userId)),
+          seedMysteryBoxes(mapId, date, ctx.userId),
+        ]);
+      } catch (err) {
+        console.error(`map.getState: 새 런 초기화 실패 (userId=${ctx.userId}, mapId=${mapId})`, err);
+      }
+
+      const start = getMapStartPosition(mapId);
+      await redis.set(posKey, tileMember(start), {
+        expiration: new Date(Date.now() + POSITION_ANCHOR_TTL_SECONDS * 1000),
+      });
+      const position = start;
 
       const [footprintMembers, myTrapFields, mysteryBoxFields, allTrapFields] = await Promise.all([
         redis.zRange(footprintKey(mapId, date), 0, -1),
@@ -362,14 +373,6 @@ export const appRouter = t.router({
         redis.hGetAll(itemBoardKey(mapId, date, ctx.userId)),
         redis.hGetAll(trapBoardKey(mapId, date)),
       ]);
-
-      // NX: 세션 중 map.getState가 재호출돼도(탭 재포커스 등) 이미 진행 중인 앵커를 시작 좌표로
-      // 되돌리지 않는다 — 되돌리면 이후 정상 이동까지 trap.trigger에서 INVALID_MOVE로 거부된다.
-      // 새 런을 시작할 때는 run.finish가 앵커를 지우므로 그때만 다시 시작 좌표로 초기화된다.
-      const start = getMapStartPosition(mapId);
-      const posKey = positionAnchorKey(mapId, date, ctx.userId);
-      await redis.set(posKey, tileMember(start), { nx: true });
-      await redis.expire(posKey, POSITION_ANCHOR_TTL_SECONDS);
 
       // 2026-07-14 오라클 방지 완화 결정(임소리, 함정 탐지기 확장 논의): 이전엔 다른 유저가
       // 설치한 함정 위치를 아예 안 내려줘서 화면에 전혀 안 보였다 — "길인 줄 알고 걸었는데
@@ -381,6 +384,7 @@ export const appRouter = t.router({
 
       return {
         date,
+        position,
         footprints: footprintMembers.map((m) => parseTile(m.member)),
         myTraps: toTrapInstances(myTrapFields),
         // 타입 없이 좌표만 반환 — 먹기 전엔 아이템/함정 여부조차 알 수 없어야 한다.
