@@ -18,7 +18,6 @@ import type {
   ItemPickupOutput,
   ItemType,
   ItemUseDetectorOutput,
-  MoveArriveOutput,
   Position,
   RunFinishOutput,
   TrapInstallOutput,
@@ -364,12 +363,12 @@ const INSTALL_FAILURE_MESSAGES: Record<InstallFailureReason, string> = {
 // 아이템 좌표(+로컬 폴백 전용 종류). 2026-07-12: 서버가 미스터리 박스 방식(개별 스폰에
 // 타입을 저장하지 않고 픽업 시점에 rollMysteryOutcome()으로 결정)으로 재설계되면서
 // map.getState가 주는 실제 스폰 좌표(state.mysteryBoxes)엔 더 이상 타입이 없다 — type은
-// 백엔드 없는 로컬 프리뷰 폴백(TEMP_ITEMS/reportArrival의 catch)에서만 쓰인다.
+// 백엔드 없는 로컬 프리뷰 폴백(TEMP_ITEMS/reportItemPickup의 catch)에서만 쓰인다.
 // ItemType(4종) 각각의 상세 스펙·확정 배경은 docs/design-docs/items.md 참고.
 type ItemInstance = { x: number; y: number; type?: ItemType };
 
-// fetchArrival()이 반환하는 아이템 판정 부분의 타입 — 미스터리 박스가 없었는지, 아이템으로
-// 나왔는지, 함정으로 나왔는지를 구분한다. resolveArrival이 이 결과와 설치형 함정 판정을 함께
+// fetchItemEncounter()의 반환 타입 — 미스터리 박스가 없었는지, 아이템으로 나왔는지, 함정으로
+// 나왔는지를 구분한다. resolveArrival이 이 결과와 fetchTrapTrigger의 설치형 함정 판정을 함께
 // 모아 이펙트 적용/isMoving 해제를 결정한다.
 type ItemEncounter = { kind: 'none' } | { kind: 'item'; type: ItemType } | { kind: 'trap'; type: TrapType };
 
@@ -618,27 +617,23 @@ class MazeScene extends Phaser.Scene {
   // 로컬 폴백에서도 재현하려고 별도로 추적한다.
   private selfInstalledTrapKeys = new Set<string>();
 
-  // move.arrive 호출이 dispatch된 순서대로만 네트워크로 나가도록 강제하는 큐.
-  // (연속 이동 중 여러 move.arrive가 동시에 in-flight 상태가 되면 응답 순서가
+  // trap.trigger 호출이 dispatch된 순서대로만 네트워크로 나가도록 강제하는 큐.
+  // (연속 이동 중 여러 trap.trigger가 동시에 in-flight 상태가 되면 응답 순서가
   //  역전돼 서버 위치 앵커가 뒤처진 채로 다음 이동을 검증해 정상 이동이
   //  INVALID_MOVE로 오판정될 수 있다 — 이를 막기 위한 요청 직렬화.)
-  //
-  // 2026-07-15: 예전엔 trap.trigger/item.pickup을 각각 다른 SequentialDispatcher(trapDispatcher/
-  // itemDispatcher)로 병렬 호출했는데, 이 두 큐는 "같은 엔드포인트 내" 순서만 보장할 뿐
-  // 서로 다른 엔드포인트 사이의 순서는 조정하지 않았다 — 같은 posKey(위치 앵커)를 두 요청이
-  // 독립적으로 읽고 쓰기 때문에, 예를 들어 리스폰 함정이 걸려 trap.trigger가 시작 좌표로
-  // 앵커를 갱신한 직후 item.pickup이 늦게 도착해 원래 좌표로 앵커를 덮어써버리는 레이스가
-  // 있었다(정상 이동이 INVALID_MOVE로 오판정되거나 함정/아이템이 "안 먹힌 것처럼" 보이는
-  // 실배포 QA 증상의 근본 원인). 서버가 이미 제공하는 move.arrive(위치 앵커 read/commit을
-  // 이동당 1회로 합친 통합 API, docs/design-docs/move-api-unification.md)로 전환해 두 판정을
-  // 한 요청으로 묶고 큐도 하나로 합쳐 이 레이스를 근본적으로 없앤다.
-  private arrivalDispatcher = new SequentialDispatcher<MoveArriveOutput>();
-
-  // 옛 trap.trigger 전용 직렬화 큐 — reportPosition(slideStep의 중간 칸 앵커 갱신 전용, 아래
-  // 참고)만 아직 이 큐를 쓴다. 슬라이드로 스쳐 지나가는 칸은 지금도 item.pickup을 호출하지
-  // 않아(아이템 미회수가 기존 규칙) move.arrive로 바꾸면 그 칸의 미스터리 박스가 클라이언트
-  // 모르게 소모돼버리는 동작 변화가 생기므로, 이 호출 하나만 의도적으로 구 엔드포인트를 유지한다.
   private trapDispatcher = new SequentialDispatcher<TrapTriggerOutput>();
+
+  // item.pickup 전용 직렬화 큐 — trapDispatcher와 동일한 이유로 필요하다(reportItemPickup
+  // 참고). 2026-07-14 발견: item.pickup을 직렬화 안 해도 된다고 판단했던 근거(2026-07-09,
+  // reportItemPickup 주석)는 그 시점엔 resolveArrival이 끝날 때까지 isMoving이 잠겨있어 한
+  // 번에 한 칸의 item.pickup만 in-flight일 수 있었기 때문에 성립했다 — 2026-07-13 PR #41
+  // (조작감 개선, isMoving을 트윈 완료 즉시 해제)로 그 전제가 깨지면서, 서로 다른 칸의
+  // item.pickup 두 개가 동시에 in-flight일 수 있게 됐다. Reddit 실환경처럼 응답 순서가
+  // 역전되면(나중 칸 응답이 이전 칸 응답보다 먼저 도착) 위치 앵커가 아직 안 옮겨진 상태라
+  // 정상적으로 있는 아이템도 INVALID_MOVE로 조용히 씹혀서 "아이템이 안 먹힌다"는 증상으로
+  // 나타난다(실서버 QA 2026-07-14). trap.trigger는 같은 칸이면 병렬로, 다른 칸끼리는
+  // 순서대로 나가도록 별도 큐로 분리해 병렬 조회 이점은 그대로 유지한다.
+  private itemDispatcher = new SequentialDispatcher<ItemPickupOutput>();
 
   // 지금 재생 중인 발걸음 소리 인스턴스 — 다음 발걸음이 날 때 아직 안 끝났으면 끊어서 겹쳐
   // 들리지 않게 한다(playFootstepNow 참고).
@@ -1791,65 +1786,14 @@ class MazeScene extends Phaser.Scene {
     }
   }
 
-  // move.arrive 하나로 설치형 함정 + 미스터리 박스 판정을 함께 조회한다(reportPosition의
-  // trap.trigger 전용 폴백과 별개 — arrivalDispatcher 선언부 주석 참고, 예전엔 이 둘을
-  // trap.trigger/item.pickup 두 API로 나눠 병렬 호출하다 위치 앵커 레이스가 있었다).
-  // 로컬 프리뷰 폴백도 두 판정을 하나로 합쳐 { trap, item } 모양으로 반환한다.
-  private async reportArrival(x: number, y: number): Promise<MoveArriveOutput> {
-    try {
-      return await this.arrivalDispatcher.enqueue(() =>
-        trpc.move.arrive.mutate({ mapId: MAP_ID, x, y })
-      );
-    } catch (err) {
-      if (!IS_LOCAL_PREVIEW) {
-        console.error('move.arrive 실패(실서버 환경) — 로컬 폴백 안 함, 이번 칸은 판정 실패로 처리', err);
-        return { trap: { hit: false }, item: { picked: false } };
-      }
-
-      console.error('move.arrive 실패(백엔드 없음) — 로컬 함정/아이템 목록으로 직접 판정', err);
-
-      // 실서버의 "설치자 본인은 회피"(trpc.ts trap.trigger/move.arrive, installerId 비교)를
-      // 로컬 폴백에서도 재현 — selfInstalledTrapKeys 참고.
-      const localTrap = this.myTraps.find((t) => t.x === x && t.y === y);
-      const trap: TrapTriggerOutput =
-        localTrap && !this.selfInstalledTrapKeys.has(`${x},${y}`) ? { hit: true, type: localTrap.type } : { hit: false };
-
-      // 2026-07-12: 서버가 미스터리 박스로 바뀌며 outcome:'item'|'trap' 판정이 추가됐지만,
-      // 로컬 폴백은 실제 확률 풀(gameConfig.ts MYSTERY_BOX_OUTCOME_POOL)을 재현하지 않고
-      // 기존처럼 TEMP_ITEMS에 박아둔 고정 타입을 outcome:'item'으로 그대로 반환한다 — 백엔드
-      // 없는 환경에서 픽업 배선 자체가 동작하는지 확인하는 용도라, 8종 확률 재현은 스코프 밖
-      // (실제 확률/함정 결과 테스트는 trpc.test.ts가 담당).
-      const localItem = this.remainingItems.find((item) => item.x === x && item.y === y);
-      const item: ItemPickupOutput = localItem
-        ? { picked: true, outcome: 'item', type: localItem.type ?? 'flashlight' }
-        : { picked: false };
-
-      return { trap, item };
-    }
-  }
-
-  // 방금 도착한 칸의 설치형 함정 + 미스터리 박스 판정을 함께 조회하는 순수 조회 함수 — 상태
-  // (isMoving, shieldCount, 화면 이펙트)는 전혀 건드리지 않는다(아이템 목록/마커 제거만 예외적으로
-  // 여기서 바로 처리 — isMoving·shieldCount와 무관한 순수 부기라서). 실제 함정/아이템 이펙트
-  // 적용과 isMoving/shieldCount 관리는 resolveArrival이 한 곳에서 처리한다(같은 타일에 설치형
-  // 함정과 미스터리 박스가 동시에 존재할 수 있어 — traps.md 0절 — 두 판정을 따로따로 즉시
-  // 적용하면 어느 쪽이 먼저 처리되느냐에 따라 결과가 달라지는 레이스가 있었음).
-  private async fetchArrival(x: number, y: number): Promise<{ trapType: TrapType | null; itemEncounter: ItemEncounter }> {
-    const result = await this.reportArrival(x, y);
-
-    const trapType = result.trap.hit && result.trap.type ? result.trap.type : null;
-
-    let itemEncounter: ItemEncounter = { kind: 'none' };
-    if (result.item.picked) {
-      this.remainingItems = this.remainingItems.filter((item) => !(item.x === x && item.y === y));
-      this.itemRects[y]![x]?.destroy();
-      this.itemRects[y]![x] = undefined;
-
-      itemEncounter =
-        result.item.outcome === 'trap' ? { kind: 'trap', type: result.item.type } : { kind: 'item', type: result.item.type };
-    }
-
-    return { trapType, itemEncounter };
+  // 방금 도착한 칸에 설치형 함정이 있는지 서버에만 확인하는 순수 조회 함수 — 상태(isMoving,
+  // shieldCount, 화면 이펙트)는 전혀 건드리지 않는다. 결과 적용/쉴드 소모/isMoving 해제는
+  // resolveArrival이 미스터리 박스 판정(fetchItemEncounter)과 함께 모아서 한 곳에서 처리한다
+  // (같은 타일에 설치형 함정과 미스터리 박스가 동시에 존재할 수 있어 — traps.md 0절 — 두 판정을
+  // 따로따로 즉시 적용하면 어느 쪽 응답이 먼저 오느냐에 따라 결과가 달라지는 레이스가 있었음).
+  private async fetchTrapTrigger(x: number, y: number): Promise<TrapType | null> {
+    const result = await this.reportPosition(x, y);
+    return result?.hit && result.type ? result.type : null;
   }
 
   // 함정을 밟았을 때 캐릭터 색을 잠깐 바꿔서 "뭔가 발동했다"는 걸 보여주는 간단한 이펙트.
@@ -1948,6 +1892,39 @@ class MazeScene extends Phaser.Scene {
     });
   }
 
+  // item.pickup을 호출해 서버에 픽업을 기록하고 실제로 주웠는지 응답을 받는다(다른 유저가
+  // 먼저 주웠으면 picked:false). reportPosition과 동일한 이유로 실패 시 로컬 remainingItems
+  // 목록으로 직접 판정하는 폴백을 둔다. itemDispatcher로 직렬화하는 이유는 trapDispatcher와
+  // 동일 — 다른 칸끼리의 item.pickup 응답 순서가 역전되면 위치 앵커 검증에서 정상 이동이
+  // INVALID_MOVE로 오판정될 수 있다(itemDispatcher 선언부 주석 참고).
+  private async reportItemPickup(x: number, y: number): Promise<ItemPickupOutput> {
+    try {
+      return await this.itemDispatcher.enqueue(() =>
+        trpc.item.pickup.mutate({ mapId: MAP_ID, x, y })
+      );
+    } catch (err) {
+      if (!IS_LOCAL_PREVIEW) {
+        // reportPosition 주석 참고 — 실서버에서 나는 에러는(위치 앵커 레이스로 인한 정당한
+        // 거부든, 진짜 네트워크 장애든) 로컬 폴백으로 감싸지 않는다. 감싸버리면 서버 보드엔
+        // 그대로 남아있는 박스를 클라이언트가 가짜로 "주웠다"고 판단해 마커를 지워버리는
+        // 영구적인 클라/서버 상태 불일치가 생긴다.
+        console.error('item.pickup 실패(실서버 환경) — 로컬 폴백 안 함, 이번 칸은 픽업 실패로 처리', err);
+        return { picked: false };
+      }
+
+      console.error('item.pickup 실패(백엔드 없음) — 로컬 아이템 목록으로 직접 판정', err);
+      const localItem = this.remainingItems.find((item) => item.x === x && item.y === y);
+      if (!localItem) return { picked: false };
+
+      // 2026-07-12: 서버가 미스터리 박스로 바뀌며 outcome:'item'|'trap' 판정이 추가됐지만,
+      // 로컬 폴백은 실제 확률 풀(gameConfig.ts MYSTERY_BOX_OUTCOME_POOL)을 재현하지 않고
+      // 기존처럼 TEMP_ITEMS에 박아둔 고정 타입을 outcome:'item'으로 그대로 반환한다 — 백엔드
+      // 없는 환경에서 픽업 배선 자체가 동작하는지 확인하는 용도라, 8종 확률 재현은 스코프 밖
+      // (실제 확률/함정 결과 테스트는 trpc.test.ts가 담당).
+      return { picked: true, outcome: 'item', type: localItem.type ?? 'flashlight' };
+    }
+  }
+
   // 지나온 칸을 발자국 큐에 쌓아둔다(즉시 전송하지 않음). 실제 전송은 flushFootprints가
   // 주기적으로 처리 — trap.trigger/item.pickup과 매 칸 겹쳐서 요청이 늘어나는 걸 막기 위함.
   private queueFootprint(x: number, y: number) {
@@ -1975,12 +1952,45 @@ class MazeScene extends Phaser.Scene {
     }
   }
 
-  // tryMove가 한 칸 이동을 마친 뒤 호출하는 유일한 판정 지점. fetchArrival(move.arrive)이 설치형
-  // 함정과 미스터리 박스 판정을 한 요청으로 함께 받아온 다음에야 쉴드 소모/함정 이펙트 적용을
-  // 한 곳에서 처리한다 — 예전엔 두 판정을 trap.trigger/item.pickup 두 API로 나눠 병렬 호출해서,
-  // 어느 쪽 응답이 먼저 오느냐에 따라 결과가 달라지는 레이스가 있었다(2026-07-13 코드 리뷰로
-  // 발견한 클라이언트 상태 레이스 + 2026-07-15 근본 해결한 서버 위치 앵커 레이스, arrivalDispatcher
-  // 선언부 주석 참고). dx, dy는 함정 결과가 슬라이드일 때 미끄러질 방향.
+  // 방금 도착한 칸에 아직 안 주운 미스터리 박스가 있는지 서버에만 확인하는 순수 조회 함수.
+  // 2026-07-12: 서버가 미스터리 박스로 재설계되며 응답이 outcome:'item'|'trap' 판별 유니언이
+  // 됐다 — outcome을 먼저 안 보고 type만으로 분기하면 outcome:'trap'(전체 결과의 절반)일 때
+  // 어떤 type도 안 걸려 마지막 else(함정 설치 아이템)로 잘못 빠지는 버그가 있었다(develop의
+  // 미스터리 박스 서버 구현과 main의 클라이언트가 별도로 진행되다 병합 시 발견).
+  // 아이템 목록/마커 제거(remainingItems, itemRects)는 isMoving·shieldCount와 무관한 순수 부기라
+  // 여기서 바로 처리한다 — 실제 함정/아이템 이펙트 적용과 isMoving/shieldCount 관리는
+  // resolveArrival이 fetchTrapTrigger 결과와 함께 모아서 한 곳에서 처리한다(fetchTrapTrigger
+  // 주석 참고 — 같은 타일에 설치형 함정과 미스터리 박스가 동시에 존재할 수 있음).
+  //
+  // 2026-07-14 실서버 QA(아이템이 한참 뒤에야 먹힘): itemDispatcher(직렬화 큐)가 모든 칸마다
+  // 요청을 넣다 보니, 연속 이동 중 네트워크 지연이 있으면 요청이 계속 밀려 쌓였다. remainingItems
+  // 는 map.getState가 이미 공개적으로 내려준 "아직 안 주운 박스 좌표" 목록(박스는 마커로 항상
+  // 표시되므로 위치 자체는 비밀이 아님 — outcome/type만 비밀)이라, 이 목록에 없는 칸이면
+  // item.pickup 요청 자체를 생략해도 오라클 방지를 해치지 않는다. 박스는 맵에 몇 곳뿐이라
+  // 대부분의 이동에서 요청이 아예 안 나가 큐가 밀릴 일이 없어진다. 함정 쪽은 상대가 몰래 설치한
+  // 함정일 수 있어 이 최적화를 적용할 수 없다(모든 칸에서 서버 확인이 필수 — trap.trigger는
+  // 그대로 둠).
+  private async fetchItemEncounter(x: number, y: number): Promise<ItemEncounter> {
+    if (!this.remainingItems.some((item) => item.x === x && item.y === y)) {
+      return { kind: 'none' };
+    }
+
+    const result = await this.reportItemPickup(x, y);
+    if (!result.picked) return { kind: 'none' };
+
+    this.remainingItems = this.remainingItems.filter((item) => !(item.x === x && item.y === y));
+    this.itemRects[y]![x]?.destroy();
+    this.itemRects[y]![x] = undefined;
+
+    if (result.outcome === 'trap') return { kind: 'trap', type: result.type };
+    return { kind: 'item', type: result.type };
+  }
+
+  // tryMove가 한 칸 이동을 마친 뒤 호출하는 유일한 판정 지점. 설치형 함정(fetchTrapTrigger)과
+  // 미스터리 박스(fetchItemEncounter)를 Promise.all로 병렬 조회한 뒤, 두 응답이 모두 도착한
+  // 다음에야 쉴드 소모/함정 이펙트 적용을 한 곳에서 처리한다 — 예전엔 두 함수가 각자 독립적으로
+  // isMoving과 shieldCount를 건드려서, 어느 쪽 응답이 먼저 오느냐에 따라 결과가 달라지는 레이스가
+  // 있었다(2026-07-13 코드 리뷰로 발견). dx, dy는 함정 결과가 슬라이드일 때 미끄러질 방향.
   //
   // isMoving은 더 이상 여기서 다루지 않는다(조작감 개선, 2026-07-13) — tryMove의 트윈 완료
   // 시점에 이미 풀렸고, 이 함수는 그보다 늦게(네트워크 응답 도착 후) 실행되므로 이미 다음
@@ -1994,7 +2004,10 @@ class MazeScene extends Phaser.Scene {
     // outcome:'item' && type:'shield')가 같은 이동의 함정 판정에 소급 적용되지 않게 한다.
     const shieldCountBeforeMove = this.shieldCount;
 
-    const { trapType: installedTrapType, itemEncounter } = await this.fetchArrival(x, y);
+    const [installedTrapType, itemEncounter] = await Promise.all([
+      this.fetchTrapTrigger(x, y),
+      this.fetchItemEncounter(x, y),
+    ]);
 
     const mysteryTrapType = itemEncounter.kind === 'trap' ? itemEncounter.type : null;
     const resolution = resolveTrapEncounters(installedTrapType, mysteryTrapType, shieldCountBeforeMove > 0);
@@ -2032,7 +2045,7 @@ class MazeScene extends Phaser.Scene {
 
     if (itemEncounter.kind === 'item') {
       // 서버(shared/game-types.ts ItemType)는 'trapInstall'을 반환할 일이 없다 — 로컬 폴백
-      // (reportArrival의 catch, TEMP_ITEMS 기반)에서만 나오는 클라이언트 전용 값이라 마지막
+      // (reportItemPickup의 catch, TEMP_ITEMS 기반)에서만 나오는 클라이언트 전용 값이라 마지막
       // else로 잡는다. 'detector'를 명시적으로 분기하지 않으면 이 else가 실수로 삼켜서 함정
       // 설치 아이템으로 오판정되는 버그가 있었음(2026-07-10 발견).
       if (itemEncounter.type === 'detector') {

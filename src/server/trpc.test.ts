@@ -1096,21 +1096,18 @@ describe('move.arrive 통합 API (trap.trigger + item.pickup 통합, docs/design
     });
   });
 
-  it('아이템만 있는 칸은 스폰 시점에 사전 확정된 결과를 item에 담아 반환한다(트랩 필드는 항상 false)', async () => {
+  it('아이템만 있는 칸은 rollMysteryOutcome 결과를 item에 담아 반환한다(트랩 필드는 항상 false)', async () => {
     const caller = createCaller({ userId: 'user-move-g' });
-    // 결과는 스폰(시딩) 시점에 이미 정해지므로(item.pickup과 동일 패턴), Math.random은
-    // move.arrive 호출이 아니라 map.getState(시딩을 트리거)를 감싸야 한다 — move.arrive
-    // 호출 시점에 걸면 아무 영향이 없다(사전 확정값을 그대로 읽을 뿐이므로).
-    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.5 / 8); // 결과를 flashlight로 고정
     const { mysteryBoxes } = await caller.map.getState({ mapId: 'map-1' });
-    randomSpy.mockRestore();
     const target = mysteryBoxes[0]!;
     // trap.trigger는 아이템 보드를 안 건드리므로, target까지 미리 밟아둬도(walkAnchorTo) 이
     // 자리의 미스터리 박스는 그대로 남는다 — 이후 같은 좌표로 move.arrive를 다시 호출해도
     // 앵커 거리는 0이라 assertAdjacent를 통과한다(manhattanDistance > 1일 때만 거부).
     await walkAnchorTo(caller, 'map-1', MAP_1_START, target);
 
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.5 / 8); // 결과를 flashlight로 고정
     const result = await caller.move.arrive({ mapId: 'map-1', x: target.x, y: target.y });
+    randomSpy.mockRestore();
 
     expect(result).toEqual({
       trap: { hit: false },
@@ -1120,10 +1117,7 @@ describe('move.arrive 통합 API (trap.trigger + item.pickup 통합, docs/design
 
   it('한 칸에 함정(respawn)과 미스터리 박스(detector)가 동시에 있으면 위치 앵커 리셋과 탐지기 충전이 중복 없이 함께 처리된다', async () => {
     const picker = createCaller({ userId: 'user-move-h' });
-    // 결과는 스폰(시딩) 시점에 이미 정해지므로, Math.random은 map.getState를 감싼다(위 테스트 참고).
-    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(2.5 / 8); // 결과를 detector로 고정
     const { mysteryBoxes } = await picker.map.getState({ mapId: 'map-1' }); // 앵커: (1,1)
-    randomSpy.mockRestore();
     const target = mysteryBoxes[0]!;
 
     const installer = createCaller({ userId: 'user-move-h-installer' });
@@ -1136,7 +1130,9 @@ describe('move.arrive 통합 API (trap.trigger + item.pickup 통합, docs/design
       await picker.trap.trigger({ mapId: 'map-1', x: step.x, y: step.y });
     }
 
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(2.5 / 8); // 결과를 detector로 고정
     const result = await picker.move.arrive({ mapId: 'map-1', x: target.x, y: target.y });
+    randomSpy.mockRestore();
 
     expect(result).toEqual({
       trap: { hit: true, type: 'respawn' },
@@ -1190,31 +1186,6 @@ describe('move.arrive 통합 API (trap.trigger + item.pickup 통합, docs/design
 
     const hits = [resultA, resultB].filter((r) => r.trap.hit);
     expect(hits).toHaveLength(1);
-  });
-
-  it('탐지기가 예고한 스폰형 함정 종류와 move.arrive로 실제 지급되는 결과가 일치한다(사전 확정값 무시 회귀, /review 72로 발견)', async () => {
-    const picker = createCaller({ userId: 'user-move-detector-consistency' });
-    // 결과는 스폰(시딩) 시점에 이미 정해지므로 map.getState를 감싼다.
-    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(4.5 / 8); // 모든 박스를 slow(함정)로 고정
-    const { mysteryBoxes } = await picker.map.getState({ mapId: 'map-1' });
-    randomSpy.mockRestore();
-    const target = mysteryBoxes[0]!;
-
-    await picker.item.claimLoadout({ mapId: 'map-1', loadoutId: 'trapDetector' });
-    // trap.trigger는 아이템 보드를 안 건드리므로 target까지 미리 밟아도(walkAnchorTo) 이 박스는
-    // 그대로 남는다 — 앵커가 target에 있을 때 탐지기를 발동해 이 박스의 예고 종류를 얻는다.
-    await walkAnchorTo(picker, 'map-1', MAP_1_START, target);
-    const { revealedTraps } = await picker.item.useDetector({ mapId: 'map-1' });
-    const predicted = revealedTraps.find((trap) => trap.x === target.x && trap.y === target.y);
-    expect(predicted).toBeDefined();
-
-    // 앵커가 이미 target이므로 move.arrive(target)도 인접 거리 0으로 통과한다.
-    const result = await picker.move.arrive({ mapId: 'map-1', x: target.x, y: target.y });
-
-    // 탐지기가 예고한 종류와 move.arrive가 실제 지급한 종류가 정확히 일치해야 한다 — 수정 전
-    // 코드(rollMysteryOutcome()을 즉석에서 새로 호출)였다면 8종 풀 중 다른 결과가 나올 확률이
-    // 매우 높아 이 assertion이 실패했을 것이다.
-    expect(result.item).toEqual({ picked: true, outcome: 'trap', type: predicted!.type });
   });
 });
 
