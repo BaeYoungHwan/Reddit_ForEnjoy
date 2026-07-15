@@ -3196,8 +3196,21 @@ class MazeScene extends Phaser.Scene {
   // 처리하면 진단 자체가 불가능해짐). 실배포(=IS_LOCAL_PREVIEW가 아닌 환경)에서 실패하면
   // 화면에 실패 안내를 띄우고 에러 메시지를 콘솔에 남겨서, 최소한 무슨 에러인지 눈으로
   // 확인할 수 있게 함.
+  //
+  // 2026-07-15 실서버 QA("클리어했는데 Record not saved"): checkGoalReached는 골인 직전 칸(B)
+  // 에서 발사된 move.arrive(resolveArrival, arrivalDispatcher.enqueue)의 응답을 기다리지 않고
+  // 골인 칸(C)에 도착하자마자 곧장 run.finish를 호출한다 — 그 간격이 한 칸 이동 애니메이션
+  // 시간(BASE_MOVE_DURATION=150ms)뿐이라, 실제 Reddit 배포 환경의 왕복 지연이 이보다 길면
+  // run.finish가 B의 위치 앵커 커밋보다 먼저 서버에 도착해버린다. PR#72가 추가한 골인 위치
+  // 검증(맨해튼 거리 ≤1)이 이 경우 실제로는 정상 골인인데도 NOT_AT_GOAL로 거부한다 — 화면엔
+  // "MAZE CLEARED!"가 뜨지만 리더보드엔 저장되지 않는 증상으로 나타난다. run.finish를 부르기
+  // 전에 arrivalDispatcher가 지금까지 받은 요청을 전부 처리할 때까지 기다려서, 최소한 B의
+  // move.arrive가 서버에 반영된 뒤에 위치 검증이 이뤄지도록 순서를 보장한다.
   private async reportRunFinish(rankText: Phaser.GameObjects.Text, statsText: Phaser.GameObjects.Text) {
+    // clearTimeMs는 실제로 골인한 순간 기준이어야 하므로, 아래 whenIdle() 대기가 끝나기 전에
+    // 먼저 계산해둔다 — 순서를 바꾸면 대기 시간(최대 몇백 ms)만큼 클리어 시간이 부풀려진다.
     const clearTimeMs = Date.now() - this.runStartTime;
+    await this.arrivalDispatcher.whenIdle();
     try {
       const result: RunFinishOutput = await trpc.run.finish.mutate({
         mapId: MAP_ID,
