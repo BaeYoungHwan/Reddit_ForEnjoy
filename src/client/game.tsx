@@ -1853,7 +1853,9 @@ class MazeScene extends Phaser.Scene {
         if (attempt >= MOVE_ARRIVE_RETRY_ATTEMPTS) throw err;
         // /review pr#80 지적: 재시도로 복구될 수 있는 정상 경로라 error가 아니라 warn — 진짜
         // 실패는 재시도를 다 소진했을 때(reportArrival의 catch)만 error로 남긴다.
-        console.warn(`move.arrive 실패 — 재시도 ${attempt}/${MOVE_ARRIVE_RETRY_ATTEMPTS - 1}`, err);
+        // 분모를 attempt(1부터 시작하는 "몇 번째 시도")와 맞춰 "시도 1/3"처럼 전체 시도 횟수
+        // 기준으로 표기(팀원 리뷰 지적 — 기존 "재시도 1/2"는 분모가 재시도 횟수라 혼동 여지 있었음).
+        console.warn(`move.arrive 실패 — 시도 ${attempt}/${MOVE_ARRIVE_RETRY_ATTEMPTS}`, err);
         await new Promise<void>((resolve) => this.time.delayedCall(MOVE_ARRIVE_RETRY_DELAY_MS, resolve));
       }
     }
