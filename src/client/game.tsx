@@ -11,7 +11,7 @@ import { computeClothWaveX } from './goalFlagWave';
 import { trpc } from './trpcClient';
 import { SequentialDispatcher } from './sequentialDispatcher';
 import { LOADOUT_STORAGE_KEY } from './loadout';
-import { resolveTrapEncounters } from './trapResolution';
+import { resolveTrapEncounters, type TrapResolution } from './trapResolution';
 import { loadSoundSettings, saveSoundSettings } from './soundSettings';
 import { clearQueueOnMute, decideNextInQueue, decideSfxRequest } from './sfxQueue';
 import type {
@@ -576,6 +576,11 @@ class MazeScene extends Phaser.Scene {
   private activeTrapEffects = new Map<TimedTrapType, number>();
   private isSliding = false;
 
+  // 슬라이드로 미끄러지는 도중 역방향 함정 칸을 지나가면, 그 자리에서 바로 걸지 않고 슬라이드가
+  // 완전히 끝난 시점(방향키 탈출/벽 충돌)에 한 번만 발동하기 위한 대기 플래그(팀 논의로 확정,
+  // 2026-07-15). 슬라이드 중 여러 번 지나가도 발동은 1회로 친다.
+  private pendingReverseAfterSlide = false;
+
   // 마지막으로 이동한 좌우 방향(true면 왼쪽을 보고 있음). 위/아래로만 이동해도 이 값은
   // 유지되므로, 캐릭터는 계속 마지막으로 봤던 좌우 방향을 보게 된다.
   private playerFacingLeft = false;
@@ -670,7 +675,7 @@ class MazeScene extends Phaser.Scene {
   // this.myTraps(내가 설치한 함정, 항상 표시)와 달리 일정 시간 후 사라져야 하고, 안개(fog)와
   // 무관하게 항상 보여야 의미가 있다(탐지기의 목적 자체가 "아직 안 밝힌 곳의 위험을 미리
   // 알려주는 것") — applyDetectorItem/clearRevealedTrapMarkers 참고.
-  private revealedTrapMarkers: Phaser.GameObjects.Image[] = [];
+  private revealedTrapMarkers: Phaser.GameObjects.GameObject[] = [];
 
   // applyDetectorItem이 예약한 "표시 종료" 타이머가 유효한지 판단하는 토큰. 탐지기는 맵당
   // 스폰이 1곳뿐이라 실제로 겹칠 일은 드물지만, flashPlayerTrap 등에서 이미 겪은 "먼저 걸린
@@ -721,15 +726,6 @@ class MazeScene extends Phaser.Scene {
   // 아이콘(슬롯 UI와 같은 png)을 띄워서 명확히 보여준다. 함정을 막아 개수가 0이 되는 순간
   // 원래 모습으로 되돌린다(위 shieldRing과 생명주기 동일).
   private shieldIcon: Phaser.GameObjects.Image | null = null;
-
-  // 쉴드를 2개 이상 들고 있을 때만 아이콘 모서리에 남은 개수를 보여주는 원형 배지
-  // (2026-07-14 도입, 쉴드 스택 버그 수정과 함께) — 1개일 땐 굳이 숫자를 안 띄워도 아이콘
-  // 자체가 "보유 중"을 이미 알려주므로 생략, 개수가 여럿일 때만 의미가 있어서 조건부로 만든다.
-  // 처음엔 파란 사각 태그(배경색+텍스트)였는데 shieldRing/shieldIcon의 시안색 톤과 안
-  // 어울린다는 피드백으로, 알림 배지 느낌의 원형(shieldCountBadgeBg + 숫자만)으로 교체
-  // (2026-07-14 재수정).
-  private shieldCountBadgeBg: Phaser.GameObjects.Arc | null = null;
-  private shieldCountLabel: Phaser.GameObjects.Text | null = null;
 
   // 2026-07-13 재작업: 4칸 고정 배열(null로 빈칸 표현) 대신, 실제로 들고 있는 아이템만큼만
   // 자라고 줄어드는 배열로 변경 — "먹을 때마다 박스가 생기는 구조가 더 좋을 것 같다"는
@@ -1475,11 +1471,6 @@ class MazeScene extends Phaser.Scene {
     const shieldIconX = this.playerImg.x - headIconOffsetX;
     this.shieldIcon?.setPosition(shieldIconX, headIconY);
     this.reverseIcon?.setPosition(this.playerImg.x + headIconOffsetX, headIconY);
-    // 개수 배지는 쉴드 아이콘의 오른쪽 아래 모서리에 살짝 겹치게 붙인다(뱃지 느낌).
-    const badgeX = shieldIconX + TILE_SIZE * 0.16;
-    const badgeY = headIconY + TILE_SIZE * 0.14;
-    this.shieldCountBadgeBg?.setPosition(badgeX, badgeY);
-    this.shieldCountLabel?.setPosition(badgeX, badgeY);
   }
 
   // 지금 눌려있는 방향키를 -1/0/1 형태의 방향값으로 바꿔주는 함수. 아무 키도 안 눌렸으면 null.
@@ -2003,14 +1994,64 @@ class MazeScene extends Phaser.Scene {
     }
   }
 
-  // 슬라이딩 도중 지나가는 칸의 서버 판정 — 위치 앵커를 매 칸 동기화하는 게 주 목적이라 함정
-  // 이펙트는 무시하지만(여러 함정 중첩 처리는 traps.md에도 "안 정해짐"으로 남아있어 임의로
-  // 정하지 않음 — 기존 동작 유지), 아이템은 move.arrive가 서버에서 이미 실제로 소모(hDel)해서
-  // 결과를 그냥 버리면 플레이어가 못 받은 채로 사라지는 버그가 된다(2026-07-14, move.arrive로
-  // 통합하며 발견 — 예전엔 trap.trigger만 불러서 아이템 보드를 안 건드렸었음). 아이템만 정상
-  // 지급하기로 결정(임소리).
+  // 쉴드 소모 처리(개수 차감 + 이펙트 재생 + 0개 될 때 링/아이콘 정리) — resolveArrival(일반
+  // 이동)과 resolveSlideStep(슬라이드 중 지나가는 칸) 양쪽에서 공유한다.
+  private consumeShieldIfBlocked(resolution: TrapResolution) {
+    if (!resolution.shieldConsumedFor) return;
+
+    this.shieldCount -= 1;
+    this.showShieldBlockEffect();
+    if (this.shieldCount <= 0) {
+      this.shieldRing?.destroy();
+      this.shieldRing = null;
+      this.shieldIcon?.destroy();
+      this.shieldIcon = null;
+    }
+  }
+
+  // 슬라이딩 도중 지나가는 칸의 서버 판정 — 일반 이동(resolveArrival)과 마찬가지로 설치형/
+  // 미스터리 박스 함정과 쉴드 소모를 전부 반영한다(2026-07-15 팀 논의로 확정 — 예전엔 아이템만
+  // 지급하고 함정은 전부 무시했으나, 서버는 슬라이드 중 지나가는 칸도 일반 칸과 동일하게 판정·
+  // 소모하므로 리스폰처럼 서버가 위치를 강제로 되돌리는 효과를 클라이언트가 놓치면 다음 이동이
+  // INVALID_MOVE로 거부되는 소프트락 버그가 있었다).
+  //
+  // 함정별 처리:
+  // - respawn: 그 즉시 시작점으로 되돌리고 슬라이드도 그 자리에서 중단(applyRespawnTrap이
+  //   killTweensOf로 진행 중인 이동을 이겨서, slideStep의 다음 재귀 호출 자체가 안 걸린다).
+  // - blind: 그 즉시 발동, 슬라이드는 안 멈추고 계속(위치에 관여하지 않는 효과라 동시에 가능).
+  // - reverse: 그 자리에서 바로 걸지 않고 pendingReverseAfterSlide만 세워둠 — 슬라이드가
+  //   완전히 끝난 시점(slideStep의 탈출/벽 충돌 지점)에 한 번만 발동시킨다(골인으로 끝나는
+  //   경우는 제외 — 팀 논의로 확정). 이 함수가 호출되는 시점에 슬라이드가 이미 끝나 있으면
+  //   (isSliding === false, 네트워크 응답이 늦게 온 경우) 바로 발동시킨다. respawn과 같은
+  //   칸/이후 칸에서 겹치면 respawn 쪽에서 대기 중이던 역방향도 함께 정리한다.
+  // - slow: 이미 같은 방향으로 미끄러지는 중이라 손댈 것 없음(기존 동작 유지, traps.md에도
+  //   "안 정해짐"으로 남아있는 슬라이드끼리 중첩만 예외).
   private async resolveSlideStep(x: number, y: number) {
-    const { itemEncounter } = await this.fetchArrival(x, y);
+    const shieldCountBeforeTile = this.shieldCount;
+    const { trapType: installedTrapType, itemEncounter } = await this.fetchArrival(x, y);
+
+    const mysteryTrapType = itemEncounter.kind === 'trap' ? itemEncounter.type : null;
+    const resolution = resolveTrapEncounters(installedTrapType, mysteryTrapType, shieldCountBeforeTile > 0);
+
+    this.consumeShieldIfBlocked(resolution);
+
+    for (const type of resolution.effectsToApply) {
+      if (type === 'slow') continue;
+      else if (type === 'respawn') {
+        this.applyRespawnTrap();
+        if (this.pendingReverseAfterSlide) {
+          this.pendingReverseAfterSlide = false;
+          this.applyReverseTrap();
+        }
+      } else if (type === 'blind') {
+        this.applyBlindTrap();
+      } else if (this.isSliding) {
+        this.pendingReverseAfterSlide = true;
+      } else {
+        this.applyReverseTrap();
+      }
+    }
+
     if (itemEncounter.kind === 'item') {
       this.applyItemDrop(itemEncounter.type);
     }
@@ -2046,22 +2087,7 @@ class MazeScene extends Phaser.Scene {
     // 소모되고, 우선순위(기본: 설치형)에 따라 둘 중 하나만 무효화된다(resolveTrapEncounters 참고).
     // 여러 개를 들고 있었으면 1개만 깎이고 나머지는 그대로 남는다(2026-07-14 쉴드 스택 버그 수정
     // — 예전엔 boolean이라 몇 개를 들고 있었든 한 번 막으면 전부 사라졌음).
-    if (resolution.shieldConsumedFor) {
-      this.shieldCount -= 1;
-      this.showShieldBlockEffect();
-      if (this.shieldCount <= 0) {
-        this.shieldRing?.destroy();
-        this.shieldRing = null;
-        this.shieldIcon?.destroy();
-        this.shieldIcon = null;
-        this.shieldCountBadgeBg?.destroy();
-        this.shieldCountBadgeBg = null;
-        this.shieldCountLabel?.destroy();
-        this.shieldCountLabel = null;
-      } else {
-        this.refreshShieldCountLabel();
-      }
-    }
+    this.consumeShieldIfBlocked(resolution);
 
     // 슬라이드보다 순간 효과(respawn/blind/reverse)를 먼저 적용한다 — respawn이 위치 자체를
     // 스폰으로 되돌리므로, 슬라이드가 끝난 자리를 나중에 respawn이 덮어써서 위치가 튀는 상황을
@@ -2268,9 +2294,7 @@ class MazeScene extends Phaser.Scene {
   private applyShieldItem() {
     this.playSfx('itemPickup');
     this.shieldCount += 1;
-    this.showFloatingLabel(
-      this.shieldCount > 1 ? `${ITEM_LABELS.shield} acquired! (x${this.shieldCount})` : `${ITEM_LABELS.shield} acquired!`
-    );
+    this.showFloatingLabel(`${ITEM_LABELS.shield} acquired!`);
     this.flashPlayer(ITEM_COLORS.shield);
 
     // 픽업 순간 짧은 팝 — showShieldBlockEffect(소모될 때 터지는 큰 링)보다 작고 빠르게 해서
@@ -2301,58 +2325,6 @@ class MazeScene extends Phaser.Scene {
         .setDepth(11); // 캐릭터(depth 10) 위에 떠 보이게
     }
 
-    this.refreshShieldCountLabel();
-  }
-
-  // 쉴드 개수 배지(원형 + 숫자)를 만들거나 갱신한다 — 1개 이하면 굳이 안 보여준다(아이콘
-  // 자체가 "보유 중"은 이미 표시해줌, 개수가 여럿일 때만 추가 정보로 의미가 있음). 2026-07-14:
-  // 실플레이 QA에서 "잘 눈에 안 띈다"는 피드백으로 한 차례 대비를 키웠는데(파란 사각 태그),
-  // 이후 "shieldRing/shieldIcon의 시안색 톤과 안 어울린다"는 디자인 피드백으로 알림 배지
-  // 느낌의 원형(shieldCountBadgeBg, shieldRing과 같은 시안 테두리)으로 재교체 — 텍스트도
-  // "x2" 대신 숫자만 남겨 좁은 원 안에서 더 깔끔하게 보이도록 함.
-  private refreshShieldCountLabel() {
-    if (this.shieldCount <= 1) {
-      this.shieldCountBadgeBg?.destroy();
-      this.shieldCountBadgeBg = null;
-      this.shieldCountLabel?.destroy();
-      this.shieldCountLabel = null;
-      return;
-    }
-
-    const text = String(this.shieldCount);
-    if (this.shieldCountLabel && this.shieldCountBadgeBg) {
-      this.shieldCountLabel.setText(text);
-      const punch = { duration: 120, yoyo: true, ease: 'Sine.easeOut' as const };
-      this.tweens.add({
-        targets: this.shieldCountBadgeBg,
-        scale: (_target: Phaser.GameObjects.Arc, _key: string, value: number) => value * 1.35,
-        ...punch,
-      });
-      this.tweens.add({
-        targets: this.shieldCountLabel,
-        scale: (_target: Phaser.GameObjects.Text, _key: string, value: number) => value * 1.35,
-        ...punch,
-      });
-      return;
-    }
-
-    // 배경 원 — shieldRing과 같은 시안 테두리로 통일해 같은 아이템의 UI라는 걸 알 수 있게 함.
-    this.shieldCountBadgeBg = this.add.circle(this.playerImg.x, this.playerImg.y, TILE_SIZE * 0.17, 0x0c1a2e, 1);
-    this.shieldCountBadgeBg.setStrokeStyle(2, 0xbfffff, 0.9);
-    this.shieldCountBadgeBg.setScale(0);
-    this.shieldCountBadgeBg.setDepth(12); // shieldIcon(depth 11)보다 위
-
-    this.shieldCountLabel = this.add
-      .text(this.playerImg.x, this.playerImg.y, text, {
-        fontSize: '13px',
-        color: '#ffffff',
-        fontStyle: 'bold',
-      })
-      .setOrigin(0.5)
-      .setScale(0)
-      .setDepth(13); // 배경 원보다 위
-
-    this.tweens.add({ targets: [this.shieldCountBadgeBg, this.shieldCountLabel], scale: 1, duration: 180, ease: 'Back.easeOut' });
   }
 
   // 함정 탐지기 — items.md 초안: 반경 내 함정을 표시(2026-07-14: 3칸 → 7칸으로 확대). 반경
@@ -2396,16 +2368,35 @@ class MazeScene extends Phaser.Scene {
       // 이 자리엔 원래 박스+물음표 마커(buildMysteryBoxMarker)가 이미 떠 있으므로, 그 위에
       // 겹쳐 그려서 "정체가 밝혀졌다"는 느낌을 준다(표시 종료 시 이 아이콘만 사라지고 원래
       // 박스+물음표는 계속 남음 — clearRevealedTrapMarkers 참고).
+      // 2026-07-15: 함정 종류별 png 스타일이 제각각이라 그림만으로 구분이 안 될 수 있다는
+      // 피드백 — 아이템 슬롯과 같은 색(ITEM_SLOT_SOCKET_COLOR) 원형 배경을 아이콘 밑에 깔고,
+      // 위쪽에 말풍선(showFloatingLabel과 같은 스타일) 텍스트로 함정 이름을 띄워 명확히 한다.
+      const bg = this.add.circle(cx, cy, ITEM_MARKER_SIZE * 0.55, ITEM_SLOT_SOCKET_COLOR, 1);
+      bg.setStrokeStyle(2, TRAP_COLORS[trap.type], 0.9);
+      bg.setDepth(11); // 아이콘(12)보다 아래, 안개/타일 도형(0~6)보다는 위
+
       const marker = this.add.image(cx, cy, TRAP_ICON_TEXTURE_KEYS[trap.type]).setDisplaySize(
         ITEM_MARKER_SIZE,
         ITEM_MARKER_SIZE
       );
       marker.setDepth(12); // 안개/타일 도형(0~6)보다 위, 손전등 등 나머지 이펙트와 안 겹치는 자리
 
+      const label = this.add
+        .text(cx, cy - ITEM_MARKER_SIZE * 0.55 - 10, TRAP_LABELS[trap.type], {
+          fontSize: '12px',
+          color: '#ffffff',
+          fontStyle: 'bold',
+          backgroundColor: '#00000099',
+          padding: { x: 4, y: 2 },
+        })
+        .setOrigin(0.5)
+        .setDepth(13); // 원형 배경/아이콘보다 위
+
       // 안개(탐색 여부)와 무관하게 항상 보여야 하므로 updateFog의 알파 조정 대상에 넣지 않고
-      // 여기서 직접 깜빡이는 펄스 트윈을 건다 — "위험 신호"처럼 눈에 띄게.
+      // 여기서 직접 깜빡이는 펄스 트윈을 건다 — "위험 신호"처럼 눈에 띄게. 배경 원/이름표도
+      // 아이콘과 함께 깜빡이도록 같이 묶는다.
       this.tweens.add({
-        targets: marker,
+        targets: [bg, marker, label],
         alpha: { from: 0.9, to: 0.35 },
         duration: 400,
         yoyo: true,
@@ -2413,7 +2404,7 @@ class MazeScene extends Phaser.Scene {
         ease: 'Sine.easeInOut',
       });
 
-      this.revealedTrapMarkers.push(marker);
+      this.revealedTrapMarkers.push(bg, marker, label);
     }
 
     this.time.delayedCall(DETECTOR_REVEAL_DISPLAY_MS, () => {
@@ -2848,6 +2839,11 @@ class MazeScene extends Phaser.Scene {
       this.isSliding = false;
       this.cameras.main.shakeEffect.reset(); // 조기 탈출 — 흔들림도 바로 멈춤
       this.refreshPlayerTrapVisual(); // 슬라이드 탈출 — 시야차단 등 다른 효과가 아직 활성이면 그걸로, 없으면 평상시 모습으로
+      // 슬라이드 중 역방향 함정을 지나갔다면 여기서(슬라이드가 실제로 끝나는 시점) 한 번 발동.
+      if (this.pendingReverseAfterSlide) {
+        this.pendingReverseAfterSlide = false;
+        this.applyReverseTrap();
+      }
       return;
     }
 
@@ -2860,6 +2856,11 @@ class MazeScene extends Phaser.Scene {
       this.isSliding = false;
       this.cameras.main.shakeEffect.reset(); // 벽에 부딪혀 정지 — 흔들림도 바로 멈춤
       this.refreshPlayerTrapVisual(); // 슬라이드 종료 — 시야차단 등 다른 효과가 아직 활성이면 그걸로, 없으면 평상시 모습으로
+      // 슬라이드 중 역방향 함정을 지나갔다면 여기서(슬라이드가 실제로 끝나는 시점) 한 번 발동.
+      if (this.pendingReverseAfterSlide) {
+        this.pendingReverseAfterSlide = false;
+        this.applyReverseTrap();
+      }
       return;
     }
 
@@ -2881,11 +2882,10 @@ class MazeScene extends Phaser.Scene {
     this.stepCount++;
     this.updateFog();
 
-    // 슬라이딩 도중 지나가는 칸에 다른 함정이 있어도 이번 구현에서는 이펙트를 재발동시키지 않음
-    // (여러 함정 중첩 처리는 traps.md에도 "안 정해짐"으로 남아있어 임의로 정하지 않음). 서버의
+    // 슬라이딩 도중 지나가는 칸도 resolveSlideStep이 함정/아이템/쉴드를 전부 판정한다(2026-07-15
+    // 팀 논의로 확정 — 슬라이드끼리 중첩만 예외, traps.md에도 "안 정해짐"으로 남아있음). 서버의
     // 위치 앵커(move.arrive의 인접 타일 검증 기준)는 매 칸마다 갱신해줘야 슬라이딩이 끝난 뒤
-    // 다음 이동이 "너무 멀리 떨어진 좌표"로 거부되지 않으므로 호출 자체는 매 칸마다 한다 —
-    // 다만 아이템은(resolveSlideStep 참고) 무시하지 않고 정상 지급한다.
+    // 다음 이동이 "너무 멀리 떨어진 좌표"로 거부되지 않으므로 호출 자체는 매 칸마다 한다.
     void this.resolveSlideStep(targetX, targetY);
 
     // 일반 이동(BASE_MOVE_DURATION)보다 짧은 시간으로 빠르게 미끄러지는 느낌을 냄.
@@ -2917,6 +2917,14 @@ class MazeScene extends Phaser.Scene {
     // 먼저 죽이지 않으면 아래에서 강제로 맞추는 playerImg 좌표를 트윈이 다음 프레임에
     // 다시 덮어써서 캐릭터가 엉뚱한 위치에서 튀는 예전 버그가 재발한다.
     this.tweens.killTweensOf(this.playerImg);
+
+    // 슬라이드 도중 리스폰 함정 칸을 지나간 경우(2026-07-15) — 슬라이드가 계속 이 함수를
+    // 몰랐던 채로 이어지면 화면엔 슬라이드 의상이 남고 흔들림도 안 멈춘다. 위 killTweensOf로
+    // slideStep의 다음 재귀 호출(트윈 onComplete)은 이미 막았으니, 여기서 상태만 마저 정리한다.
+    if (this.isSliding) {
+      this.isSliding = false;
+      this.cameras.main.shakeEffect.reset();
+    }
 
     this.playSfx('trapRespawn');
     this.flashPlayerTrap('respawn', RESPAWN_FLASH_MS);
