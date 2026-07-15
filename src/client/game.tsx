@@ -1912,7 +1912,20 @@ class MazeScene extends Phaser.Scene {
       // 미루면 언어 스펙상 "현재 대기 중인 모든 마이크로태스크가 완전히 소진된 뒤에만" 실행되는
       // 게 보장되므로 hop 수와 무관하게 확실하다 — this.time.delayedCall(0, ...)으로 다음 프레임
       // 틱까지 미룬다.
-      this.time.delayedCall(0, () => this.reconcilePositionWithServer(output.finalPosition));
+      //
+      // /review(PR#83 리뷰, 3차) 지적: reconcilePositionWithServer 내부는 "응답 도착 시점의
+      // 현재 화면 위치"와 finalPosition을 비교하는데, 배치 왕복이 진행되는 동안 플레이어가
+      // 계속 이동하면(다음 배치가 아직 버퍼에 쌓이고 있는 중) 이 둘은 정상적으로도 늘 어긋나
+      // 있을 수 있다 — applySlideTrap에 적용한 것과 같은 종류의 "낡은 정보" 문제. 이 배치가
+      // 실제로 문제없이 끝까지 처리됐다면 finalPosition은 항상 이 배치가 보낸 마지막 좌표와
+      // 정확히 같아야 한다는 점을 이용해, "지금 어디 있는지"가 아니라 "이 배치가 예상대로
+      // 끝났는지"만으로 판단한다 — 그러면 그 사이 플레이어가 얼마나 더 이동했는지와 무관하게
+      // 정확히 이 배치 자체의 이상 유무만 확인할 수 있다. 문제가 있었을 때(stoppedEarly로
+      // 예상 밖 좌표에서 멈췄을 때)만 보정을 예약한다.
+      const expectedEnd = waypoints[waypoints.length - 1]!;
+      if (output.finalPosition.x !== expectedEnd.x || output.finalPosition.y !== expectedEnd.y) {
+        this.time.delayedCall(0, () => this.reconcilePositionWithServer(output.finalPosition));
+      }
     } catch (err) {
       console.error('move.arriveBatch 실패(실서버 환경, 재시도 소진) — 이번 배치는 전부 판정 실패로 처리', err);
       resolvers.forEach((resolver) => resolver.resolve({ trap: { hit: false }, item: { picked: false } }));
