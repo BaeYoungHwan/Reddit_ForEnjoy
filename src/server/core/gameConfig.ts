@@ -15,6 +15,17 @@ export const PER_TYPE_TRAP_CAP: Record<TrapType, number> = {
 /** 근거: async-delivery.md 2절 "위치 앵커" — 세션 안전장치용 TTL(2시간) */
 export const POSITION_ANCHOR_TTL_SECONDS = 2 * 60 * 60;
 
+/**
+ * 근거: docs/design-docs/position-anchor-permanent-lock.md — run.finish가 NOT_AT_GOAL을 받았을 때
+ * "위치 앵커가 진짜로 얼어붙은 세션"과 "아직 골인 전이라 정상적으로 거부된 것뿐인 세션"을 구분하는
+ * 기준. 1로 두면 단 한 번의 무해한 조기 호출/타이밍 경합(ARRIVAL_IDLE_TIMEOUT_MS 레이스 등)도
+ * 리셋을 유발해 진행 중인 런을 잃게 된다. 실제로 앵커가 얼어붙으면 그 뒤 모든 이동이 연쇄로
+ * 계속 실패하므로 임계값을 조금 높여도(3) 진짜로 막힌 세션은 금방 넘어선다 — 반면 고의로
+ * 최소 횟수만 실패시킨 뒤 리셋을 유도하는 악용은 여전히 가능하지만(자기 자신의 아이템 보드만
+ * 리롤하는 수준), 리더보드 위조와는 무관해 감수한다.
+ */
+export const STUCK_SESSION_FAILURE_THRESHOLD = 3;
+
 /** 근거: async-delivery.md 2절 — 리셋 기준은 날짜가 포함된 키 이름, TTL은 메모리 정리용 안전장치(3일) */
 export const DATA_SAFETY_TTL_SECONDS = 3 * 24 * 60 * 60;
 
