@@ -429,7 +429,14 @@ describe('run.finish 골인 위치 검증 (리더보드 위조 방지 회귀 테
     });
   });
 
-  it('입력값(steps/clearTimeMs)만으로는 위조할 수 없다 — 골인 지점까지 실제로 이동해야 리더보드에 반영된다', async () => {
+  // 이 테스트가 막는 위협은 "골인 지점 근처에 한 번도 안 가고 임의 좌표에서 즉시 호출"뿐이다.
+  // steps/clearTimeMs 값 자체는 여전히 클라이언트가 보낸 그대로 신뢰되고, 서버가 실제 이동
+  // 횟수/소요 시간과 대조하지 않는다 — assertAdjacent도 벽을 검사하지 않으므로(grep 결과
+  // 서버 코드 전체에 wall/grid 참조 없음), 벽을 무시한 최단 직선 경로로 골인 지점 인접까지
+  // 최소 횟수만 "이동"한 뒤 steps=1/clearTimeMs=1 같은 값으로 제출하는 것은 여전히 가능하다
+  // (/review 72 지적, 2026-07-15). 이 갭은 이번 PR 범위를 벗어나 후속 과제로 남겨둔다 —
+  // 아래 테스트명을 "위조 불가"가 아니라 실제로 보장하는 범위로 정정.
+  it('골인 지점까지 실제로 이동하지 않고는 리더보드에 반영되지 않는다(steps/clearTimeMs 값 자체의 진위는 미검증 — 후속 과제)', async () => {
     const caller = createCaller({ userId: 'user-forged-score' });
     await caller.map.getState({ mapId: 'map-1' });
 
