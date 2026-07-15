@@ -434,6 +434,64 @@ describe('run.finish 골인 위치 검증 (리더보드 위조 방지 회귀 테
     });
   });
 
+  it('move.arrive 연속 실패로 위치 앵커가 얼어붙은 세션은 NOT_AT_GOAL로 거부돼도 위치 앵커/아이템 보드/로드아웃/탐지기 충전이 리셋된다(2026-07-15 위치 앵커 영구 락 회귀, docs/design-docs/position-anchor-permanent-lock.md)', async () => {
+    const caller = createCaller({ userId: 'user-stuck-anchor' });
+    await caller.map.getState({ mapId: 'map-1' }); // 앵커: 시작 좌표(1,1)
+    await caller.item.claimLoadout({ mapId: 'map-1', loadoutId: 'trapDetector' });
+
+    // move.arrive 요청 유실로 앵커가 얼어붙으면 그 뒤 모든 이동이 연쇄로 계속 실패한다 —
+    // STUCK_SESSION_FAILURE_THRESHOLD(3)번 이상 실패시켜 "진짜로 막힌 세션"임을 재현한다.
+    for (let i = 0; i < 3; i++) {
+      await expect(caller.move.arrive({ mapId: 'map-1', x: 9, y: 9 })).rejects.toMatchObject({
+        message: 'INVALID_MOVE',
+      });
+    }
+
+    // 앵커는 시작 좌표에 그대로 있으므로 골인 검증에도 실패한다.
+    await expect(
+      caller.run.finish({ mapId: 'map-1', steps: 10, clearTimeMs: 5000 })
+    ).rejects.toMatchObject({ message: 'NOT_AT_GOAL' });
+
+    // 리셋 전이었다면 앵커가 시작 좌표에 남아 SET NX가 막혀 재초기화되지 않았겠지만, 이번
+    // 수정으로 앵커가 삭제됐으므로 다음 map.getState가 시작 좌표로 다시 초기화한다 — 시작
+    // 좌표와 인접하지 않은 좌표로 이동을 시도해 INVALID_MOVE가 나면 재초기화를 확인한 것이다.
+    await caller.map.getState({ mapId: 'map-1' });
+    await expect(caller.trap.trigger({ mapId: 'map-1', x: 5, y: 5 })).rejects.toMatchObject({
+      message: 'INVALID_MOVE',
+    });
+
+    // 아이템 보드도 재시딩되어 있어야 한다.
+    const date = getKstDateString();
+    const boardKey = itemBoardKey('map-1', date, 'user-stuck-anchor');
+    expect(Object.keys(await mocks.redis.hGetAll(boardKey))).toHaveLength(8);
+
+    // 로드아웃 클레임/탐지기 충전도 리셋되어 있어야 다시 받을 수 있다(리셋 전이었다면
+    // granted:false — 하루 1회 NX가 그대로 남아있었을 것).
+    const secondClaim = await caller.item.claimLoadout({ mapId: 'map-1', loadoutId: 'trapDetector' });
+    expect(secondClaim.granted).toBe(true);
+  });
+
+  it('실패 횟수가 임계값 미만이면(진짜로 얼어붙은 세션이 아니면) NOT_AT_GOAL로 거부돼도 리셋되지 않아 세션이 계속 살아있다 — 조기 호출/타이밍 경합에서 진행 상황을 잃지 않기 위한 안전장치', async () => {
+    const caller = createCaller({ userId: 'user-not-stuck-yet' });
+    await caller.map.getState({ mapId: 'map-1' }); // 앵커: 시작 좌표(1,1)
+
+    // STUCK_SESSION_FAILURE_THRESHOLD(3)보다 적게만 실패시킨다.
+    await expect(caller.move.arrive({ mapId: 'map-1', x: 9, y: 9 })).rejects.toMatchObject({
+      message: 'INVALID_MOVE',
+    });
+
+    await expect(
+      caller.run.finish({ mapId: 'map-1', steps: 10, clearTimeMs: 5000 })
+    ).rejects.toMatchObject({ message: 'NOT_AT_GOAL' });
+
+    // 리셋되지 않았으므로 앵커는 여전히 시작 좌표에 남아있다 — 인접 좌표 이동은 그대로 성공하고,
+    // 계속 걸어서 실제로 완주하면 정상적으로 리더보드에 반영될 수 있어야 한다(세션이 죽지 않음).
+    await walkAnchorToGoal(caller, 'map-1', MAP_1_START);
+    await expect(
+      caller.run.finish({ mapId: 'map-1', steps: 42, clearTimeMs: 9999 })
+    ).resolves.toMatchObject({ rank: 1 });
+  });
+
   // 이 테스트가 막는 위협은 "골인 지점 근처에 한 번도 안 가고 임의 좌표에서 즉시 호출"뿐이다.
   // steps/clearTimeMs 값 자체는 여전히 클라이언트가 보낸 그대로 신뢰되고, 서버가 실제 이동
   // 횟수/소요 시간과 대조하지 않는다 — assertAdjacent도 벽을 검사하지 않으므로(grep 결과

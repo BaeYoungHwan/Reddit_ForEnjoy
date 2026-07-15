@@ -58,6 +58,14 @@ export function encodeLeaderboardScore(steps: number, clearTimeMs: number): numb
 export const positionAnchorKey = (mapId: string, date: string, userId: string): string =>
   `pos:${mapId}:${date}:${userId}`;
 
+// move.arrive/trap.trigger/item.pickup의 assertAdjacent 실패 횟수를 세는 카운터(docs/design-docs/
+// position-anchor-permanent-lock.md). 정상 플레이에서는 거의 발생하지 않는 이벤트라, 일정 횟수
+// 이상 쌓이면 위치 앵커가 실제로 얼어붙어 세션이 자력 복구 불가능한 상태(오라클과 무관, 순수
+// 네트워크 유실/앱 백그라운드 전환 등)에 빠졌다는 신호로 쓴다. run.finish가 NOT_AT_GOAL로 거부할
+// 때 이 카운터를 참고해 "진짜로 막힌 세션"과 "아직 골인 전이라 정상 거부"를 구분한다.
+export const moveFailureStreakKey = (mapId: string, date: string, userId: string): string =>
+  `pos:failstreak:${mapId}:${date}:${userId}`;
+
 // 함정 탐지기 "충전"(사용 가능 횟수) 카운터 — 미스터리 박스 픽업/로드아웃 클레임이 +1,
 // item.useDetector 성공 시 -1. 1회성을 서버가 강제하기 위한 값이라 클라이언트는 몰라도 된다.
 export const detectorChargeKey = (mapId: string, date: string, userId: string): string =>
