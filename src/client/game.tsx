@@ -2030,6 +2030,12 @@ class MazeScene extends Phaser.Scene {
     const shieldCountBeforeTile = this.shieldCount;
     const { trapType: installedTrapType, itemEncounter } = await this.fetchArrival(x, y);
 
+    // 2026-07-15(코드 리뷰 반영, /review pr#71): 이 응답은 네트워크 왕복 후 도착하므로, 슬라이드로
+    // 여러 칸을 빠르게 지나 골인까지 도달한 뒤에야 늦게 도착할 수 있다 — hasFinished 확인 없이
+    // 이펙트를 적용하면 골인 화면("MAZE CLEARED!")이 뜬 뒤에도 블라인드(화면 암전)/리스폰(위치·
+    // 탐색기록 리셋) 같은 효과가 뒤늦게 발동하는 문제가 있었다. 골인 후에는 아무것도 적용하지 않는다.
+    if (this.hasFinished) return;
+
     const mysteryTrapType = itemEncounter.kind === 'trap' ? itemEncounter.type : null;
     const resolution = resolveTrapEncounters(installedTrapType, mysteryTrapType, shieldCountBeforeTile > 0);
 
@@ -2079,6 +2085,11 @@ class MazeScene extends Phaser.Scene {
     const shieldCountBeforeMove = this.shieldCount;
 
     const { trapType: installedTrapType, itemEncounter } = await this.fetchArrival(x, y);
+
+    // 2026-07-15(코드 리뷰 반영, /review pr#71): resolveSlideStep과 동일한 이유 — 이 응답이
+    // 골인 이후에 도착하면 골인 화면이 뜬 뒤에도 함정 효과가 뒤늦게 발동할 수 있다. 골인 후에는
+    // 아무것도 적용하지 않는다.
+    if (this.hasFinished) return;
 
     const mysteryTrapType = itemEncounter.kind === 'trap' ? itemEncounter.type : null;
     const resolution = resolveTrapEncounters(installedTrapType, mysteryTrapType, shieldCountBeforeMove > 0);
