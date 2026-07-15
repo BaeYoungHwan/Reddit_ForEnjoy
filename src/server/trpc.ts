@@ -100,8 +100,15 @@ async function assertAdjacentTracked(
   try {
     assertAdjacent(last, next);
   } catch (err) {
-    await redis.incrBy(streakKey, 1);
-    await redis.expire(streakKey, POSITION_ANCHOR_TTL_SECONDS);
+    try {
+      await redis.incrBy(streakKey, 1);
+      await redis.expire(streakKey, POSITION_ANCHOR_TTL_SECONDS);
+    } catch (trackingErr) {
+      // 실패 스트릭 기록 자체가 실패해도(드문 Redis 일시 오류 등) 원래 에러(INVALID_MOVE 등)를
+      // 가리면 안 된다 — run.finish의 리셋 블록과 동일한 원칙(부가 효과 실패가 응답 계약을 깨지
+      // 않게 함, /review 79 지적).
+      console.error(`assertAdjacentTracked: 실패 스트릭 기록 실패 (streakKey=${streakKey})`, trackingErr);
+    }
     throw err;
   }
 }
