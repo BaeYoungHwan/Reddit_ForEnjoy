@@ -66,6 +66,23 @@ export type MoveArriveOutput = {
   item: ItemPickupOutput;
 };
 
+// move.arriveBatch: 여러 칸 연속 이동을 요청 1회로 묶어 왕복 횟수를 줄인다(픽업/판정 지연
+// 완화, docs/wbs.md "아이템/함정 픽업 지연" 항목 참고). waypoints는 클라이언트가 실제로
+// 지나간 칸들을 순서대로 담은 배열 — 서버는 이걸 move.arrive와 동일한 규칙으로 한 칸씩
+// 순차 검증한다(오라클 방지 유지, 병렬 처리 불가). 중간에 인접성 검증이 실패하거나 리스폰이
+// 나오면 그 지점에서 처리를 멈추고 그때까지의 결과만 반환한다 — stoppedEarly가 true면
+// waypoints 전체가 아니라 results.length개만 실제로 처리된 것.
+export type MoveArriveBatchInput = { mapId: string; waypoints: Position[] };
+export type MoveArriveBatchOutput = {
+  results: MoveArriveOutput[];
+  stoppedEarly: boolean;
+  // 배치 처리 후 서버가 실제로 커밋한 위치 — 클라이언트의 낙관적 이동(화면이 항상 서버보다
+  // 앞서있는 설계)이 stoppedEarly로 인해 실제 서버 위치와 어긋났을 때, 화면을 이 값으로
+  // 사후 보정(스냅백)하는 데 쓴다. 정상적으로 끝까지 처리됐을 때도 항상 포함해 클라이언트가
+  // 매번 "이번 배치의 진짜 최종 위치"를 신뢰할 수 있게 한다.
+  finalPosition: Position;
+};
+
 // 탐지기 발동(Z 시점 라이브 스캔) — 로드아웃/미스터리 박스 두 경로 공통 창구.
 // x, y를 입력받지 않는다 — 서버가 매 이동(trap.trigger)마다 갱신해온 위치 앵커를 그대로
 // 신뢰한다. 클라이언트가 좌표를 직접 넘기게 하면 오라클 방지 설계가 무의미해진다.

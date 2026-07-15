@@ -30,6 +30,14 @@ export const STUCK_SESSION_FAILURE_THRESHOLD = 3;
 export const DATA_SAFETY_TTL_SECONDS = 3 * 24 * 60 * 60;
 
 /**
+ * move.arriveBatch 한 번에 받아들이는 최대 waypoint 개수 — 아이템/함정 픽업 지연 완화(여러 칸
+ * 이동을 요청 1회로 묶음, docs/wbs.md 참고)를 위해 도입. 맵 크기(약 25×21칸)를 감안해 한 번의
+ * 연속 이동으로 현실적으로 나올 수 있는 칸 수보다 넉넉하게 잡되, 악용(과도하게 큰 배열을 한 번에
+ * 보내는 것) 자체를 막을 정도의 상한.
+ */
+export const MOVE_ARRIVE_BATCH_MAX_WAYPOINTS = 40;
+
+/**
  * 근거: docs/design-docs/items.md 함정 탐지기 초안 수치("반경 3칸") — 2026-07-14 실플레이
  * 피드백으로 7칸으로 확대(반경이 너무 좁다는 지적).
  * 거리 기준은 체비셰프 거리(대각선 포함, game.tsx의 updateFog 시야 반경 계산과 동일 공식) — 맨해튼 거리 아님.
