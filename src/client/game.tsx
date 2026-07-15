@@ -1949,7 +1949,14 @@ class MazeScene extends Phaser.Scene {
     console.warn(
       `move.arriveBatch: 화면 위치(${this.playerGridX},${this.playerGridY})와 서버 위치(${finalPosition.x},${finalPosition.y})가 어긋나 보정합니다.`
     );
+    // 실서버 QA로 발견된 소프트락 버그: killTweensOf는 진행 중인 트윈을 강제로 멈추지만 그
+    // 트윈의 onComplete는 실행시키지 않는다 — 그런데 isMoving을 다시 false로 푸는 코드가 바로
+    // 그 onComplete 안에 있다(tryMove 참고). 배치 지연으로 이 함수가 하필 "다음 칸으로 이동
+    // 중인" 트윈이 진행 중일 때 불리면, 그 트윈을 끊어버리면서도 isMoving은 계속 true로 남아
+    // update()의 "이동 중엔 입력 무시" 가드에 영원히 걸려 캐릭터가 방향키에 반응하지 않게
+    // 된다. 여기서 명시적으로 false로 되돌려 이 락을 막는다.
     this.tweens.killTweensOf(this.playerImg);
+    this.isMoving = false;
     if (this.isSliding) {
       this.isSliding = false;
       this.cameras.main.shakeEffect.reset();
@@ -3111,7 +3118,15 @@ class MazeScene extends Phaser.Scene {
     // 불릴 땐(네트워크 응답 도착 후) 이미 다음 이동 트윈이 진행 중일 수 있다. 그 트윈을
     // 먼저 죽이지 않으면 아래에서 강제로 맞추는 playerImg 좌표를 트윈이 다음 프레임에
     // 다시 덮어써서 캐릭터가 엉뚱한 위치에서 튀는 예전 버그가 재발한다.
+    //
+    // 2026-07-15(배치 도입 후 실서버 QA로 발견 — 소프트락): killTweensOf는 트윈을 강제로
+    // 멈추지만 그 트윈의 onComplete는 실행시키지 않는다 — isMoving을 다시 false로 푸는 코드가
+    // 바로 그 onComplete 안에 있다(tryMove 참고). 이 함수가 하필 "다음 칸으로 이동 중인" 트윈이
+    // 진행 중일 때 불리면(배치 지연으로 이 함수 호출 자체가 훨씬 늦어질 수 있어 발생 확률이
+    // 커짐), 그 트윈을 끊으면서도 isMoving은 계속 true로 남아 update()의 "이동 중엔 입력 무시"
+    // 가드에 영원히 걸려 캐릭터가 방향키에 반응하지 않게 된다 — 명시적으로 되돌려 막는다.
     this.tweens.killTweensOf(this.playerImg);
+    this.isMoving = false;
 
     // 슬라이드 도중 리스폰 함정 칸을 지나간 경우(2026-07-15) — 슬라이드가 계속 이 함수를
     // 몰랐던 채로 이어지면 화면엔 슬라이드 의상이 남고 흔들림도 안 멈춘다. 위 killTweensOf로
