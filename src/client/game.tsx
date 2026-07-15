@@ -351,13 +351,6 @@ const RANK_REVEAL_DELAY_MS = 450;
 const RANK_REVEAL_RISE_PX = 14;
 const RANK_REVEAL_DURATION_MS = 350;
 
-// 2026-07-15(/review pr#78 지적): reportRunFinish가 run.finish 호출 전 arrivalDispatcher가
-// 비워지길 기다리는데(whenIdle), 직전 move.arrive 요청이 네트워크 장애로 응답 자체가 영영
-// 안 오면 이 대기가 무한정 걸려 골인 화면은 뜨는데 순위 정보(revealRankInfo)가 영영 안 뜨는
-// 새로운 실패 모드가 생긴다. 실제 왕복 지연(수정 원인이 된 레이스)을 흡수하기엔 충분히 길고,
-// 진짜 멈춘 요청을 무한정 기다리진 않을 만큼은 짧은 상한을 둔다.
-const ARRIVAL_IDLE_TIMEOUT_MS = 2000;
-
 // 2026-07-15(위치 앵커 영구 락 대응, docs/design-docs/position-anchor-permanent-lock.md 6절):
 // move.arrive 요청 하나가 네트워크 순간 끊김 등으로 유실되면 서버 위치 앵커가 그 자리에
 // 멈추고, 이후 모든 이동이 연쇄로 실패하는 문제가 있었다(자세한 원인은 reportArrival 참고).
@@ -365,6 +358,23 @@ const ARRIVAL_IDLE_TIMEOUT_MS = 2000;
 // 실서버 왕복이 보통 300~800ms인 걸 감안해, 유저가 지연을 거의 못 느끼는 선에서 재시도.
 const MOVE_ARRIVE_RETRY_ATTEMPTS = 3;
 const MOVE_ARRIVE_RETRY_DELAY_MS = 300;
+// 재시도가 전부 실패하는 최악의 경우 실제로 걸리는 시간(/review pr#80 지적) — 재시도 사이
+// 대기(마지막 시도 후엔 대기 없으므로 (횟수-1)번)에 왕복 자체 시간(최대 800ms 가정, 위 주석
+// 참고)까지 더한 값. ARRIVAL_IDLE_TIMEOUT_MS가 이 값보다 짧으면, 골인 직전 칸이 하필 재시도를
+// 다 소진하는 상황에서 재시도가 끝나기도 전에 그 타임아웃이 먼저 발동해버려 재시도를 도입한
+// 목적(리더보드 미기록 완화)이 무색해진다.
+const MOVE_ARRIVE_RETRY_WORST_CASE_MS =
+  MOVE_ARRIVE_RETRY_ATTEMPTS * 800 + (MOVE_ARRIVE_RETRY_ATTEMPTS - 1) * MOVE_ARRIVE_RETRY_DELAY_MS;
+
+// 2026-07-15(/review pr#78 지적): reportRunFinish가 run.finish 호출 전 arrivalDispatcher가
+// 비워지길 기다리는데(whenIdle), 직전 move.arrive 요청이 네트워크 장애로 응답 자체가 영영
+// 안 오면 이 대기가 무한정 걸려 골인 화면은 뜨는데 순위 정보(revealRankInfo)가 영영 안 뜨는
+// 새로운 실패 모드가 생긴다. 실제 왕복 지연(수정 원인이 된 레이스)을 흡수하기엔 충분히 길고,
+// 진짜 멈춘 요청을 무한정 기다리진 않을 만큼은 짧은 상한을 둔다.
+// 2026-07-15(/review pr#80 지적으로 상향, 2000 → MOVE_ARRIVE_RETRY_WORST_CASE_MS+1000=4000):
+// move.arrive 재시도 도입으로 "실패까지 걸리는 시간"이 늘어나 기존 2000ms로는 재시도 최악
+// 케이스보다 짧아질 수 있었다 — 재시도 최악 케이스보다 여유 있게 값을 올림.
+const ARRIVAL_IDLE_TIMEOUT_MS = MOVE_ARRIVE_RETRY_WORST_CASE_MS + 1000;
 
 // trap.install 실패 사유 → 안내 문구. TrapInstallOutput.reason은 optional이라(성공 시엔
 // 항상 undefined) 값이 없을 때는 RETRY 문구로 대체.
@@ -1836,7 +1846,9 @@ class MazeScene extends Phaser.Scene {
         return await trpc.move.arrive.mutate({ mapId: MAP_ID, x, y });
       } catch (err) {
         if (attempt >= MOVE_ARRIVE_RETRY_ATTEMPTS) throw err;
-        console.error(`move.arrive 실패 — 재시도 ${attempt}/${MOVE_ARRIVE_RETRY_ATTEMPTS - 1}`, err);
+        // /review pr#80 지적: 재시도로 복구될 수 있는 정상 경로라 error가 아니라 warn — 진짜
+        // 실패는 재시도를 다 소진했을 때(reportArrival의 catch)만 error로 남긴다.
+        console.warn(`move.arrive 실패 — 재시도 ${attempt}/${MOVE_ARRIVE_RETRY_ATTEMPTS - 1}`, err);
         await new Promise<void>((resolve) => this.time.delayedCall(MOVE_ARRIVE_RETRY_DELAY_MS, resolve));
       }
     }
