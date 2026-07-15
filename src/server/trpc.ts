@@ -546,9 +546,14 @@ export const appRouter = t.router({
             trapInstallerId = parsed.installerId;
           }
         }
-        // 미스터리 박스: 결과는 픽업이 실제로 성사됐는지와 무관하게 미리 굴려도 안전하다(인메모리,
-        // 부수효과 없음) — 아래에서 hDel 성공 여부로 실제 픽업 성사만 별도 확정한다.
-        const rolled = rawItem ? rollMysteryOutcome() : null;
+        // 미스터리 박스: 결과는 스폰(시딩) 시점에 seedMysteryBoxes가 이미 굴려 저장해둔 값을
+        // 그대로 읽는다(item.pickup과 동일 패턴 — 함정 탐지기가 예고한 값과 실제 지급값이
+        // 일치해야 한다. 여기서 rollMysteryOutcome()을 새로 부르면 탐지기 예고와 어긋난다.
+        // 2026-07-15 /review 72로 발견: PR#70에서 item.pickup만 이 패턴으로 고쳐지고
+        // move.arrive는 누락돼 있었다).
+        const rolled = rawItem
+          ? (JSON.parse(rawItem) as { outcome: 'item'; type: ItemType } | { outcome: 'trap'; type: TrapType })
+          : null;
 
         // RT2(조건부): 소모할 게 있는 것만 개별 실행. Promise.allSettled로 서로의 실패를 격리한다 —
         // Promise.all로 묶으면 한쪽이 일시 실패했을 때 이미 성공한 다른 쪽 hDel(Redis에는 이미 반영됨)의
