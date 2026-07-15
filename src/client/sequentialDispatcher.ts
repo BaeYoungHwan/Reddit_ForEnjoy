@@ -20,4 +20,13 @@ export class SequentialDispatcher<T> {
     );
     return result;
   }
+
+  /**
+   * 지금까지 enqueue된 작업이 전부 settle(성공/실패 무관)될 때까지 기다린다 — 이 시점 이후에
+   * 새로 enqueue되는 작업은 기다리지 않는다(호출 시점의 tail 스냅샷). 절대 reject하지 않는다
+   * (enqueue의 tail 자체가 항상 성공으로 정규화됨).
+   */
+  whenIdle(): Promise<void> {
+    return this.tail;
+  }
 }
