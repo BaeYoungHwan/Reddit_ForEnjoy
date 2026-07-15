@@ -11,13 +11,14 @@ import { computeClothWaveX } from './goalFlagWave';
 import { trpc } from './trpcClient';
 import { SequentialDispatcher } from './sequentialDispatcher';
 import { LOADOUT_STORAGE_KEY } from './loadout';
-import { resolveTrapEncounters } from './trapResolution';
+import { resolveTrapEncounters, type TrapResolution } from './trapResolution';
 import { loadSoundSettings, saveSoundSettings } from './soundSettings';
 import { clearQueueOnMute, decideNextInQueue, decideSfxRequest } from './sfxQueue';
 import type {
   ItemPickupOutput,
   ItemType,
   ItemUseDetectorOutput,
+  MoveArriveOutput,
   Position,
   RunFinishOutput,
   TrapInstallOutput,
@@ -363,12 +364,12 @@ const INSTALL_FAILURE_MESSAGES: Record<InstallFailureReason, string> = {
 // 아이템 좌표(+로컬 폴백 전용 종류). 2026-07-12: 서버가 미스터리 박스 방식(개별 스폰에
 // 타입을 저장하지 않고 픽업 시점에 rollMysteryOutcome()으로 결정)으로 재설계되면서
 // map.getState가 주는 실제 스폰 좌표(state.mysteryBoxes)엔 더 이상 타입이 없다 — type은
-// 백엔드 없는 로컬 프리뷰 폴백(TEMP_ITEMS/reportItemPickup의 catch)에서만 쓰인다.
+// 백엔드 없는 로컬 프리뷰 폴백(TEMP_ITEMS/reportArrival의 catch)에서만 쓰인다.
 // ItemType(4종) 각각의 상세 스펙·확정 배경은 docs/design-docs/items.md 참고.
 type ItemInstance = { x: number; y: number; type?: ItemType };
 
-// fetchItemEncounter()의 반환 타입 — 미스터리 박스가 없었는지, 아이템으로 나왔는지, 함정으로
-// 나왔는지를 구분한다. resolveArrival이 이 결과와 fetchTrapTrigger의 설치형 함정 판정을 함께
+// fetchArrival()의 아이템 쪽 반환 타입 — 미스터리 박스가 없었는지, 아이템으로 나왔는지, 함정으로
+// 나왔는지를 구분한다. resolveArrival이 이 결과와 fetchArrival의 설치형 함정 판정을 함께
 // 모아 이펙트 적용/isMoving 해제를 결정한다.
 type ItemEncounter = { kind: 'none' } | { kind: 'item'; type: ItemType } | { kind: 'trap'; type: TrapType };
 
@@ -474,7 +475,7 @@ const BGM_PATH = '/sounds/bgm-game.mp3';
 // state.mysteryBoxes)으로 remainingItems를 채운다. 이 상수는 서버 호출이 실패했을 때
 // (백엔드 없는 로컬 프리뷰 등)의 폴백 전용 — src/server/core/items.ts의 실제 스폰 좌표와
 // 맞춰뒀다. 실제 스폰은 타입이 없는 미스터리 박스지만, 이 로컬 폴백은 백엔드 없이 픽업 배선이
-// 동작하는지만 확인하면 되므로 타입을 고정해둔 채로 유지한다(reportItemPickup 참고).
+// 동작하는지만 확인하면 되므로 타입을 고정해둔 채로 유지한다(reportArrival 참고).
 // ⚠️ 이 좌표들은 각 맵의 바닥 칸이어야 함 — 코드로 검증하지 않으므로, 맵 레이아웃이 바뀌면
 // 여기도 같이 확인할 것(벽 칸을 가리키면 마커가 벽 속에 파묻혀 주울 수 없게 됨).
 // 2026-07-10: map-1 레이아웃 4차 재설계(기능별 배치)에 맞춰 좌표 갱신.
@@ -575,6 +576,11 @@ class MazeScene extends Phaser.Scene {
   private activeTrapEffects = new Map<TimedTrapType, number>();
   private isSliding = false;
 
+  // 슬라이드로 미끄러지는 도중 역방향 함정 칸을 지나가면, 그 자리에서 바로 걸지 않고 슬라이드가
+  // 완전히 끝난 시점(방향키 탈출/벽 충돌)에 한 번만 발동하기 위한 대기 플래그(팀 논의로 확정,
+  // 2026-07-15). 슬라이드 중 여러 번 지나가도 발동은 1회로 친다.
+  private pendingReverseAfterSlide = false;
+
   // 마지막으로 이동한 좌우 방향(true면 왼쪽을 보고 있음). 위/아래로만 이동해도 이 값은
   // 유지되므로, 캐릭터는 계속 마지막으로 봤던 좌우 방향을 보게 된다.
   private playerFacingLeft = false;
@@ -610,30 +616,23 @@ class MazeScene extends Phaser.Scene {
   // 마커로만 그린다(밟거나 탐지기로 확인하기 전엔 무슨 함정인지 여전히 비밀).
   private otherTraps: Position[] = [];
 
-  // "x,y" 형태로 기록해두는, 내가 직접 설치한 함정의 좌표 집합. 실서버에서는 trap.trigger가
-  // installerId로 자기 함정을 걸러주지만(trpc.ts), 백엔드 없는 로컬 프리뷰의 reportPosition
-  // 폴백은 myTraps 배열만 보고 "칸이 일치하면 무조건 hit"으로 판정해서 자기 함정에 자기가
+  // "x,y" 형태로 기록해두는, 내가 직접 설치한 함정의 좌표 집합. 실서버에서는 trap.trigger/
+  // move.arrive가 installerId로 자기 함정을 걸러주지만(trpc.ts), 백엔드 없는 로컬 프리뷰의
+  // reportArrival 폴백은 myTraps 배열만 보고 "칸이 일치하면 무조건 hit"으로 판정해서 자기 함정에 자기가
   // 걸리는 버그가 있었다(2026-07-11 임소리 발견) — 실제 게임 규칙(설치자 본인은 회피)을
   // 로컬 폴백에서도 재현하려고 별도로 추적한다.
   private selfInstalledTrapKeys = new Set<string>();
 
-  // trap.trigger 호출이 dispatch된 순서대로만 네트워크로 나가도록 강제하는 큐.
-  // (연속 이동 중 여러 trap.trigger가 동시에 in-flight 상태가 되면 응답 순서가
+  // move.arrive 호출이 dispatch된 순서대로만 네트워크로 나가도록 강제하는 큐.
+  // (연속 이동 중 여러 move.arrive가 동시에 in-flight 상태가 되면 응답 순서가
   //  역전돼 서버 위치 앵커가 뒤처진 채로 다음 이동을 검증해 정상 이동이
   //  INVALID_MOVE로 오판정될 수 있다 — 이를 막기 위한 요청 직렬화.)
-  private trapDispatcher = new SequentialDispatcher<TrapTriggerOutput>();
-
-  // item.pickup 전용 직렬화 큐 — trapDispatcher와 동일한 이유로 필요하다(reportItemPickup
-  // 참고). 2026-07-14 발견: item.pickup을 직렬화 안 해도 된다고 판단했던 근거(2026-07-09,
-  // reportItemPickup 주석)는 그 시점엔 resolveArrival이 끝날 때까지 isMoving이 잠겨있어 한
-  // 번에 한 칸의 item.pickup만 in-flight일 수 있었기 때문에 성립했다 — 2026-07-13 PR #41
-  // (조작감 개선, isMoving을 트윈 완료 즉시 해제)로 그 전제가 깨지면서, 서로 다른 칸의
-  // item.pickup 두 개가 동시에 in-flight일 수 있게 됐다. Reddit 실환경처럼 응답 순서가
-  // 역전되면(나중 칸 응답이 이전 칸 응답보다 먼저 도착) 위치 앵커가 아직 안 옮겨진 상태라
-  // 정상적으로 있는 아이템도 INVALID_MOVE로 조용히 씹혀서 "아이템이 안 먹힌다"는 증상으로
-  // 나타난다(실서버 QA 2026-07-14). trap.trigger는 같은 칸이면 병렬로, 다른 칸끼리는
-  // 순서대로 나가도록 별도 큐로 분리해 병렬 조회 이점은 그대로 유지한다.
-  private itemDispatcher = new SequentialDispatcher<ItemPickupOutput>();
+  // 2026-07-14 임소리(배영환님 승인 하에, 실서버 아이템 미픽업 조사 후속): 클라이언트가 지금까지
+  // trap.trigger/item.pickup을 각각 별도 큐(trapDispatcher/itemDispatcher)로 호출하고 있었는데,
+  // 서버엔 이미 둘을 한 번의 요청으로 합친 move.arrive가 있었다(PR#67, 배영환) — 위치 앵커 검증/
+  // 커밋을 1회만 하고 함정/아이템 판정을 한 응답에 함께 반환해 이동 1칸당 서버 왕복을 2회→1회로
+  // 줄인다. 큐도 하나로 합쳐서 같은 이유(응답 순서 역전 시 위치 앵커 오판정 방지)로 계속 직렬화한다.
+  private arrivalDispatcher = new SequentialDispatcher<MoveArriveOutput>();
 
   // 지금 재생 중인 발걸음 소리 인스턴스 — 다음 발걸음이 날 때 아직 안 끝났으면 끊어서 겹쳐
   // 들리지 않게 한다(playFootstepNow 참고).
@@ -676,7 +675,7 @@ class MazeScene extends Phaser.Scene {
   // this.myTraps(내가 설치한 함정, 항상 표시)와 달리 일정 시간 후 사라져야 하고, 안개(fog)와
   // 무관하게 항상 보여야 의미가 있다(탐지기의 목적 자체가 "아직 안 밝힌 곳의 위험을 미리
   // 알려주는 것") — applyDetectorItem/clearRevealedTrapMarkers 참고.
-  private revealedTrapMarkers: Phaser.GameObjects.Image[] = [];
+  private revealedTrapMarkers: Phaser.GameObjects.GameObject[] = [];
 
   // applyDetectorItem이 예약한 "표시 종료" 타이머가 유효한지 판단하는 토큰. 탐지기는 맵당
   // 스폰이 1곳뿐이라 실제로 겹칠 일은 드물지만, flashPlayerTrap 등에서 이미 겪은 "먼저 걸린
@@ -727,15 +726,6 @@ class MazeScene extends Phaser.Scene {
   // 아이콘(슬롯 UI와 같은 png)을 띄워서 명확히 보여준다. 함정을 막아 개수가 0이 되는 순간
   // 원래 모습으로 되돌린다(위 shieldRing과 생명주기 동일).
   private shieldIcon: Phaser.GameObjects.Image | null = null;
-
-  // 쉴드를 2개 이상 들고 있을 때만 아이콘 모서리에 남은 개수를 보여주는 원형 배지
-  // (2026-07-14 도입, 쉴드 스택 버그 수정과 함께) — 1개일 땐 굳이 숫자를 안 띄워도 아이콘
-  // 자체가 "보유 중"을 이미 알려주므로 생략, 개수가 여럿일 때만 의미가 있어서 조건부로 만든다.
-  // 처음엔 파란 사각 태그(배경색+텍스트)였는데 shieldRing/shieldIcon의 시안색 톤과 안
-  // 어울린다는 피드백으로, 알림 배지 느낌의 원형(shieldCountBadgeBg + 숫자만)으로 교체
-  // (2026-07-14 재수정).
-  private shieldCountBadgeBg: Phaser.GameObjects.Arc | null = null;
-  private shieldCountLabel: Phaser.GameObjects.Text | null = null;
 
   // 2026-07-13 재작업: 4칸 고정 배열(null로 빈칸 표현) 대신, 실제로 들고 있는 아이템만큼만
   // 자라고 줄어드는 배열로 변경 — "먹을 때마다 박스가 생기는 구조가 더 좋을 것 같다"는
@@ -1223,7 +1213,7 @@ class MazeScene extends Phaser.Scene {
       // state.myTraps는 서버가 실제로 확인해준 "내가 설치한 함정" 목록이라(trapInstallerKey
       // 기준) 이전 세션에 설치해둔 것도 포함될 수 있다. selfInstalledTrapKeys는 지금까지
       // handleInstallSuccess가 호출된 적 있는 것만 기록해서, 새로고침 등으로 여기서 처음
-      // 불러온 기존 함정은 빠져있었다 — reportPosition의 로컬 폴백이 그런 함정도 다시 "내
+      // 불러온 기존 함정은 빠져있었다 — reportArrival의 로컬 폴백이 그런 함정도 다시 "내
       // 함정"으로 인식하도록 여기서 한 번에 채워준다(2026-07-11 발견/수정).
       for (const trap of state.myTraps) {
         this.selfInstalledTrapKeys.add(`${trap.x},${trap.y}`);
@@ -1236,32 +1226,49 @@ class MazeScene extends Phaser.Scene {
       // 필드 설명 참고) — mysteryBoxes와 동일하게 위치는 공개, 종류만 비공개.
       this.otherTraps = state.otherTraps;
     } catch (err) {
-      // 정적 빌드만 단독으로 띄우는 로컬 프리뷰(백엔드 없음)에서도 마커를 눈으로 확인할 수
-      // 있도록 하는 개발용 폴백. 실제 서버(devvit playtest/배포 환경)가 응답하면 위 try에서
-      // 이미 성공해 여기까지 오지 않는다.
-      // ⚠️ 아래 좌표들도 TEMP_ITEMS와 마찬가지로 MAIN_MAP(map-1)의 바닥 칸이어야 하며
-      // 코드로 검증하지 않는다 — 맵이 바뀌면 같이 확인할 것.
-      // 2026-07-10: map-1 레이아웃 4차 재설계에 맞춰 좌표 갱신. myTraps는 실제로는 "내가
-      // 설치한 함정"(서버 응답 기준, trapInstallerKey)이라 맵에 고정 배치되는 개념이 아님 —
-      // 여기 좌표는 백엔드 없는 로컬 프리뷰에서만 쓰이는 임시 데이터라 실제 게임플레이에
-      // 영향은 없지만, slow(슬라이드)만큼은 로컬에서 테스트할 때도 실제로 미끄러지는 게
-      // 눈에 보여야 의미가 있음.
-      // ⚠️ (3,9)로 한 번 옮겼다가 재발견: "이 칸에서 어느 방향으로든 러너웨이가 있는가"만
-      // 계산하고 "그 방향으로 실제 진입이 가능한가"는 확인 안 해서, 정작 진입 가능한 두
-      // 방향(위/왼쪽에서 들어옴) 모두 즉시 벽이라 실질 슬라이드 거리가 0이었음. "진입 가능한
-      // 이전 칸이 열려있는지 + 그 방향으로 계속 몇 칸 갈 수 있는지"까지 확인해서 재배치 —
-      // 아래 (2,19)는 실제로 왼쪽에서 오른쪽으로 걸어 들어오면서 그대로 오른쪽으로 15칸
-      // 미끄러지는 지점(맵 하단의 긴 통로 한복판).
-      console.error('map.getState 실패 — 로컬 프리뷰용 임시 데이터로 대체', err);
-      this.myTraps = LOCAL_FALLBACK_TRAPS_BY_MAP[MAP_ID] ?? LOCAL_FALLBACK_TRAPS_BY_MAP['map-1']!;
-      // 발자국은 로컬 폴백 임시 좌표를 두지 않는다(2026-07-14 제거, PR#65) — 시작 지점 근처
-      // 좌표라 스폰 인트로가 끝나자마자 바로 보여서 "다른 유저 발자국"이라기엔 부자연스러웠음.
-      footprints = [];
-      // 아이템도 위와 동일한 이유(백엔드 없는 로컬 프리뷰)로 TEMP_ITEMS 좌표로 폴백한다.
-      this.remainingItems = TEMP_ITEMS;
-      // 다른 유저 함정도 로컬 프리뷰엔 개념이 없으므로(유저가 나 하나뿐) 빈 배열로 둔다.
-      this.otherTraps = [];
+      // 2026-07-14 임소리(실서버 아이템 미픽업 조사): 이 catch가 IS_LOCAL_PREVIEW 가드 없이
+      // 무조건 로컬 폴백 좌표를 썼던 게 실서버 버그였다 — reportArrival 등 다른 서버 호출은
+      // 전부 "실서버면 폴백 안 함" 패턴으로 가드돼 있는데 여기만 예외였음.
+      // PR#70(미스터리 박스 랜덤 스폰) 이전엔 서버 스폰도 고정 좌표라 이 하드코딩 폴백이
+      // 우연히 들어맞아 무해했지만, 랜덤 스폰 도입 후엔 폴백 좌표가 실제 서버 보드와 거의
+      // 항상 어긋난다 — map.getState가 세션 중 단 한 번이라도 실패하면(네트워크 일시 장애
+      // 등) remainingItems가 영구히 잘못된 좌표로 고정되고, 마커는 보이지만 밟아도 서버가
+      // hGet으로 못 찾아 picked:false만 반환하는 "밟아도 안 먹힘" 증상으로 이어졌다.
+      if (!IS_LOCAL_PREVIEW) {
+        console.error('map.getState 실패(실서버 환경) — 로컬 폴백 안 함, 빈 상태로 안전하게 처리', err);
+        this.myTraps = [];
+        footprints = [];
+        this.remainingItems = [];
+        this.otherTraps = [];
+      } else {
+        // 정적 빌드만 단독으로 띄우는 로컬 프리뷰(백엔드 없음)에서도 마커를 눈으로 확인할 수
+        // 있도록 하는 개발용 폴백.
+        // ⚠️ 아래 좌표들도 TEMP_ITEMS와 마찬가지로 MAIN_MAP(map-1)의 바닥 칸이어야 하며
+        // 코드로 검증하지 않는다 — 맵이 바뀌면 같이 확인할 것.
+        // 2026-07-10: map-1 레이아웃 4차 재설계에 맞춰 좌표 갱신. myTraps는 실제로는 "내가
+        // 설치한 함정"(서버 응답 기준, trapInstallerKey)이라 맵에 고정 배치되는 개념이 아님 —
+        // 여기 좌표는 백엔드 없는 로컬 프리뷰에서만 쓰이는 임시 데이터라 실제 게임플레이에
+        // 영향은 없지만, slow(슬라이드)만큼은 로컬에서 테스트할 때도 실제로 미끄러지는 게
+        // 눈에 보여야 의미가 있음.
+        // ⚠️ (3,9)로 한 번 옮겼다가 재발견: "이 칸에서 어느 방향으로든 러너웨이가 있는가"만
+        // 계산하고 "그 방향으로 실제 진입이 가능한가"는 확인 안 해서, 정작 진입 가능한 두
+        // 방향(위/왼쪽에서 들어옴) 모두 즉시 벽이라 실질 슬라이드 거리가 0이었음. "진입 가능한
+        // 이전 칸이 열려있는지 + 그 방향으로 계속 몇 칸 갈 수 있는지"까지 확인해서 재배치 —
+        // 아래 (2,19)는 실제로 왼쪽에서 오른쪽으로 걸어 들어오면서 그대로 오른쪽으로 15칸
+        // 미끄러지는 지점(맵 하단의 긴 통로 한복판).
+        console.error('map.getState 실패(백엔드 없음) — 로컬 프리뷰용 임시 데이터로 대체', err);
+        this.myTraps = LOCAL_FALLBACK_TRAPS_BY_MAP[MAP_ID] ?? LOCAL_FALLBACK_TRAPS_BY_MAP['map-1']!;
+        // 발자국은 로컬 폴백 임시 좌표를 두지 않는다(2026-07-14 제거, PR#65) — 시작 지점 근처
+        // 좌표라 스폰 인트로가 끝나자마자 바로 보여서 "다른 유저 발자국"이라기엔 부자연스러웠음.
+        footprints = [];
+        // 아이템도 위와 동일한 이유(백엔드 없는 로컬 프리뷰)로 TEMP_ITEMS 좌표로 폴백한다.
+        this.remainingItems = TEMP_ITEMS;
+        // 다른 유저 함정도 로컬 프리뷰엔 개념이 없으므로(유저가 나 하나뿐) 빈 배열로 둔다.
+        this.otherTraps = [];
+      }
     }
+    // 2026-07-14 PR#71 리뷰 반영: 렌더링 3줄을 실서버/로컬 두 분기에 각각 중복으로 넣지 않고
+    // 여기 하나로 합쳤다 — 나중에 초기화 단계가 늘어나도 이 한 곳만 고치면 된다.
     this.renderTrapMarkers();
     this.renderFootprintMarkers(footprints);
     this.renderItemMarkers();
@@ -1464,11 +1471,6 @@ class MazeScene extends Phaser.Scene {
     const shieldIconX = this.playerImg.x - headIconOffsetX;
     this.shieldIcon?.setPosition(shieldIconX, headIconY);
     this.reverseIcon?.setPosition(this.playerImg.x + headIconOffsetX, headIconY);
-    // 개수 배지는 쉴드 아이콘의 오른쪽 아래 모서리에 살짝 겹치게 붙인다(뱃지 느낌).
-    const badgeX = shieldIconX + TILE_SIZE * 0.16;
-    const badgeY = headIconY + TILE_SIZE * 0.14;
-    this.shieldCountBadgeBg?.setPosition(badgeX, badgeY);
-    this.shieldCountLabel?.setPosition(badgeX, badgeY);
   }
 
   // 지금 눌려있는 방향키를 -1/0/1 형태의 방향값으로 바꿔주는 함수. 아무 키도 안 눌렸으면 null.
@@ -1752,48 +1754,54 @@ class MazeScene extends Phaser.Scene {
 
   // trap.trigger를 호출해 서버 쪽 위치 앵커를 동기화하고, 함정에 걸렸는지 응답을 받는다.
   // 정말 백엔드 자체가 없을 때만(IS_LOCAL_PREVIEW — 로컬 정적 프리뷰) loadServerState와
-  // 동일하게 로컬 myTraps 목록으로 직접 판정해 폴백한다 — 그래야 로컬 프리뷰에서도 함정을
-  // "밟으면 실제로 발동"한다. attemptInstall/applyLoadout/reportRunFinish와 같은 패턴
-  // (IS_LOCAL_PREVIEW로 실서버/로컬을 구분)으로 통일 — 처음엔 에러 모양(TRPCClientError.data
-  // 유무)으로 "서버가 진짜 거부한 건지"를 구분했었는데, 그러면 실서버에서 응답 자체가 아예
-  // 안 온 진짜 통신 장애(네트워크 오류 등, .data가 안 채워짐)까지 "백엔드 없음"으로 오판해
-  // 여전히 로컬 폴백을 타버리는 구멍이 있었다(2026-07-14 리뷰에서 발견) — IS_LOCAL_PREVIEW는
-  // 에러 종류와 무관하게 "지금 실서버인가"만 보므로 이 구멍이 없다. 실서버(IS_LOCAL_PREVIEW가
-  // 아님)에서 trap.trigger가 실패하면 — 위치 앵커 레이스로 인한 정당한 INVALID_MOVE든, 진짜
-  // 네트워크 장애든 — 폴백하지 않고 "이번 칸은 판정 실패"로 안전하게 처리한다. 폴백을 타면
-  // 스폰형 함정(설치자가 없어 myTraps엔 없음)을 조용히 "함정 없음"으로 삼켜버리는 문제가
-  // 있었다(실서버 QA 2026-07-13/14, "함정이 안 보이거나 밟아도 안 먹힌다").
-  private async reportPosition(x: number, y: number) {
+  // 동일하게 로컬 myTraps/remainingItems 목록으로 직접 판정해 폴백한다 — 그래야 로컬 프리뷰에서도
+  // 함정을 "밟으면 실제로 발동"하고 아이템도 주울 수 있다. attemptInstall/applyLoadout/
+  // reportRunFinish와 같은 패턴(IS_LOCAL_PREVIEW로 실서버/로컬을 구분)으로 통일 — 처음엔 에러
+  // 모양(TRPCClientError.data 유무)으로 "서버가 진짜 거부한 건지"를 구분했었는데, 그러면
+  // 실서버에서 응답 자체가 아예 안 온 진짜 통신 장애(네트워크 오류 등, .data가 안 채워짐)까지
+  // "백엔드 없음"으로 오판해 여전히 로컬 폴백을 타버리는 구멍이 있었다(2026-07-14 리뷰에서 발견)
+  // — IS_LOCAL_PREVIEW는 에러 종류와 무관하게 "지금 실서버인가"만 보므로 이 구멍이 없다. 실서버
+  // (IS_LOCAL_PREVIEW가 아님)에서 move.arrive가 실패하면 — 위치 앵커 레이스로 인한 정당한
+  // INVALID_MOVE든, 진짜 네트워크 장애든 — 폴백하지 않고 "이번 칸은 판정 실패"로 안전하게
+  // 처리한다. 폴백을 타면 스폰형 함정(설치자가 없어 myTraps엔 없음)을 조용히 "함정 없음"으로
+  // 삼켜버리는 문제가 있었다(실서버 QA 2026-07-13/14, "함정이 보이지 않거나 밟아도 안 먹힌다").
+  //
+  // 2026-07-14 임소리(배영환님 승인 하에, 실서버 아이템 미픽업 조사 후속): trap.trigger와
+  // item.pickup을 각각 따로 부르던 reportPosition/reportItemPickup을 move.arrive 하나로
+  // 합쳤다 — 서버가 이미 위치 앵커 검증/커밋을 1회로 묶어서 처리하는 API를 제공하고 있었는데
+  // 클라이언트만 옛 방식(2회 왕복)을 계속 쓰고 있었다.
+  private async reportArrival(x: number, y: number): Promise<MoveArriveOutput> {
     try {
-      return await this.trapDispatcher.enqueue(() =>
-        trpc.trap.trigger.mutate({ mapId: MAP_ID, x, y })
+      return await this.arrivalDispatcher.enqueue(() =>
+        trpc.move.arrive.mutate({ mapId: MAP_ID, x, y })
       );
     } catch (err) {
       if (!IS_LOCAL_PREVIEW) {
-        console.error('trap.trigger 실패(실서버 환경) — 로컬 폴백 안 함, 이번 칸은 판정 실패로 처리', err);
-        return { hit: false };
+        console.error('move.arrive 실패(실서버 환경) — 로컬 폴백 안 함, 이번 칸은 판정 실패로 처리', err);
+        return { trap: { hit: false }, item: { picked: false } };
       }
 
-      console.error('trap.trigger 실패(백엔드 없음) — 로컬 함정 목록으로 직접 판정', err);
+      console.error('move.arrive 실패(백엔드 없음) — 로컬 함정/아이템 목록으로 직접 판정', err);
       const localTrap = this.myTraps.find((t) => t.x === x && t.y === y);
-      if (!localTrap) return { hit: false };
+      // 실서버의 "설치자 본인은 회피"(trpc.ts trap.trigger/move.arrive, installerId 비교)를
+      // 로컬 폴백에서도 재현 — selfInstalledTrapKeys 참고.
+      const trap: TrapTriggerOutput =
+        localTrap && !this.selfInstalledTrapKeys.has(`${x},${y}`)
+          ? { hit: true, type: localTrap.type }
+          : { hit: false };
 
-      // 실서버의 "설치자 본인은 회피"(trpc.ts trap.trigger, installerId 비교)를 로컬 폴백에서도
-      // 재현 — selfInstalledTrapKeys 참고.
-      if (this.selfInstalledTrapKeys.has(`${x},${y}`)) return { hit: false };
+      const localItem = this.remainingItems.find((item) => item.x === x && item.y === y);
+      // 2026-07-12: 서버가 미스터리 박스로 바뀌며 outcome:'item'|'trap' 판정이 추가됐지만,
+      // 로컬 폴백은 실제 확률 풀(gameConfig.ts MYSTERY_BOX_OUTCOME_POOL)을 재현하지 않고
+      // 기존처럼 TEMP_ITEMS에 박아둔 고정 타입을 outcome:'item'으로 그대로 반환한다 — 백엔드
+      // 없는 환경에서 픽업 배선 자체가 동작하는지 확인하는 용도라, 8종 확률 재현은 스코프 밖
+      // (실제 확률/함정 결과 테스트는 trpc.test.ts가 담당).
+      const item: ItemPickupOutput = localItem
+        ? { picked: true, outcome: 'item', type: localItem.type ?? 'flashlight' }
+        : { picked: false };
 
-      return { hit: true, type: localTrap.type };
+      return { trap, item };
     }
-  }
-
-  // 방금 도착한 칸에 설치형 함정이 있는지 서버에만 확인하는 순수 조회 함수 — 상태(isMoving,
-  // shieldCount, 화면 이펙트)는 전혀 건드리지 않는다. 결과 적용/쉴드 소모/isMoving 해제는
-  // resolveArrival이 미스터리 박스 판정(fetchItemEncounter)과 함께 모아서 한 곳에서 처리한다
-  // (같은 타일에 설치형 함정과 미스터리 박스가 동시에 존재할 수 있어 — traps.md 0절 — 두 판정을
-  // 따로따로 즉시 적용하면 어느 쪽 응답이 먼저 오느냐에 따라 결과가 달라지는 레이스가 있었음).
-  private async fetchTrapTrigger(x: number, y: number): Promise<TrapType | null> {
-    const result = await this.reportPosition(x, y);
-    return result?.hit && result.type ? result.type : null;
   }
 
   // 함정을 밟았을 때 캐릭터 색을 잠깐 바꿔서 "뭔가 발동했다"는 걸 보여주는 간단한 이펙트.
@@ -1892,41 +1900,8 @@ class MazeScene extends Phaser.Scene {
     });
   }
 
-  // item.pickup을 호출해 서버에 픽업을 기록하고 실제로 주웠는지 응답을 받는다(다른 유저가
-  // 먼저 주웠으면 picked:false). reportPosition과 동일한 이유로 실패 시 로컬 remainingItems
-  // 목록으로 직접 판정하는 폴백을 둔다. itemDispatcher로 직렬화하는 이유는 trapDispatcher와
-  // 동일 — 다른 칸끼리의 item.pickup 응답 순서가 역전되면 위치 앵커 검증에서 정상 이동이
-  // INVALID_MOVE로 오판정될 수 있다(itemDispatcher 선언부 주석 참고).
-  private async reportItemPickup(x: number, y: number): Promise<ItemPickupOutput> {
-    try {
-      return await this.itemDispatcher.enqueue(() =>
-        trpc.item.pickup.mutate({ mapId: MAP_ID, x, y })
-      );
-    } catch (err) {
-      if (!IS_LOCAL_PREVIEW) {
-        // reportPosition 주석 참고 — 실서버에서 나는 에러는(위치 앵커 레이스로 인한 정당한
-        // 거부든, 진짜 네트워크 장애든) 로컬 폴백으로 감싸지 않는다. 감싸버리면 서버 보드엔
-        // 그대로 남아있는 박스를 클라이언트가 가짜로 "주웠다"고 판단해 마커를 지워버리는
-        // 영구적인 클라/서버 상태 불일치가 생긴다.
-        console.error('item.pickup 실패(실서버 환경) — 로컬 폴백 안 함, 이번 칸은 픽업 실패로 처리', err);
-        return { picked: false };
-      }
-
-      console.error('item.pickup 실패(백엔드 없음) — 로컬 아이템 목록으로 직접 판정', err);
-      const localItem = this.remainingItems.find((item) => item.x === x && item.y === y);
-      if (!localItem) return { picked: false };
-
-      // 2026-07-12: 서버가 미스터리 박스로 바뀌며 outcome:'item'|'trap' 판정이 추가됐지만,
-      // 로컬 폴백은 실제 확률 풀(gameConfig.ts MYSTERY_BOX_OUTCOME_POOL)을 재현하지 않고
-      // 기존처럼 TEMP_ITEMS에 박아둔 고정 타입을 outcome:'item'으로 그대로 반환한다 — 백엔드
-      // 없는 환경에서 픽업 배선 자체가 동작하는지 확인하는 용도라, 8종 확률 재현은 스코프 밖
-      // (실제 확률/함정 결과 테스트는 trpc.test.ts가 담당).
-      return { picked: true, outcome: 'item', type: localItem.type ?? 'flashlight' };
-    }
-  }
-
   // 지나온 칸을 발자국 큐에 쌓아둔다(즉시 전송하지 않음). 실제 전송은 flushFootprints가
-  // 주기적으로 처리 — trap.trigger/item.pickup과 매 칸 겹쳐서 요청이 늘어나는 걸 막기 위함.
+  // 주기적으로 처리 — move.arrive와 매 칸 겹쳐서 요청이 늘어나는 걸 막기 위함.
   private queueFootprint(x: number, y: number) {
     this.pendingFootprints.push({ x, y });
 
@@ -1952,45 +1927,186 @@ class MazeScene extends Phaser.Scene {
     }
   }
 
-  // 방금 도착한 칸에 아직 안 주운 미스터리 박스가 있는지 서버에만 확인하는 순수 조회 함수.
-  // 2026-07-12: 서버가 미스터리 박스로 재설계되며 응답이 outcome:'item'|'trap' 판별 유니언이
-  // 됐다 — outcome을 먼저 안 보고 type만으로 분기하면 outcome:'trap'(전체 결과의 절반)일 때
-  // 어떤 type도 안 걸려 마지막 else(함정 설치 아이템)로 잘못 빠지는 버그가 있었다(develop의
-  // 미스터리 박스 서버 구현과 main의 클라이언트가 별도로 진행되다 병합 시 발견).
-  // 아이템 목록/마커 제거(remainingItems, itemRects)는 isMoving·shieldCount와 무관한 순수 부기라
-  // 여기서 바로 처리한다 — 실제 함정/아이템 이펙트 적용과 isMoving/shieldCount 관리는
-  // resolveArrival이 fetchTrapTrigger 결과와 함께 모아서 한 곳에서 처리한다(fetchTrapTrigger
-  // 주석 참고 — 같은 타일에 설치형 함정과 미스터리 박스가 동시에 존재할 수 있음).
+  // 방금 도착한 칸의 설치형 함정 + 미스터리 박스 판정을 move.arrive 한 번으로 함께 받아온다 —
+  // 상태(isMoving, shieldCount, 화면 이펙트)는 전혀 건드리지 않는 순수 조회 함수. 결과 적용/
+  // 쉴드 소모/isMoving 해제는 resolveArrival이 이 반환값을 받아 한 곳에서 처리한다(같은 타일에
+  // 설치형 함정과 미스터리 박스가 동시에 존재할 수 있어 — traps.md 0절 — 두 판정을 따로따로
+  // 즉시 적용하면 어느 쪽이 먼저 처리되느냐에 따라 결과가 달라지는 레이스가 있었음).
   //
-  // 2026-07-14 실서버 QA(아이템이 한참 뒤에야 먹힘): itemDispatcher(직렬화 큐)가 모든 칸마다
-  // 요청을 넣다 보니, 연속 이동 중 네트워크 지연이 있으면 요청이 계속 밀려 쌓였다. remainingItems
-  // 는 map.getState가 이미 공개적으로 내려준 "아직 안 주운 박스 좌표" 목록(박스는 마커로 항상
-  // 표시되므로 위치 자체는 비밀이 아님 — outcome/type만 비밀)이라, 이 목록에 없는 칸이면
-  // item.pickup 요청 자체를 생략해도 오라클 방지를 해치지 않는다. 박스는 맵에 몇 곳뿐이라
-  // 대부분의 이동에서 요청이 아예 안 나가 큐가 밀릴 일이 없어진다. 함정 쪽은 상대가 몰래 설치한
-  // 함정일 수 있어 이 최적화를 적용할 수 없다(모든 칸에서 서버 확인이 필수 — trap.trigger는
-  // 그대로 둠).
-  private async fetchItemEncounter(x: number, y: number): Promise<ItemEncounter> {
-    if (!this.remainingItems.some((item) => item.x === x && item.y === y)) {
-      return { kind: 'none' };
+  // 2026-07-12: outcome:'item'|'trap' 판별 유니언을 outcome 먼저 안 보고 type만으로 분기하면
+  // outcome:'trap'(전체 결과의 절반)일 때 어떤 type도 안 걸려 마지막 else(함정 설치 아이템)로
+  // 잘못 빠지는 버그가 있었다(develop의 미스터리 박스 서버 구현과 main의 클라이언트가 별도로
+  // 진행되다 병합 시 발견) — 아래 outcome 우선 분기로 재발 방지.
+  //
+  // 2026-07-14 임소리(배영환님 승인 하에, 실서버 아이템 미픽업 조사 후속): 예전엔 remainingItems
+  // 에 없는 칸이면 item.pickup 요청 자체를 생략하는 최적화가 있었는데(트랩은 상대가 몰래 설치한
+  // 걸 수 있어 매 칸 서버 확인이 필수지만, 아이템은 이미 공개된 좌표 목록이라 스킵해도 오라클
+  // 방지엔 무해했음), move.arrive로 합쳐지면서 트랩 확인이 어차피 매 칸 서버 왕복 1회를 요구하니
+  // 이 스킵 최적화 자체가 의미가 없어졌다(어차피 나가는 요청에 아이템 판정이 무료로 얹혀온다).
+  private async fetchArrival(
+    x: number,
+    y: number
+  ): Promise<{ trapType: TrapType | null; itemEncounter: ItemEncounter }> {
+    const result = await this.reportArrival(x, y);
+
+    const trapType = result.trap.hit && result.trap.type ? result.trap.type : null;
+
+    let itemEncounter: ItemEncounter = { kind: 'none' };
+    if (result.item.picked) {
+      this.remainingItems = this.remainingItems.filter((item) => !(item.x === x && item.y === y));
+      this.itemRects[y]![x]?.destroy();
+      this.itemRects[y]![x] = undefined;
+
+      itemEncounter =
+        result.item.outcome === 'trap'
+          ? { kind: 'trap', type: result.item.type }
+          : { kind: 'item', type: result.item.type };
     }
 
-    const result = await this.reportItemPickup(x, y);
-    if (!result.picked) return { kind: 'none' };
-
-    this.remainingItems = this.remainingItems.filter((item) => !(item.x === x && item.y === y));
-    this.itemRects[y]![x]?.destroy();
-    this.itemRects[y]![x] = undefined;
-
-    if (result.outcome === 'trap') return { kind: 'trap', type: result.type };
-    return { kind: 'item', type: result.type };
+    return { trapType, itemEncounter };
   }
 
-  // tryMove가 한 칸 이동을 마친 뒤 호출하는 유일한 판정 지점. 설치형 함정(fetchTrapTrigger)과
-  // 미스터리 박스(fetchItemEncounter)를 Promise.all로 병렬 조회한 뒤, 두 응답이 모두 도착한
-  // 다음에야 쉴드 소모/함정 이펙트 적용을 한 곳에서 처리한다 — 예전엔 두 함수가 각자 독립적으로
-  // isMoving과 shieldCount를 건드려서, 어느 쪽 응답이 먼저 오느냐에 따라 결과가 달라지는 레이스가
-  // 있었다(2026-07-13 코드 리뷰로 발견). dx, dy는 함정 결과가 슬라이드일 때 미끄러질 방향.
+  // itemEncounter.kind === 'item'(진짜 아이템, 함정이 아닌 경우)일 때만 적용하는 지급 로직 —
+  // resolveArrival(일반 이동)과 resolveSlideStep(슬라이드 중 지나가는 칸) 양쪽에서 공유한다.
+  // 서버(shared/game-types.ts ItemType)는 'trapInstall'을 반환할 일이 없다 — 로컬 폴백
+  // (reportArrival의 catch, TEMP_ITEMS 기반)에서만 나오는 클라이언트 전용 값이라 마지막 else로
+  // 잡는다. 'detector'를 명시적으로 분기하지 않으면 이 else가 실수로 삼켜서 함정 설치 아이템으로
+  // 오판정되는 버그가 있었음(2026-07-10 발견).
+  private applyItemDrop(type: ItemType) {
+    if (type === 'detector') {
+      // 반경 계산은 여기서 하지 않는다 — 서버가 충전(사용 가능 횟수)만 1 늘려두고, 실제
+      // 스캔은 Z를 눌러 쓰는 순간 item.useDetector가 그 자리 기준으로 새로 한다.
+      this.addHeldItem({ type: 'detector' });
+    } else if (type === 'shield') {
+      // 함정이 안 보이는 게임이라 "언제 쓸지" 고를 방법이 없다 — 슬롯에 미루지 않고 줍는
+      // 즉시 무장(applyLoadout과 동일한 이유).
+      this.applyShieldItem();
+    } else if (type === 'flashlight') {
+      this.addHeldItem({ type });
+    } else {
+      // items.md 스펙: 함정 종류는 "줍는 순간" 랜덤 결정 — Z로 쓰는 시점이 아니라 여기서
+      // 뽑아둔다. 슬롯(Z)에 넣되, Z를 누르면 "장전"이 아니라 그 즉시 그 자리에 바로 설치까지
+      // 끝나도록 함(attemptInstall 참고) — 조작키를 Z/X 두 개로 통일하기 위해 Ctrl을 없앰.
+      this.addHeldItem({
+        type: 'trapInstall',
+        trapType: TRAP_TYPES[Math.floor(Math.random() * TRAP_TYPES.length)]!,
+      });
+    }
+  }
+
+  // 쉴드 소모 처리(개수 차감 + 이펙트 재생 + 0개 될 때 링/아이콘 정리) — resolveArrival(일반
+  // 이동)과 resolveSlideStep(슬라이드 중 지나가는 칸) 양쪽에서 공유한다.
+  private consumeShieldIfBlocked(resolution: TrapResolution) {
+    if (!resolution.shieldConsumedFor) return;
+
+    this.shieldCount -= 1;
+    this.showShieldBlockEffect();
+    if (this.shieldCount <= 0) {
+      this.shieldRing?.destroy();
+      this.shieldRing = null;
+      this.shieldIcon?.destroy();
+      this.shieldIcon = null;
+    }
+  }
+
+  // 방금 도착한 칸의 함정/아이템 판정을 적용하는 공유 로직 — resolveArrival(일반 이동)과
+  // resolveSlideStep(슬라이드 중 지나가는 칸) 양쪽에서 쉴드 스냅샷 → fetchArrival → hasFinished
+  // 확인 → 쉴드 소모 → 함정 효과 적용 → 아이템 지급까지 동일한 순서로 처리한다(2026-07-15
+  // /code-review 반영 — 두 함수가 거의 동일한 20여 줄을 반복하고 있던 것을 통합). slow(슬라이드
+  // 시작)와 reverse만 두 호출자의 동작이 달라서 콜백으로 위임한다 — 일반 이동은 slow를 만나면
+  // 그 자리에서 새 슬라이드를 시작하고 reverse는 즉시 걸지만, 슬라이드 중엔 slow는 이미 같은
+  // 방향으로 미끄러지는 중이라 무시하고 reverse는 슬라이드가 끝날 때까지 미룬다(resolveSlideStep/
+  // slideStep 참고). respawn/blind는 두 경로가 완전히 동일해서 콜백 없이 여기서 직접 처리한다 —
+  // respawn이 대기 중이던 역방향까지 함께 정리하는 것도, 일반 이동에선 슬라이드 중이 아니라서
+  // pendingReverseAfterSlide가 항상 false이므로 무해한 공통 처리다.
+  //
+  // 반환값은 effectsToApply를 담은 TrapResolution(hasFinished로 중단됐으면 null) — 호출자가
+  // slow 여부를 직접 확인해 각자의 방식으로 처리해야 하기 때문이다(resolveArrival 참고).
+  private async resolveTrapAndItem(x: number, y: number, onReverse: () => void): Promise<TrapResolution | null> {
+    const { trapType: installedTrapType, itemEncounter } = await this.fetchArrival(x, y);
+
+    // 2026-07-15(코드 리뷰 반영, /review pr#71): 이 응답은 네트워크 왕복 후 도착하므로, 슬라이드로
+    // 여러 칸을 빠르게 지나 골인까지 도달한 뒤에야 늦게 도착할 수 있다 — hasFinished 확인 없이
+    // 이펙트를 적용하면 골인 화면("MAZE CLEARED!")이 뜬 뒤에도 블라인드(화면 암전)/리스폰(위치·
+    // 탐색기록 리셋) 같은 효과가 뒤늦게 발동하는 문제가 있었다. 골인 후에는 아무것도 적용하지 않는다.
+    if (this.hasFinished) return null;
+
+    // 2026-07-15(코드 리뷰 반영, /review pr#71 — 쉴드 이중 소모 레이스): 이 스냅샷은 반드시
+    // await 이후(응답 도착 시점)에 읽어야 한다. 슬라이드는 매 칸이 트윈 타이머로 자동 진행되므로,
+    // await 이전에 미리 캡처해두면 "이전 칸의 응답이 아직 안 왔는데 다음 칸 판정이 이미 시작된"
+    // 상황에서 다음 칸이 이전 칸의 쉴드 소모 반영 전 값을 그대로 써버려 — 쉴드 1개로 두 함정을
+    // 모두 막아 shieldCount가 음수까지 내려가는 버그가 있었다. arrivalDispatcher가 네트워크
+    // 요청을 직렬화해주므로, 이 시점(이 칸 자신의 fetchArrival이 막 끝난 순간)엔 이전 칸의 소모가
+    // 항상 이미 반영돼 있음이 보장된다. 그러면서도 이 칸에서 방금 주웠을 수 있는 쉴드(아래
+    // applyItemDrop에서 반영)는 아직 카운트에 안 들어간 상태라 "같은 칸에서 주운 쉴드가 같은 칸의
+    // 함정을 소급 차단하지 않는다"는 기존 규칙은 그대로 유지된다.
+    const shieldCountBefore = this.shieldCount;
+
+    const mysteryTrapType = itemEncounter.kind === 'trap' ? itemEncounter.type : null;
+    const resolution = resolveTrapEncounters(installedTrapType, mysteryTrapType, shieldCountBefore > 0);
+
+    // items.md: 쉴드는 반응형 1회 소모 — 설치형/미스터리 박스 함정이 동시에 걸려도 한 번만
+    // 소모되고, 우선순위(기본: 설치형)에 따라 둘 중 하나만 무효화된다(resolveTrapEncounters 참고).
+    // 여러 개를 들고 있었으면 1개만 깎이고 나머지는 그대로 남는다(2026-07-14 쉴드 스택 버그 수정
+    // — 예전엔 boolean이라 몇 개를 들고 있었든 한 번 막으면 전부 사라졌음).
+    this.consumeShieldIfBlocked(resolution);
+
+    // 슬라이드(slow)보다 순간 효과(respawn/blind/reverse)를 먼저 적용한다 — respawn이 위치
+    // 자체를 스폰으로 되돌리므로, 슬라이드가 끝난 자리를 나중에 respawn이 덮어써서 위치가
+    // 튀는 상황을 피하기 위함(resolveTrapEncounters가 slow/respawn 동시 발생은 이미 배타적으로
+    // 막아주지만, blind/reverse는 respawn과 동시에 있을 수 있어 순서가 중요하다). slow 자체는
+    // 호출자마다 처리가 달라 여기서는 건너뛰고 각자 처리하게 한다.
+    for (const type of resolution.effectsToApply) {
+      if (type === 'slow') continue;
+      else if (type === 'respawn') {
+        this.applyRespawnTrap();
+        if (this.pendingReverseAfterSlide) {
+          this.pendingReverseAfterSlide = false;
+          this.applyReverseTrap();
+        }
+      } else if (type === 'blind') {
+        this.applyBlindTrap();
+      } else {
+        onReverse();
+      }
+    }
+
+    if (itemEncounter.kind === 'item') {
+      this.applyItemDrop(itemEncounter.type);
+    }
+
+    return resolution;
+  }
+
+  // 슬라이딩 도중 지나가는 칸의 서버 판정(2026-07-15 팀 논의로 확정) — 예전엔 아이템만 지급하고
+  // 함정은 전부 무시했으나, 서버는 슬라이드 중 지나가는 칸도 일반 칸과 동일하게 판정·소모하므로
+  // 리스폰처럼 서버가 위치를 강제로 되돌리는 효과를 클라이언트가 놓치면 다음 이동이 INVALID_MOVE로
+  // 거부되는 소프트락 버그가 있었다. respawn은 resolveTrapAndItem이 즉시 처리(슬라이드도 그 자리에서
+  // 중단 — applyRespawnTrap의 killTweensOf로 slideStep의 다음 재귀 호출이 안 걸린다), blind도
+  // 즉시 처리(슬라이드는 안 멈추고 계속). reverse만 여기서 갈린다 — 그 자리에서 바로 걸지 않고
+  // pendingReverseAfterSlide만 세워둠으로써 슬라이드가 완전히 끝난 시점(slideStep의 탈출/벽 충돌
+  // 지점)에 한 번만 발동시킨다(골인으로 끝나는 경우는 제외 — 팀 논의로 확정). 이 함수가 호출되는
+  // 시점에 슬라이드가 이미 끝나 있으면(isSliding === false, 네트워크 응답이 늦게 온 경우) 바로
+  // 발동시킨다. slow(슬라이드끼리 중첩)는 이미 같은 방향으로 미끄러지는 중이라 손댈 것 없음(기존
+  // 동작 유지, traps.md에도 "안 정해짐"으로 남아있는 케이스).
+  private async resolveSlideStep(x: number, y: number) {
+    await this.resolveTrapAndItem(x, y, () => {
+      if (this.isSliding) {
+        this.pendingReverseAfterSlide = true;
+      } else {
+        this.applyReverseTrap();
+      }
+    });
+  }
+
+  // tryMove가 한 칸 이동을 마친 뒤 호출하는 유일한 판정 지점. 설치형 함정 + 미스터리 박스
+  // 판정을 fetchArrival(move.arrive) 한 번으로 함께 받아온 다음에야 쉴드 소모/함정 이펙트
+  // 적용을 한 곳에서 처리한다 — 예전엔 두 판정을 독립적으로 처리해서, 어느 쪽 응답이 먼저
+  // 오느냐에 따라 결과가 달라지는 레이스가 있었다(2026-07-13 코드 리뷰로 발견). 2026-07-14
+  // (배영환님 승인 하에): 예전엔 trap.trigger/item.pickup을 Promise.all로 각각 병렬 호출했는데,
+  // 서버가 이미 위치 앵커 검증/커밋을 1회로 묶어 처리하는 move.arrive를 제공하고 있어 그걸로
+  // 통합 — 두 판정이 애초에 한 응답으로 오므로 레이스 자체가 구조적으로 사라진다. dx, dy는
+  // 함정 결과가 슬라이드일 때 미끄러질 방향.
   //
   // isMoving은 더 이상 여기서 다루지 않는다(조작감 개선, 2026-07-13) — tryMove의 트윈 완료
   // 시점에 이미 풀렸고, 이 함수는 그보다 늦게(네트워크 응답 도착 후) 실행되므로 이미 다음
@@ -2000,76 +2116,9 @@ class MazeScene extends Phaser.Scene {
   // 2026-07-13(임소리): 아이템 적용부는 즉시 발동 대신 인벤토리 슬롯에 채우는 방식(addHeldItem)
   // 으로 바꿈 — 쉴드만 예외(반응형이라 즉시 무장이 항상 이득, applyShieldItem 직접 호출 유지).
   private async resolveArrival(x: number, y: number, dx: number, dy: number) {
-    // 이번 이동 "시작 시점"의 쉴드 보유 개수 스냅샷 — 이 판정 도중 새로 주운 쉴드(아래
-    // outcome:'item' && type:'shield')가 같은 이동의 함정 판정에 소급 적용되지 않게 한다.
-    const shieldCountBeforeMove = this.shieldCount;
+    const resolution = await this.resolveTrapAndItem(x, y, () => this.applyReverseTrap());
 
-    const [installedTrapType, itemEncounter] = await Promise.all([
-      this.fetchTrapTrigger(x, y),
-      this.fetchItemEncounter(x, y),
-    ]);
-
-    const mysteryTrapType = itemEncounter.kind === 'trap' ? itemEncounter.type : null;
-    const resolution = resolveTrapEncounters(installedTrapType, mysteryTrapType, shieldCountBeforeMove > 0);
-
-    // items.md: 쉴드는 반응형 1회 소모 — 설치형/미스터리 박스 함정이 동시에 걸려도 한 번만
-    // 소모되고, 우선순위(기본: 설치형)에 따라 둘 중 하나만 무효화된다(resolveTrapEncounters 참고).
-    // 여러 개를 들고 있었으면 1개만 깎이고 나머지는 그대로 남는다(2026-07-14 쉴드 스택 버그 수정
-    // — 예전엔 boolean이라 몇 개를 들고 있었든 한 번 막으면 전부 사라졌음).
-    if (resolution.shieldConsumedFor) {
-      this.shieldCount -= 1;
-      this.showShieldBlockEffect();
-      if (this.shieldCount <= 0) {
-        this.shieldRing?.destroy();
-        this.shieldRing = null;
-        this.shieldIcon?.destroy();
-        this.shieldIcon = null;
-        this.shieldCountBadgeBg?.destroy();
-        this.shieldCountBadgeBg = null;
-        this.shieldCountLabel?.destroy();
-        this.shieldCountLabel = null;
-      } else {
-        this.refreshShieldCountLabel();
-      }
-    }
-
-    // 슬라이드보다 순간 효과(respawn/blind/reverse)를 먼저 적용한다 — respawn이 위치 자체를
-    // 스폰으로 되돌리므로, 슬라이드가 끝난 자리를 나중에 respawn이 덮어써서 위치가 튀는 상황을
-    // 피하기 위함.
-    for (const type of resolution.effectsToApply) {
-      if (type === 'slow') continue;
-      else if (type === 'respawn') this.applyRespawnTrap();
-      else if (type === 'blind') this.applyBlindTrap();
-      else this.applyReverseTrap();
-    }
-
-    if (itemEncounter.kind === 'item') {
-      // 서버(shared/game-types.ts ItemType)는 'trapInstall'을 반환할 일이 없다 — 로컬 폴백
-      // (reportItemPickup의 catch, TEMP_ITEMS 기반)에서만 나오는 클라이언트 전용 값이라 마지막
-      // else로 잡는다. 'detector'를 명시적으로 분기하지 않으면 이 else가 실수로 삼켜서 함정
-      // 설치 아이템으로 오판정되는 버그가 있었음(2026-07-10 발견).
-      if (itemEncounter.type === 'detector') {
-        // 반경 계산은 여기서 하지 않는다 — 서버가 충전(사용 가능 횟수)만 1 늘려두고, 실제
-        // 스캔은 Z를 눌러 쓰는 순간 item.useDetector가 그 자리 기준으로 새로 한다.
-        this.addHeldItem({ type: 'detector' });
-      } else if (itemEncounter.type === 'shield') {
-        // 함정이 안 보이는 게임이라 "언제 쓸지" 고를 방법이 없다 — 슬롯에 미루지 않고 줍는
-        // 즉시 무장(applyLoadout과 동일한 이유).
-        this.applyShieldItem();
-      } else if (itemEncounter.type === 'flashlight') {
-        this.addHeldItem({ type: itemEncounter.type });
-      } else {
-        // items.md 스펙: 함정 종류는 "줍는 순간" 랜덤 결정 — Z로 쓰는 시점이 아니라 여기서
-        // 뽑아둔다. 슬롯(Z)에 넣되, Z를 누르면 "장전"이 아니라 그 즉시 그 자리에 바로 설치까지
-        // 끝나도록 함(attemptInstall 참고) — 조작키를 Z/X 두 개로 통일하기 위해 Ctrl을 없앰.
-        this.addHeldItem({
-          type: 'trapInstall',
-          trapType: TRAP_TYPES[Math.floor(Math.random() * TRAP_TYPES.length)]!,
-        });
-      }
-    }
-
-    if (resolution.effectsToApply.includes('slow')) {
+    if (resolution?.effectsToApply.includes('slow')) {
       this.applySlideTrap(dx, dy); // 슬라이드는 killTweensOf로 진행 중인 이동을 이기고 스스로 다시 잠금
     }
   }
@@ -2260,9 +2309,7 @@ class MazeScene extends Phaser.Scene {
   private applyShieldItem() {
     this.playSfx('itemPickup');
     this.shieldCount += 1;
-    this.showFloatingLabel(
-      this.shieldCount > 1 ? `${ITEM_LABELS.shield} acquired! (x${this.shieldCount})` : `${ITEM_LABELS.shield} acquired!`
-    );
+    this.showFloatingLabel(`${ITEM_LABELS.shield} acquired!`);
     this.flashPlayer(ITEM_COLORS.shield);
 
     // 픽업 순간 짧은 팝 — showShieldBlockEffect(소모될 때 터지는 큰 링)보다 작고 빠르게 해서
@@ -2293,58 +2340,6 @@ class MazeScene extends Phaser.Scene {
         .setDepth(11); // 캐릭터(depth 10) 위에 떠 보이게
     }
 
-    this.refreshShieldCountLabel();
-  }
-
-  // 쉴드 개수 배지(원형 + 숫자)를 만들거나 갱신한다 — 1개 이하면 굳이 안 보여준다(아이콘
-  // 자체가 "보유 중"은 이미 표시해줌, 개수가 여럿일 때만 추가 정보로 의미가 있음). 2026-07-14:
-  // 실플레이 QA에서 "잘 눈에 안 띈다"는 피드백으로 한 차례 대비를 키웠는데(파란 사각 태그),
-  // 이후 "shieldRing/shieldIcon의 시안색 톤과 안 어울린다"는 디자인 피드백으로 알림 배지
-  // 느낌의 원형(shieldCountBadgeBg, shieldRing과 같은 시안 테두리)으로 재교체 — 텍스트도
-  // "x2" 대신 숫자만 남겨 좁은 원 안에서 더 깔끔하게 보이도록 함.
-  private refreshShieldCountLabel() {
-    if (this.shieldCount <= 1) {
-      this.shieldCountBadgeBg?.destroy();
-      this.shieldCountBadgeBg = null;
-      this.shieldCountLabel?.destroy();
-      this.shieldCountLabel = null;
-      return;
-    }
-
-    const text = String(this.shieldCount);
-    if (this.shieldCountLabel && this.shieldCountBadgeBg) {
-      this.shieldCountLabel.setText(text);
-      const punch = { duration: 120, yoyo: true, ease: 'Sine.easeOut' as const };
-      this.tweens.add({
-        targets: this.shieldCountBadgeBg,
-        scale: (_target: Phaser.GameObjects.Arc, _key: string, value: number) => value * 1.35,
-        ...punch,
-      });
-      this.tweens.add({
-        targets: this.shieldCountLabel,
-        scale: (_target: Phaser.GameObjects.Text, _key: string, value: number) => value * 1.35,
-        ...punch,
-      });
-      return;
-    }
-
-    // 배경 원 — shieldRing과 같은 시안 테두리로 통일해 같은 아이템의 UI라는 걸 알 수 있게 함.
-    this.shieldCountBadgeBg = this.add.circle(this.playerImg.x, this.playerImg.y, TILE_SIZE * 0.17, 0x0c1a2e, 1);
-    this.shieldCountBadgeBg.setStrokeStyle(2, 0xbfffff, 0.9);
-    this.shieldCountBadgeBg.setScale(0);
-    this.shieldCountBadgeBg.setDepth(12); // shieldIcon(depth 11)보다 위
-
-    this.shieldCountLabel = this.add
-      .text(this.playerImg.x, this.playerImg.y, text, {
-        fontSize: '13px',
-        color: '#ffffff',
-        fontStyle: 'bold',
-      })
-      .setOrigin(0.5)
-      .setScale(0)
-      .setDepth(13); // 배경 원보다 위
-
-    this.tweens.add({ targets: [this.shieldCountBadgeBg, this.shieldCountLabel], scale: 1, duration: 180, ease: 'Back.easeOut' });
   }
 
   // 함정 탐지기 — items.md 초안: 반경 내 함정을 표시(2026-07-14: 3칸 → 7칸으로 확대). 반경
@@ -2388,16 +2383,35 @@ class MazeScene extends Phaser.Scene {
       // 이 자리엔 원래 박스+물음표 마커(buildMysteryBoxMarker)가 이미 떠 있으므로, 그 위에
       // 겹쳐 그려서 "정체가 밝혀졌다"는 느낌을 준다(표시 종료 시 이 아이콘만 사라지고 원래
       // 박스+물음표는 계속 남음 — clearRevealedTrapMarkers 참고).
+      // 2026-07-15: 함정 종류별 png 스타일이 제각각이라 그림만으로 구분이 안 될 수 있다는
+      // 피드백 — 아이템 슬롯과 같은 색(ITEM_SLOT_SOCKET_COLOR) 원형 배경을 아이콘 밑에 깔고,
+      // 위쪽에 말풍선(showFloatingLabel과 같은 스타일) 텍스트로 함정 이름을 띄워 명확히 한다.
+      const bg = this.add.circle(cx, cy, ITEM_MARKER_SIZE * 0.55, ITEM_SLOT_SOCKET_COLOR, 1);
+      bg.setStrokeStyle(2, TRAP_COLORS[trap.type], 0.9);
+      bg.setDepth(11); // 아이콘(12)보다 아래, 안개/타일 도형(0~6)보다는 위
+
       const marker = this.add.image(cx, cy, TRAP_ICON_TEXTURE_KEYS[trap.type]).setDisplaySize(
         ITEM_MARKER_SIZE,
         ITEM_MARKER_SIZE
       );
       marker.setDepth(12); // 안개/타일 도형(0~6)보다 위, 손전등 등 나머지 이펙트와 안 겹치는 자리
 
+      const label = this.add
+        .text(cx, cy - ITEM_MARKER_SIZE * 0.55 - 10, TRAP_LABELS[trap.type], {
+          fontSize: '12px',
+          color: '#ffffff',
+          fontStyle: 'bold',
+          backgroundColor: '#00000099',
+          padding: { x: 4, y: 2 },
+        })
+        .setOrigin(0.5)
+        .setDepth(13); // 원형 배경/아이콘보다 위
+
       // 안개(탐색 여부)와 무관하게 항상 보여야 하므로 updateFog의 알파 조정 대상에 넣지 않고
-      // 여기서 직접 깜빡이는 펄스 트윈을 건다 — "위험 신호"처럼 눈에 띄게.
+      // 여기서 직접 깜빡이는 펄스 트윈을 건다 — "위험 신호"처럼 눈에 띄게. 배경 원/이름표도
+      // 아이콘과 함께 깜빡이도록 같이 묶는다.
       this.tweens.add({
-        targets: marker,
+        targets: [bg, marker, label],
         alpha: { from: 0.9, to: 0.35 },
         duration: 400,
         yoyo: true,
@@ -2405,7 +2419,7 @@ class MazeScene extends Phaser.Scene {
         ease: 'Sine.easeInOut',
       });
 
-      this.revealedTrapMarkers.push(marker);
+      this.revealedTrapMarkers.push(bg, marker, label);
     }
 
     this.time.delayedCall(DETECTOR_REVEAL_DISPLAY_MS, () => {
@@ -2769,8 +2783,8 @@ class MazeScene extends Phaser.Scene {
         this.playSfx('trapInstallFail');
         this.showFloatingLabel(INSTALL_FAILURE_MESSAGES.RETRY);
       } else {
-        // 백엔드 없는 로컬 프리뷰용 폴백 — loadServerState/reportPosition/reportItemPickup과
-        // 동일한 패턴. 개수 제한/타일 점유 같은 실패 판정은 서버 전용 로직(Redis 기반)이라
+        // 백엔드 없는 로컬 프리뷰용 폴백 — loadServerState/reportArrival과 동일한 패턴.
+        // 개수 제한/타일 점유 같은 실패 판정은 서버 전용 로직(Redis 기반)이라
         // 로컬에서 재현할 수 없으므로, 여기선 항상 성공한 것으로 처리한다.
         console.error('trap.install 실패 — 로컬 프리뷰용 즉시 성공 처리로 대체', err);
         this.myTraps = [...this.myTraps, { x: this.playerGridX, y: this.playerGridY, type }];
@@ -2786,7 +2800,7 @@ class MazeScene extends Phaser.Scene {
   private handleInstallSuccess(type: TrapType, item: HeldItem) {
     this.playSfx('trapInstallSuccess');
     this.removeHeldItem(item); // 성공해야 소모(1회성)
-    // 로컬 폴백(reportPosition)이 "설치자 본인은 회피"를 재현할 수 있도록 기록 — selfInstalledTrapKeys 참고.
+    // 로컬 폴백(reportArrival)이 "설치자 본인은 회피"를 재현할 수 있도록 기록 — selfInstalledTrapKeys 참고.
     this.selfInstalledTrapKeys.add(`${this.playerGridX},${this.playerGridY}`);
     this.renderInstalledTrapMarker({ x: this.playerGridX, y: this.playerGridY, type });
     this.updateFog();
@@ -2840,6 +2854,11 @@ class MazeScene extends Phaser.Scene {
       this.isSliding = false;
       this.cameras.main.shakeEffect.reset(); // 조기 탈출 — 흔들림도 바로 멈춤
       this.refreshPlayerTrapVisual(); // 슬라이드 탈출 — 시야차단 등 다른 효과가 아직 활성이면 그걸로, 없으면 평상시 모습으로
+      // 슬라이드 중 역방향 함정을 지나갔다면 여기서(슬라이드가 실제로 끝나는 시점) 한 번 발동.
+      if (this.pendingReverseAfterSlide) {
+        this.pendingReverseAfterSlide = false;
+        this.applyReverseTrap();
+      }
       return;
     }
 
@@ -2852,6 +2871,11 @@ class MazeScene extends Phaser.Scene {
       this.isSliding = false;
       this.cameras.main.shakeEffect.reset(); // 벽에 부딪혀 정지 — 흔들림도 바로 멈춤
       this.refreshPlayerTrapVisual(); // 슬라이드 종료 — 시야차단 등 다른 효과가 아직 활성이면 그걸로, 없으면 평상시 모습으로
+      // 슬라이드 중 역방향 함정을 지나갔다면 여기서(슬라이드가 실제로 끝나는 시점) 한 번 발동.
+      if (this.pendingReverseAfterSlide) {
+        this.pendingReverseAfterSlide = false;
+        this.applyReverseTrap();
+      }
       return;
     }
 
@@ -2873,12 +2897,11 @@ class MazeScene extends Phaser.Scene {
     this.stepCount++;
     this.updateFog();
 
-    // 슬라이딩 도중 지나가는 칸에 다른 함정이 있어도 이번 구현에서는 이펙트를 재발동시키지 않음
-    // (여러 함정 중첩 처리는 traps.md에도 "안 정해짐"으로 남아있어 임의로 정하지 않음).
-    // 단, 서버의 위치 앵커(trap.trigger의 인접 타일 검증 기준)는 매 칸마다 갱신해줘야
-    // 슬라이딩이 끝난 뒤 다음 이동이 "너무 멀리 떨어진 좌표"로 거부되지 않는다 —
-    // 그래서 이펙트는 무시하되(result를 안 씀) 호출 자체는 매 칸마다 한다.
-    void this.reportPosition(targetX, targetY);
+    // 슬라이딩 도중 지나가는 칸도 resolveSlideStep이 함정/아이템/쉴드를 전부 판정한다(2026-07-15
+    // 팀 논의로 확정 — 슬라이드끼리 중첩만 예외, traps.md에도 "안 정해짐"으로 남아있음). 서버의
+    // 위치 앵커(move.arrive의 인접 타일 검증 기준)는 매 칸마다 갱신해줘야 슬라이딩이 끝난 뒤
+    // 다음 이동이 "너무 멀리 떨어진 좌표"로 거부되지 않으므로 호출 자체는 매 칸마다 한다.
+    void this.resolveSlideStep(targetX, targetY);
 
     // 일반 이동(BASE_MOVE_DURATION)보다 짧은 시간으로 빠르게 미끄러지는 느낌을 냄.
     this.tweens.add({
@@ -2909,6 +2932,14 @@ class MazeScene extends Phaser.Scene {
     // 먼저 죽이지 않으면 아래에서 강제로 맞추는 playerImg 좌표를 트윈이 다음 프레임에
     // 다시 덮어써서 캐릭터가 엉뚱한 위치에서 튀는 예전 버그가 재발한다.
     this.tweens.killTweensOf(this.playerImg);
+
+    // 슬라이드 도중 리스폰 함정 칸을 지나간 경우(2026-07-15) — 슬라이드가 계속 이 함수를
+    // 몰랐던 채로 이어지면 화면엔 슬라이드 의상이 남고 흔들림도 안 멈춘다. 위 killTweensOf로
+    // slideStep의 다음 재귀 호출(트윈 onComplete)은 이미 막았으니, 여기서 상태만 마저 정리한다.
+    if (this.isSliding) {
+      this.isSliding = false;
+      this.cameras.main.shakeEffect.reset();
+    }
 
     this.playSfx('trapRespawn');
     this.flashPlayerTrap('respawn', RESPAWN_FLASH_MS);
@@ -3181,8 +3212,8 @@ class MazeScene extends Phaser.Scene {
       this.revealRankInfo(rankText, statsText, rankLine, statsLine, result.isNewRecord ? '#fcd34d' : '#e2e8f0');
     } catch (err) {
       if (IS_LOCAL_PREVIEW) {
-        // 백엔드 없는 로컬 프리뷰에서는 실패가 정상 동작 — 다른 mutation들(reportPosition/
-        // reportItemPickup)과 동일한 패턴.
+        // 백엔드 없는 로컬 프리뷰에서는 실패가 정상 동작 — 다른 mutation들(reportArrival)과
+        // 동일한 패턴.
         console.error('run.finish 실패 — 로컬 프리뷰에서는 정상(리더보드 미반영)', err);
         return;
       }
