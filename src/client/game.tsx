@@ -281,18 +281,6 @@ const VISION_RADIUS = 2;
 // 한 칸 이동에 걸리는 기본 시간(ms).
 const BASE_MOVE_DURATION = 150;
 
-// move.arrive 응답을 기다리지 않고 곧바로 다음 이동을 허용하는(2026-07-13 조작감 개선) 만큼,
-// 실서버 RTT가 이동 애니메이션보다 길면 미확정 요청이 무한정 쌓여 늦게 도착한 응답(특히 리스폰
-// 텔레포트)이 판정 대상 칸에서 한참 벗어난 위치에 적용되는 문제가 있다(docs/wbs.md 95행, 2026-07-15
-// 원호 QA). 값 1은 PR #41 이전 방식(매 칸 응답 대기)으로 완전히 되돌아가 조작감을 다시 해치므로,
-// 짧은 연타는 그대로 즉시 반응하되 키를 계속 눌러 쌓이는 경우에만 서버 페이스로 자연 감속시키는
-// 선에서 잡는다(tryMove 참고). ⚠️ 2026-07-15 실측(devvit 플레이테스트 환경도 순수 localhost가
-// 아니라 실제 Reddit 인프라까지 왕복하는 터널이라 RTT가 0이 아님): 최초 값 2는 방향키를 꾹 누르고
-// 있을 때 흔하게 걸려서 캐릭터가 툭툭 멈칫대는 게 눈에 띄게 느껴졌다 — 3으로 완화(여전히
-// 무한 적체는 아니고 최대 3칸 지연으로 bound됨). 이 값을 더 낮추고 싶다면 아래 tryMove의
-// bumpIntoWall 피드백과 함께 조정할 것(피드백 없이 낮추면 다시 "조작이 안 먹힌다"는 인상을 줌).
-const MAX_INFLIGHT_ARRIVALS = 3;
-
 // 벽에 부딪혔을 때 넛지 트윈 하나가 걸리는 시간(ms, bumpIntoWall 참고).
 const WALL_BUMP_DURATION = 70;
 
@@ -1710,18 +1698,6 @@ class MazeScene extends Phaser.Scene {
   // 한 칸 이동을 시도하는 함수.
   // dx, dy는 "어느 방향으로 한 칸 움직이려 하는지" (-1, 0, 1 중 하나씩)
   private tryMove(dx: number, dy: number) {
-    // 미확정 move.arrive 요청이 이미 상한만큼 쌓여있으면 더 앞서가지 않는다(MAX_INFLIGHT_ARRIVALS
-    // 참고) — isMoving 자체는 트윈 완료 즉시 풀리므로 이 가드가 없으면 키를 계속 눌렀을 때
-    // 서버 왕복 큐가 무한정 밀린다. update()가 매 프레임 tryMove를 다시 부르므로 왕복이 하나라도
-    // settle되는 즉시(다음 프레임) 자동으로 재개된다 — 다만 아무 반응 없이 그냥 씹으면 "조작이
-    // 안 먹힌다"는 인상을 주므로(2026-07-15 실측 발견), 벽에 부딪힐 때와 같은 넛지로 "지금은
-    // 못 움직인다"는 걸 알려준다(bumpIntoWall 자체가 쿨다운을 갖고 있어 매 프레임 호출해도
-    // 안전함).
-    if (this.arrivalDispatcher.pendingCount >= MAX_INFLIGHT_ARRIVALS) {
-      this.bumpIntoWall(dx, dy);
-      return;
-    }
-
     const targetX = this.playerGridX + dx;
     const targetY = this.playerGridY + dy;
 
@@ -1803,30 +1779,12 @@ class MazeScene extends Phaser.Scene {
   // 클라이언트만 옛 방식(2회 왕복)을 계속 쓰고 있었다.
   private async reportArrival(x: number, y: number): Promise<MoveArriveOutput> {
     try {
-      // 2026-07-15(회귀 발견 후 되돌림): 한때 여기에 ARRIVAL_IDLE_TIMEOUT_MS 타임아웃을
-      // Promise.race로 걸어 "응답이 영영 안 오면 pendingCount가 영구히 안 줄어 이동이 막힌다"는
-      // 문제를 막으려 했으나, 실제 요청을 취소하지 않은 채 "기다리길 포기"만 하는 방식이라 더
-      // 심각한 회귀를 냈다 — SequentialDispatcher는 "요청이 dispatch 순서대로 하나씩만
-      // in-flight"라는 걸 전제로 앵커 정합성을 지키는데(sequentialDispatcher.ts 문서 참고),
-      // 타임아웃이 먼저 이기면 실제로는 아직 서버로 가고 있는 요청을 큐가 "끝났다"고 착각하고
-      // 다음 요청을 내보내버린다 — 그 뒤 버려진 요청이 나중에 서버에 도달해 위치 앵커를
-      // 옮기면 다음 요청들과 순서가 어긋나고, 그게 resyncPositionFromServer를 연쇄적으로
-      // 발동시켜 화면에서 "일정 걸음마다 순간이동"으로 보였다(2026-07-15 실측 발견). 진짜로
-      // 요청이 응답 없이 영영 멈추는 경우(드묾, 네트워크 완전 단절 등)는 이 상태에서도 어차피
-      // 게임 전체가 사실상 못 쓰는 상태라 별도 대응은 하지 않는다(해커톤 스코프, 과설계 회피)
-      // — fetch 자체를 AbortController로 취소하는 더 견고한 해법은 별도 논의 대상으로 남긴다.
       return await this.arrivalDispatcher.enqueue(() =>
         trpc.move.arrive.mutate({ mapId: MAP_ID, x, y })
       );
     } catch (err) {
       if (!IS_LOCAL_PREVIEW) {
         console.error('move.arrive 실패(실서버 환경) — 로컬 폴백 안 함, 이번 칸은 판정 실패로 처리', err);
-        // 2026-07-15(docs/wbs.md 95행, 원호 QA 후속): 실패를 그냥 넘기면 서버 위치 앵커가 그
-        // 자리에 멈춘 채로 클라이언트만 계속 낙관적으로 전진해, 그 뒤 모든 칸이 연쇄적으로
-        // INVALID_MOVE로 실패하는 문제가 있었다(position-anchor-permanent-lock.md 원인 체인).
-        // 여기서 즉시 서버의 진짜 위치로 재동기화하면 이번 한 칸만 소실되고 다음 칸부터는
-        // 정상 복구된다.
-        await this.resyncPositionFromServer();
         return { trap: { hit: false }, item: { picked: false } };
       }
 
@@ -1850,39 +1808,6 @@ class MazeScene extends Phaser.Scene {
         : { picked: false };
 
       return { trap, item };
-    }
-  }
-
-  // move.arrive 실패 후 클라이언트 위치를 서버의 진짜 앵커로 되돌린다(reportArrival catch 참고).
-  // applyRespawnTrap과 같은 패턴(killTweensOf로 진행 중 트윈이 다음 프레임에 덮어쓰지 않게 막고,
-  // 슬라이드 중이었으면 정리)을 재사용하되, 이건 페널티가 아니라 기술적 보정이므로 respawn과
-  // 달리 tileStates(탐험 기록)는 건드리지 않는다 — 시야만 보정된 위치 기준으로 다시 계산한다.
-  // resync 조회 자체가 실패해도(추가 네트워크 장애) 조용히 무시한다 — 다음 실패에서 다시
-  // 시도되고, 최악의 경우도 기존 동작(연쇄 실패)보다 나빠지지 않는다.
-  private async resyncPositionFromServer() {
-    try {
-      const anchor = await trpc.move.resync.query({ mapId: MAP_ID });
-
-      // resolveTrapAndItem과 동일한 이유(2039행 근처) — 응답이 골인 이후에 도착하면 아무것도
-      // 적용하지 않는다. 안 그러면 "MAZE CLEARED!" 화면이 뜬 뒤에도 캐릭터가 갑자기 되돌아가는
-      // 것처럼 보인다.
-      if (this.hasFinished) return;
-
-      this.tweens.killTweensOf(this.playerImg);
-      if (this.isSliding) {
-        this.isSliding = false;
-        this.cameras.main.shakeEffect.reset();
-      }
-
-      this.playerGridX = anchor.x;
-      this.playerGridY = anchor.y;
-      this.playerImg.setPosition(
-        anchor.x * TILE_SIZE + TILE_SIZE / 2,
-        anchor.y * TILE_SIZE + TILE_SIZE / 2
-      );
-      this.updateFog();
-    } catch (err) {
-      console.error('move.resync 실패 — 위치 재동기화 못함, 다음 실패에서 재시도됨', err);
     }
   }
 
