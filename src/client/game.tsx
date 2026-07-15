@@ -2009,38 +2009,43 @@ class MazeScene extends Phaser.Scene {
     }
   }
 
-  // 슬라이딩 도중 지나가는 칸의 서버 판정 — 일반 이동(resolveArrival)과 마찬가지로 설치형/
-  // 미스터리 박스 함정과 쉴드 소모를 전부 반영한다(2026-07-15 팀 논의로 확정 — 예전엔 아이템만
-  // 지급하고 함정은 전부 무시했으나, 서버는 슬라이드 중 지나가는 칸도 일반 칸과 동일하게 판정·
-  // 소모하므로 리스폰처럼 서버가 위치를 강제로 되돌리는 효과를 클라이언트가 놓치면 다음 이동이
-  // INVALID_MOVE로 거부되는 소프트락 버그가 있었다).
+  // 방금 도착한 칸의 함정/아이템 판정을 적용하는 공유 로직 — resolveArrival(일반 이동)과
+  // resolveSlideStep(슬라이드 중 지나가는 칸) 양쪽에서 쉴드 스냅샷 → fetchArrival → hasFinished
+  // 확인 → 쉴드 소모 → 함정 효과 적용 → 아이템 지급까지 동일한 순서로 처리한다(2026-07-15
+  // /code-review 반영 — 두 함수가 거의 동일한 20여 줄을 반복하고 있던 것을 통합). slow(슬라이드
+  // 시작)와 reverse만 두 호출자의 동작이 달라서 콜백으로 위임한다 — 일반 이동은 slow를 만나면
+  // 그 자리에서 새 슬라이드를 시작하고 reverse는 즉시 걸지만, 슬라이드 중엔 slow는 이미 같은
+  // 방향으로 미끄러지는 중이라 무시하고 reverse는 슬라이드가 끝날 때까지 미룬다(resolveSlideStep/
+  // slideStep 참고). respawn/blind는 두 경로가 완전히 동일해서 콜백 없이 여기서 직접 처리한다 —
+  // respawn이 대기 중이던 역방향까지 함께 정리하는 것도, 일반 이동에선 슬라이드 중이 아니라서
+  // pendingReverseAfterSlide가 항상 false이므로 무해한 공통 처리다.
   //
-  // 함정별 처리:
-  // - respawn: 그 즉시 시작점으로 되돌리고 슬라이드도 그 자리에서 중단(applyRespawnTrap이
-  //   killTweensOf로 진행 중인 이동을 이겨서, slideStep의 다음 재귀 호출 자체가 안 걸린다).
-  // - blind: 그 즉시 발동, 슬라이드는 안 멈추고 계속(위치에 관여하지 않는 효과라 동시에 가능).
-  // - reverse: 그 자리에서 바로 걸지 않고 pendingReverseAfterSlide만 세워둠 — 슬라이드가
-  //   완전히 끝난 시점(slideStep의 탈출/벽 충돌 지점)에 한 번만 발동시킨다(골인으로 끝나는
-  //   경우는 제외 — 팀 논의로 확정). 이 함수가 호출되는 시점에 슬라이드가 이미 끝나 있으면
-  //   (isSliding === false, 네트워크 응답이 늦게 온 경우) 바로 발동시킨다. respawn과 같은
-  //   칸/이후 칸에서 겹치면 respawn 쪽에서 대기 중이던 역방향도 함께 정리한다.
-  // - slow: 이미 같은 방향으로 미끄러지는 중이라 손댈 것 없음(기존 동작 유지, traps.md에도
-  //   "안 정해짐"으로 남아있는 슬라이드끼리 중첩만 예외).
-  private async resolveSlideStep(x: number, y: number) {
-    const shieldCountBeforeTile = this.shieldCount;
+  // 반환값은 effectsToApply를 담은 TrapResolution(hasFinished로 중단됐으면 null) — 호출자가
+  // slow 여부를 직접 확인해 각자의 방식으로 처리해야 하기 때문이다(resolveArrival 참고).
+  private async resolveTrapAndItem(x: number, y: number, onReverse: () => void): Promise<TrapResolution | null> {
+    const shieldCountBefore = this.shieldCount;
     const { trapType: installedTrapType, itemEncounter } = await this.fetchArrival(x, y);
 
     // 2026-07-15(코드 리뷰 반영, /review pr#71): 이 응답은 네트워크 왕복 후 도착하므로, 슬라이드로
     // 여러 칸을 빠르게 지나 골인까지 도달한 뒤에야 늦게 도착할 수 있다 — hasFinished 확인 없이
     // 이펙트를 적용하면 골인 화면("MAZE CLEARED!")이 뜬 뒤에도 블라인드(화면 암전)/리스폰(위치·
     // 탐색기록 리셋) 같은 효과가 뒤늦게 발동하는 문제가 있었다. 골인 후에는 아무것도 적용하지 않는다.
-    if (this.hasFinished) return;
+    if (this.hasFinished) return null;
 
     const mysteryTrapType = itemEncounter.kind === 'trap' ? itemEncounter.type : null;
-    const resolution = resolveTrapEncounters(installedTrapType, mysteryTrapType, shieldCountBeforeTile > 0);
+    const resolution = resolveTrapEncounters(installedTrapType, mysteryTrapType, shieldCountBefore > 0);
 
+    // items.md: 쉴드는 반응형 1회 소모 — 설치형/미스터리 박스 함정이 동시에 걸려도 한 번만
+    // 소모되고, 우선순위(기본: 설치형)에 따라 둘 중 하나만 무효화된다(resolveTrapEncounters 참고).
+    // 여러 개를 들고 있었으면 1개만 깎이고 나머지는 그대로 남는다(2026-07-14 쉴드 스택 버그 수정
+    // — 예전엔 boolean이라 몇 개를 들고 있었든 한 번 막으면 전부 사라졌음).
     this.consumeShieldIfBlocked(resolution);
 
+    // 슬라이드(slow)보다 순간 효과(respawn/blind/reverse)를 먼저 적용한다 — respawn이 위치
+    // 자체를 스폰으로 되돌리므로, 슬라이드가 끝난 자리를 나중에 respawn이 덮어써서 위치가
+    // 튀는 상황을 피하기 위함(resolveTrapEncounters가 slow/respawn 동시 발생은 이미 배타적으로
+    // 막아주지만, blind/reverse는 respawn과 동시에 있을 수 있어 순서가 중요하다). slow 자체는
+    // 호출자마다 처리가 달라 여기서는 건너뛰고 각자 처리하게 한다.
     for (const type of resolution.effectsToApply) {
       if (type === 'slow') continue;
       else if (type === 'respawn') {
@@ -2051,16 +2056,37 @@ class MazeScene extends Phaser.Scene {
         }
       } else if (type === 'blind') {
         this.applyBlindTrap();
-      } else if (this.isSliding) {
-        this.pendingReverseAfterSlide = true;
       } else {
-        this.applyReverseTrap();
+        onReverse();
       }
     }
 
     if (itemEncounter.kind === 'item') {
       this.applyItemDrop(itemEncounter.type);
     }
+
+    return resolution;
+  }
+
+  // 슬라이딩 도중 지나가는 칸의 서버 판정(2026-07-15 팀 논의로 확정) — 예전엔 아이템만 지급하고
+  // 함정은 전부 무시했으나, 서버는 슬라이드 중 지나가는 칸도 일반 칸과 동일하게 판정·소모하므로
+  // 리스폰처럼 서버가 위치를 강제로 되돌리는 효과를 클라이언트가 놓치면 다음 이동이 INVALID_MOVE로
+  // 거부되는 소프트락 버그가 있었다. respawn은 resolveTrapAndItem이 즉시 처리(슬라이드도 그 자리에서
+  // 중단 — applyRespawnTrap의 killTweensOf로 slideStep의 다음 재귀 호출이 안 걸린다), blind도
+  // 즉시 처리(슬라이드는 안 멈추고 계속). reverse만 여기서 갈린다 — 그 자리에서 바로 걸지 않고
+  // pendingReverseAfterSlide만 세워둠으로써 슬라이드가 완전히 끝난 시점(slideStep의 탈출/벽 충돌
+  // 지점)에 한 번만 발동시킨다(골인으로 끝나는 경우는 제외 — 팀 논의로 확정). 이 함수가 호출되는
+  // 시점에 슬라이드가 이미 끝나 있으면(isSliding === false, 네트워크 응답이 늦게 온 경우) 바로
+  // 발동시킨다. slow(슬라이드끼리 중첩)는 이미 같은 방향으로 미끄러지는 중이라 손댈 것 없음(기존
+  // 동작 유지, traps.md에도 "안 정해짐"으로 남아있는 케이스).
+  private async resolveSlideStep(x: number, y: number) {
+    await this.resolveTrapAndItem(x, y, () => {
+      if (this.isSliding) {
+        this.pendingReverseAfterSlide = true;
+      } else {
+        this.applyReverseTrap();
+      }
+    });
   }
 
   // tryMove가 한 칸 이동을 마친 뒤 호출하는 유일한 판정 지점. 설치형 함정 + 미스터리 박스
@@ -2080,41 +2106,9 @@ class MazeScene extends Phaser.Scene {
   // 2026-07-13(임소리): 아이템 적용부는 즉시 발동 대신 인벤토리 슬롯에 채우는 방식(addHeldItem)
   // 으로 바꿈 — 쉴드만 예외(반응형이라 즉시 무장이 항상 이득, applyShieldItem 직접 호출 유지).
   private async resolveArrival(x: number, y: number, dx: number, dy: number) {
-    // 이번 이동 "시작 시점"의 쉴드 보유 개수 스냅샷 — 이 판정 도중 새로 주운 쉴드(아래
-    // outcome:'item' && type:'shield')가 같은 이동의 함정 판정에 소급 적용되지 않게 한다.
-    const shieldCountBeforeMove = this.shieldCount;
+    const resolution = await this.resolveTrapAndItem(x, y, () => this.applyReverseTrap());
 
-    const { trapType: installedTrapType, itemEncounter } = await this.fetchArrival(x, y);
-
-    // 2026-07-15(코드 리뷰 반영, /review pr#71): resolveSlideStep과 동일한 이유 — 이 응답이
-    // 골인 이후에 도착하면 골인 화면이 뜬 뒤에도 함정 효과가 뒤늦게 발동할 수 있다. 골인 후에는
-    // 아무것도 적용하지 않는다.
-    if (this.hasFinished) return;
-
-    const mysteryTrapType = itemEncounter.kind === 'trap' ? itemEncounter.type : null;
-    const resolution = resolveTrapEncounters(installedTrapType, mysteryTrapType, shieldCountBeforeMove > 0);
-
-    // items.md: 쉴드는 반응형 1회 소모 — 설치형/미스터리 박스 함정이 동시에 걸려도 한 번만
-    // 소모되고, 우선순위(기본: 설치형)에 따라 둘 중 하나만 무효화된다(resolveTrapEncounters 참고).
-    // 여러 개를 들고 있었으면 1개만 깎이고 나머지는 그대로 남는다(2026-07-14 쉴드 스택 버그 수정
-    // — 예전엔 boolean이라 몇 개를 들고 있었든 한 번 막으면 전부 사라졌음).
-    this.consumeShieldIfBlocked(resolution);
-
-    // 슬라이드보다 순간 효과(respawn/blind/reverse)를 먼저 적용한다 — respawn이 위치 자체를
-    // 스폰으로 되돌리므로, 슬라이드가 끝난 자리를 나중에 respawn이 덮어써서 위치가 튀는 상황을
-    // 피하기 위함.
-    for (const type of resolution.effectsToApply) {
-      if (type === 'slow') continue;
-      else if (type === 'respawn') this.applyRespawnTrap();
-      else if (type === 'blind') this.applyBlindTrap();
-      else this.applyReverseTrap();
-    }
-
-    if (itemEncounter.kind === 'item') {
-      this.applyItemDrop(itemEncounter.type);
-    }
-
-    if (resolution.effectsToApply.includes('slow')) {
+    if (resolution?.effectsToApply.includes('slow')) {
       this.applySlideTrap(dx, dy); // 슬라이드는 killTweensOf로 진행 중인 이동을 이기고 스스로 다시 잠금
     }
   }
