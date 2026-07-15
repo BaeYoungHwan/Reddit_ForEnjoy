@@ -351,12 +351,35 @@ const RANK_REVEAL_DELAY_MS = 450;
 const RANK_REVEAL_RISE_PX = 14;
 const RANK_REVEAL_DURATION_MS = 350;
 
+// 2026-07-15(위치 앵커 영구 락 대응, docs/design-docs/position-anchor-permanent-lock.md 6절):
+// move.arrive 요청 하나가 네트워크 순간 끊김 등으로 유실되면 서버 위치 앵커가 그 자리에
+// 멈추고, 이후 모든 이동이 연쇄로 실패하는 문제가 있었다(자세한 원인은 reportArrival 참고).
+// 대부분의 실패는 이런 순간적인 끊김이라 같은 요청을 몇 번 더 보내보는 것만으로 복구된다 —
+// 실서버 왕복이 보통 300~800ms인 걸 감안해, 유저가 지연을 거의 못 느끼는 선에서 재시도.
+const MOVE_ARRIVE_RETRY_ATTEMPTS = 3;
+const MOVE_ARRIVE_RETRY_DELAY_MS = 300;
+// 위 "300~800ms" 중 최댓값 — MOVE_ARRIVE_RETRY_WORST_CASE_MS 계산에 재사용(/review pr#80
+// 지적: 매직넘버로 중복되면 나중에 실측 RTT가 바뀔 때 주석만 고치고 계산은 안 고치는 드리프트
+// 위험이 있었다).
+const ASSUMED_WORST_CASE_RTT_MS = 800;
+// 재시도가 전부 실패하는 최악의 경우 실제로 걸리는 시간(/review pr#80 지적) — 재시도 사이
+// 대기(마지막 시도 후엔 대기 없으므로 (횟수-1)번)에 왕복 자체 시간까지 더한 값.
+// ARRIVAL_IDLE_TIMEOUT_MS가 이 값보다 짧으면, 골인 직전 칸이 하필 재시도를 다 소진하는
+// 상황에서 재시도가 끝나기도 전에 그 타임아웃이 먼저 발동해버려 재시도를 도입한 목적(리더보드
+// 미기록 완화)이 무색해진다.
+const MOVE_ARRIVE_RETRY_WORST_CASE_MS =
+  MOVE_ARRIVE_RETRY_ATTEMPTS * ASSUMED_WORST_CASE_RTT_MS +
+  (MOVE_ARRIVE_RETRY_ATTEMPTS - 1) * MOVE_ARRIVE_RETRY_DELAY_MS;
+
 // 2026-07-15(/review pr#78 지적): reportRunFinish가 run.finish 호출 전 arrivalDispatcher가
 // 비워지길 기다리는데(whenIdle), 직전 move.arrive 요청이 네트워크 장애로 응답 자체가 영영
 // 안 오면 이 대기가 무한정 걸려 골인 화면은 뜨는데 순위 정보(revealRankInfo)가 영영 안 뜨는
 // 새로운 실패 모드가 생긴다. 실제 왕복 지연(수정 원인이 된 레이스)을 흡수하기엔 충분히 길고,
 // 진짜 멈춘 요청을 무한정 기다리진 않을 만큼은 짧은 상한을 둔다.
-const ARRIVAL_IDLE_TIMEOUT_MS = 2000;
+// 2026-07-15(/review pr#80 지적으로 상향, 2000 → MOVE_ARRIVE_RETRY_WORST_CASE_MS+1000=4000):
+// move.arrive 재시도 도입으로 "실패까지 걸리는 시간"이 늘어나 기존 2000ms로는 재시도 최악
+// 케이스보다 짧아질 수 있었다 — 재시도 최악 케이스보다 여유 있게 값을 올림.
+const ARRIVAL_IDLE_TIMEOUT_MS = MOVE_ARRIVE_RETRY_WORST_CASE_MS + 1000;
 
 // trap.install 실패 사유 → 안내 문구. TrapInstallOutput.reason은 optional이라(성공 시엔
 // 항상 undefined) 값이 없을 때는 RETRY 문구로 대체.
@@ -1777,14 +1800,22 @@ class MazeScene extends Phaser.Scene {
   // item.pickup을 각각 따로 부르던 reportPosition/reportItemPickup을 move.arrive 하나로
   // 합쳤다 — 서버가 이미 위치 앵커 검증/커밋을 1회로 묶어서 처리하는 API를 제공하고 있었는데
   // 클라이언트만 옛 방식(2회 왕복)을 계속 쓰고 있었다.
+  //
+  // 2026-07-15(위치 앵커 영구 락 대응): 실서버에서는 바로 포기하지 않고 같은 요청을 몇 번 더
+  // 시도한다(requestArrivalWithRetry) — arrivalDispatcher가 이 작업이 완전히 끝날 때까지 다음
+  // 칸의 요청을 시작하지 않으므로, 재시도가 끝나기 전에 다음 이동 요청이 먼저 나가 순서가
+  // 꼬이는 일은 없다. 로컬 프리뷰는 백엔드 자체가 없어 실패가 정상 경로라 재시도 대상에서
+  // 제외(재시도하면 로컬 개발 중 매 이동마다 불필요하게 느려진다).
   private async reportArrival(x: number, y: number): Promise<MoveArriveOutput> {
     try {
       return await this.arrivalDispatcher.enqueue(() =>
-        trpc.move.arrive.mutate({ mapId: MAP_ID, x, y })
+        IS_LOCAL_PREVIEW
+          ? trpc.move.arrive.mutate({ mapId: MAP_ID, x, y })
+          : this.requestArrivalWithRetry(x, y)
       );
     } catch (err) {
       if (!IS_LOCAL_PREVIEW) {
-        console.error('move.arrive 실패(실서버 환경) — 로컬 폴백 안 함, 이번 칸은 판정 실패로 처리', err);
+        console.error('move.arrive 실패(실서버 환경, 재시도 소진) — 이번 칸은 판정 실패로 처리', err);
         return { trap: { hit: false }, item: { picked: false } };
       }
 
@@ -1808,6 +1839,25 @@ class MazeScene extends Phaser.Scene {
         : { picked: false };
 
       return { trap, item };
+    }
+  }
+
+  // reportArrival(실서버 전용)이 쓰는 재시도 루프 — 같은 좌표로 같은 요청을 다시 보낼 뿐, 클라이언트가
+  // 임의의 위치를 서버에 우겨넣는 게 아니라서 assertAdjacent의 오라클 방지 설계와 충돌하지 않는다.
+  // 마지막 시도까지 실패하면 그대로 던져 호출자(reportArrival)의 catch가 처리하게 한다.
+  private async requestArrivalWithRetry(x: number, y: number): Promise<MoveArriveOutput> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await trpc.move.arrive.mutate({ mapId: MAP_ID, x, y });
+      } catch (err) {
+        if (attempt >= MOVE_ARRIVE_RETRY_ATTEMPTS) throw err;
+        // /review pr#80 지적: 재시도로 복구될 수 있는 정상 경로라 error가 아니라 warn — 진짜
+        // 실패는 재시도를 다 소진했을 때(reportArrival의 catch)만 error로 남긴다.
+        // 분모를 attempt(1부터 시작하는 "몇 번째 시도")와 맞춰 "시도 1/3"처럼 전체 시도 횟수
+        // 기준으로 표기(팀원 리뷰 지적 — 기존 "재시도 1/2"는 분모가 재시도 횟수라 혼동 여지 있었음).
+        console.warn(`move.arrive 실패 — 시도 ${attempt}/${MOVE_ARRIVE_RETRY_ATTEMPTS}`, err);
+        await new Promise<void>((resolve) => this.time.delayedCall(MOVE_ARRIVE_RETRY_DELAY_MS, resolve));
+      }
     }
   }
 
@@ -2056,6 +2106,15 @@ class MazeScene extends Phaser.Scene {
     // 소모되고, 우선순위(기본: 설치형)에 따라 둘 중 하나만 무효화된다(resolveTrapEncounters 참고).
     // 여러 개를 들고 있었으면 1개만 깎이고 나머지는 그대로 남는다(2026-07-14 쉴드 스택 버그 수정
     // — 예전엔 boolean이라 몇 개를 들고 있었든 한 번 막으면 전부 사라졌음).
+    if (resolution.shieldConsumedFor) {
+      // 2026-07-15(wbs "쉴드 재발동" 미해결 항목 진단용): 코드만 읽어선 재발동 원인을 못 찾아,
+      // 다음에 실제 재현될 때 콘솔에서 바로 단서를 잡을 수 있도록 매 소모 시점 상태를 남겨둔다 —
+      // 이 칸에 설치형/미스터리 함정이 각각 있었는지, 소모 전후 개수가 예상대로 1씩만 줄었는지를
+      // 확인하면 "동시 존재로 인한 정상 소모"인지 "진짜 재발동"인지 구분할 수 있다.
+      console.log(
+        `[쉴드 진단] (${x},${y}) 소모 대상=${resolution.shieldConsumedFor} installedTrap=${installedTrapType} mysteryTrap=${mysteryTrapType} shieldCount ${shieldCountBefore}→${shieldCountBefore - 1}`
+      );
+    }
     this.consumeShieldIfBlocked(resolution);
 
     // 슬라이드(slow)보다 순간 효과(respawn/blind/reverse)를 먼저 적용한다 — respawn이 위치
