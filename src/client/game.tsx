@@ -286,8 +286,12 @@ const BASE_MOVE_DURATION = 150;
 // 텔레포트)이 판정 대상 칸에서 한참 벗어난 위치에 적용되는 문제가 있다(docs/wbs.md 95행, 2026-07-15
 // 원호 QA). 값 1은 PR #41 이전 방식(매 칸 응답 대기)으로 완전히 되돌아가 조작감을 다시 해치므로,
 // 짧은 연타는 그대로 즉시 반응하되 키를 계속 눌러 쌓이는 경우에만 서버 페이스로 자연 감속시키는
-// 선에서 2로 잡는다(tryMove 참고).
-const MAX_INFLIGHT_ARRIVALS = 2;
+// 선에서 잡는다(tryMove 참고). ⚠️ 2026-07-15 실측(devvit 플레이테스트 환경도 순수 localhost가
+// 아니라 실제 Reddit 인프라까지 왕복하는 터널이라 RTT가 0이 아님): 최초 값 2는 방향키를 꾹 누르고
+// 있을 때 흔하게 걸려서 캐릭터가 툭툭 멈칫대는 게 눈에 띄게 느껴졌다 — 3으로 완화(여전히
+// 무한 적체는 아니고 최대 3칸 지연으로 bound됨). 이 값을 더 낮추고 싶다면 아래 tryMove의
+// bumpIntoWall 피드백과 함께 조정할 것(피드백 없이 낮추면 다시 "조작이 안 먹힌다"는 인상을 줌).
+const MAX_INFLIGHT_ARRIVALS = 3;
 
 // 벽에 부딪혔을 때 넛지 트윈 하나가 걸리는 시간(ms, bumpIntoWall 참고).
 const WALL_BUMP_DURATION = 70;
@@ -1708,8 +1712,15 @@ class MazeScene extends Phaser.Scene {
   private tryMove(dx: number, dy: number) {
     // 미확정 move.arrive 요청이 이미 상한만큼 쌓여있으면 더 앞서가지 않는다(MAX_INFLIGHT_ARRIVALS
     // 참고) — isMoving 자체는 트윈 완료 즉시 풀리므로 이 가드가 없으면 키를 계속 눌렀을 때
-    // 서버 왕복 큐가 무한정 밀린다.
-    if (this.arrivalDispatcher.pendingCount >= MAX_INFLIGHT_ARRIVALS) return;
+    // 서버 왕복 큐가 무한정 밀린다. update()가 매 프레임 tryMove를 다시 부르므로 왕복이 하나라도
+    // settle되는 즉시(다음 프레임) 자동으로 재개된다 — 다만 아무 반응 없이 그냥 씹으면 "조작이
+    // 안 먹힌다"는 인상을 주므로(2026-07-15 실측 발견), 벽에 부딪힐 때와 같은 넛지로 "지금은
+    // 못 움직인다"는 걸 알려준다(bumpIntoWall 자체가 쿨다운을 갖고 있어 매 프레임 호출해도
+    // 안전함).
+    if (this.arrivalDispatcher.pendingCount >= MAX_INFLIGHT_ARRIVALS) {
+      this.bumpIntoWall(dx, dy);
+      return;
+    }
 
     const targetX = this.playerGridX + dx;
     const targetY = this.playerGridY + dy;
@@ -1792,8 +1803,20 @@ class MazeScene extends Phaser.Scene {
   // 클라이언트만 옛 방식(2회 왕복)을 계속 쓰고 있었다.
   private async reportArrival(x: number, y: number): Promise<MoveArriveOutput> {
     try {
+      // 2026-07-15(MAX_INFLIGHT_ARRIVALS 백프레셔 가드 도입 후속): 응답이 오지도 실패하지도 않고
+      // 그냥 멈춰버리는 요청(네트워크가 완전히 끊기는 등)이 있으면, 이 task의 Promise가 영영
+      // settle되지 않아 arrivalDispatcher.pendingCount가 영구히 그 값으로 고정돼 그 이후 모든
+      // 이동이 막혀버린다 — 가드를 넣기 전엔 없던 새 실패 모드다. reportRunFinish가 whenIdle()에
+      // 이미 쓰고 있는 것과 동일한 상한(ARRIVAL_IDLE_TIMEOUT_MS)으로 타임아웃시켜, 아무리 늦어도
+      // 이 task는 반드시 settle되도록 만든다(실제 fetch 자체를 취소하진 못하지만, 이후 게임
+      // 진행에는 "이 칸은 판정 실패"로 처리되는 것으로 충분하다).
       return await this.arrivalDispatcher.enqueue(() =>
-        trpc.move.arrive.mutate({ mapId: MAP_ID, x, y })
+        Promise.race([
+          trpc.move.arrive.mutate({ mapId: MAP_ID, x, y }),
+          new Promise<never>((_, reject) =>
+            this.time.delayedCall(ARRIVAL_IDLE_TIMEOUT_MS, () => reject(new Error('move.arrive 타임아웃')))
+          ),
+        ])
       );
     } catch (err) {
       if (!IS_LOCAL_PREVIEW) {
