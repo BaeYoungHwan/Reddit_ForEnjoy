@@ -41,12 +41,21 @@
 - 아이템 보드 리롤 악용은 여전히 이론상 가능하지만(고의로 3번 실패시킨 뒤 호출), 임계값이 없을 때보다 비용이 늘고 리더보드 위조와는 무관한 자기 자신의 상태만 건드리는 수준이라 감수한다 — 해커톤 스코프에서 이 이상의 방어(예: 실패가 의도적인지 판별)는 오버엔지니어링으로 판단.
 - ⚠️ **잔여 리스크(다중 탭, `/review 79` 지적)**: `moveFailureStreakKey`는 탭/세션 단위가 아니라 유저+맵+날짜 단위로 공유된다. 같은 계정으로 탭 두 개를 열어 한쪽(A)이 desync로 스트릭을 임계값 이상 쌓아두면, 다른 쪽(B)이 아직 골인 전인 정상 진행 중인 런이었더라도 B가 `run.finish`를 호출하는 시점에 공유 스트릭이 이미 임계값을 넘어 있어 B의 앵커/아이템 보드까지 리셋될 수 있다. `run.finish`는 클라이언트가 골인했다고 믿는 순간에만 호출되므로(`checkGoalReached` 경로) 실제 발생 빈도는 낮고, 이 문서의 다른 항목들과 마찬가지로 다중 탭 시나리오는 이 프로젝트 전반에서 이미 감수 중인 리스크 범주(예: `move-run-finish-bugfixes.md` 1절 "다중 탭" 잔여 리스크)라 별도 대응하지 않는다.
 
+### 3.3 발견된 결함 — 성공한 이동에서 스트릭을 리셋하지 않던 문제 (임소리 리뷰 지적, 수정 완료)
+
+최초 구현은 `assertAdjacentTracked`가 실패 시에만 스트릭을 증가시킬 뿐, 성공한 이동(`commitPosition`)에서 스트릭을 되돌리는 코드가 없었다. 즉 스트릭이 "연속 실패 횟수"가 아니라 "위치 앵커 TTL(2시간) 안에서 세션 전체에 걸쳐 누적된 실패 횟수"였다.
+
+**문제 시나리오**: 모바일 환경 등에서 `move.arrive` 요청이 순간적으로 유실됐다가(스트릭 +1), 플레이어가 이어지는 몇 걸음을 정상적으로 걸어 자연스럽게 인접 범위로 복귀하는 일이(각각은 그 자체로 전혀 "얼어붙지" 않고 정상 진행되는 사건) 같은 세션 안에서 서로 무관한 시점에 3번 일어나면, 그 뒤 `ARRIVAL_IDLE_TIMEOUT_MS` 레이스 등으로 `run.finish`가 `NOT_AT_GOAL`을 한 번 받았을 때 `isStuckSession`이 `true`로 오판정돼, 전혀 멈춰있지 않던 정상 세션의 아이템 보드/로드아웃/탐지기 충전이 통째로 리셋된다 — 이 PR이 3.1에서 명시적으로 피하려 했던 바로 그 "정상/경합 케이스의 진행 상황 손실"이 다른 경로로 재발하는 것이다.
+
+**수정**: `commitPosition`이 성공하는 모든 지점(`trap.trigger`, `item.pickup`, `move.arrive`의 RT3)에서 같은 `Promise.all`에 `redis.del(streakKey)`를 묶어 스트릭을 함께 리셋한다 — 이미 그 자리에 있던 왕복에 편승시키므로 추가 Redis 왕복은 없다. 이제 스트릭은 "마지막 성공한 커밋 이후의 연속 실패 횟수"를 의미하게 되어, 원래 의도(3.2 본문)와 정확히 일치한다.
+
 ## 4. 구현
 
 - `src/server/core/redisKeys.ts`: `moveFailureStreakKey(mapId, date, userId)` 신설.
 - `src/server/core/gameConfig.ts`: `STUCK_SESSION_FAILURE_THRESHOLD = 3`.
 - `src/server/trpc.ts`:
   - `assertAdjacentTracked(streakKey, last, next)` — 기존 `assertAdjacent`를 감싸 실패 시 스트릭 카운터를 증가시킨 뒤 그대로 rethrow. `trap.trigger`/`item.pickup`/`move.arrive` 세 호출부 모두 적용(마이그레이션 기간 구 엔드포인트도 동일 보호).
+  - `trap.trigger`/`item.pickup`/`move.arrive`: `assertAdjacentTracked` 통과 후 `commitPosition`과 함께 `redis.del(streakKey)`를 병렬 실행 — 성공한 이동마다 스트릭을 리셋한다(3.3).
   - `run.finish`: `atGoal`과 `isStuckSession`(스트릭 ≥ 임계값)을 함께 계산해 `shouldReset = atGoal || isStuckSession`. 리더보드 기록은 `atGoal`일 때만, 리셋(위치 앵커/스트릭 카운터/로드아웃/탐지기 충전 삭제 + 아이템 보드 재시딩)은 `shouldReset`일 때만 실행. 마지막에 `atGoal`이 아니면 기존과 동일하게 `NOT_AT_GOAL`을 던진다(응답 계약은 클라이언트 관점에서 변화 없음).
 
 ## 5. 테스트
@@ -54,8 +63,10 @@
 `src/server/trpc.test.ts` "run.finish 골인 위치 검증" describe에 추가:
 - 연속 3회 `move.arrive` 실패(스트릭 임계값 도달) 후 `run.finish` 거부 시 위치 앵커/아이템 보드/로드아웃/탐지기 충전이 모두 리셋되는지.
 - 실패 1회(임계값 미만)만 있는 경우, `run.finish` 거부 후에도 리셋되지 않고 세션이 살아있어(앵커 유지) 계속 걸어서 나중에 정상적으로 완주·리더보드 반영이 되는지(3.1의 회귀 방지).
+- 스트릭이 임계값 이상 쌓인 채로 실제 골인에 성공하면, 스트릭 값과 무관하게 리더보드 기록/리셋이 정상 동작하고 스트릭도 함께 지워지는지(`atGoal` 단독으로 리더보드 기록을 결정함을 확인).
+- 실패 1회 → 정상 이동으로 리셋을 임계값 횟수만큼 반복해도(3.3), 스트릭이 누적되지 않아 이후 `run.finish`가 거부만 되고 세션이 계속 살아있는지(3.3 회귀 방지).
 
-기존 45개+ 테스트는 전부 회귀 없이 통과(`npm test` 152개 전체 통과 확인, `npm run type-check` 통과).
+기존 테스트는 전부 회귀 없이 통과(`npm test` 전체 통과, `npm run type-check` 통과).
 
 ## 6. 이번 수정에 포함하지 않은 것
 

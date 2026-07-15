@@ -520,6 +520,36 @@ describe('run.finish 골인 위치 검증 (리더보드 위조 방지 회귀 테
     expect(await mocks.redis.get(moveFailureStreakKey('map-1', date, 'user-recovered-then-goal'))).toBeUndefined();
   });
 
+  it('실패 후 정상 이동이 있으면 실패 스트릭이 리셋되어, 서로 무관한 시점에 흩어진 실패가 세션 내내 누적되지 않는다(임소리 리뷰 지적 — 스트릭 리셋 누락 회귀)', async () => {
+    const caller = createCaller({ userId: 'user-streak-reset' });
+    await caller.map.getState({ mapId: 'map-1' }); // 앵커: 시작 좌표(1,1)
+
+    // "실패 1회 → 정상 이동으로 자연 복구"를 STUCK_SESSION_FAILURE_THRESHOLD(3)번 반복한다.
+    // 스트릭이 리셋 없이 누적되는 버그가 있었다면 이 시점에 이미 임계값에 도달했겠지만, 매
+    // 성공한 이동마다 리셋되므로 실제로는 도달하지 않아야 한다.
+    for (let i = 0; i < 3; i++) {
+      await expect(caller.move.arrive({ mapId: 'map-1', x: 9, y: 9 })).rejects.toMatchObject({
+        message: 'INVALID_MOVE',
+      });
+      // 앵커와 같은 좌표로 "이동"(맨해튼 거리 0, assertAdjacent 통과) — 실제 앵커 위치는
+      // 바뀌지 않지만, 정상적으로 처리된 이동이 있었다는 뜻이라 스트릭이 리셋되어야 한다.
+      await caller.trap.trigger({ mapId: 'map-1', x: 1, y: 1 });
+    }
+
+    // 스트릭이 매번 제대로 리셋됐다면(고쳐진 코드) 아직 임계값 미만이라, 골인 전 run.finish는
+    // 리셋 없이 그냥 거부만 되고 세션은 계속 살아있어야 한다. 리셋이 안 됐다면(버그) 스트릭이
+    // 이미 3에 도달해 여기서 리셋이 발생하고, 아래 walkAnchorToGoal이 삭제된 앵커 때문에
+    // NO_SESSION으로 실패해 이 테스트 자체가 깨진다.
+    await expect(
+      caller.run.finish({ mapId: 'map-1', steps: 10, clearTimeMs: 5000 })
+    ).rejects.toMatchObject({ message: 'NOT_AT_GOAL' });
+
+    await walkAnchorToGoal(caller, 'map-1', MAP_1_START);
+    await expect(
+      caller.run.finish({ mapId: 'map-1', steps: 50, clearTimeMs: 12345 })
+    ).resolves.toMatchObject({ rank: 1 });
+  });
+
   // 이 테스트가 막는 위협은 "골인 지점 근처에 한 번도 안 가고 임의 좌표에서 즉시 호출"뿐이다.
   // steps/clearTimeMs 값 자체는 여전히 클라이언트가 보낸 그대로 신뢰되고, 서버가 실제 이동
   // 횟수/소요 시간과 대조하지 않는다 — assertAdjacent도 벽을 검사하지 않으므로(grep 결과
