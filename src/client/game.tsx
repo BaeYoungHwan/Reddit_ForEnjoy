@@ -351,6 +351,13 @@ const RANK_REVEAL_DELAY_MS = 450;
 const RANK_REVEAL_RISE_PX = 14;
 const RANK_REVEAL_DURATION_MS = 350;
 
+// 2026-07-15(/review pr#78 지적): reportRunFinish가 run.finish 호출 전 arrivalDispatcher가
+// 비워지길 기다리는데(whenIdle), 직전 move.arrive 요청이 네트워크 장애로 응답 자체가 영영
+// 안 오면 이 대기가 무한정 걸려 골인 화면은 뜨는데 순위 정보(revealRankInfo)가 영영 안 뜨는
+// 새로운 실패 모드가 생긴다. 실제 왕복 지연(수정 원인이 된 레이스)을 흡수하기엔 충분히 길고,
+// 진짜 멈춘 요청을 무한정 기다리진 않을 만큼은 짧은 상한을 둔다.
+const ARRIVAL_IDLE_TIMEOUT_MS = 2000;
+
 // trap.install 실패 사유 → 안내 문구. TrapInstallOutput.reason은 optional이라(성공 시엔
 // 항상 undefined) 값이 없을 때는 RETRY 문구로 대체.
 type InstallFailureReason = NonNullable<TrapInstallOutput['reason']>;
@@ -3206,11 +3213,21 @@ class MazeScene extends Phaser.Scene {
   // "MAZE CLEARED!"가 뜨지만 리더보드엔 저장되지 않는 증상으로 나타난다. run.finish를 부르기
   // 전에 arrivalDispatcher가 지금까지 받은 요청을 전부 처리할 때까지 기다려서, 최소한 B의
   // move.arrive가 서버에 반영된 뒤에 위치 검증이 이뤄지도록 순서를 보장한다.
+  //
+  // 2026-07-15(/review pr#78 지적): whenIdle()은 대기 중인 요청이 끝내 응답하지 않으면 영원히
+  // 안 풀린다 — 그러면 "MAZE CLEARED!"는 뜨는데 순위 정보만 영영 안 뜨는 새 실패 모드가 생긴다.
+  // ARRIVAL_IDLE_TIMEOUT_MS로 상한을 둬서, 상한을 넘기면 아직 B의 커밋이 서버에 반영 안 됐을
+  // 위험을 감수하고서라도 run.finish를 진행한다(이 경우 정말로 NOT_AT_GOAL이 날 수 있지만,
+  // 그래도 catch에서 "Record not saved"로 실패를 명확히 알리는 기존 동작으로 자연스럽게
+  // 수렴한다 — 화면이 무한정 멈춰있는 것보다 낫다).
   private async reportRunFinish(rankText: Phaser.GameObjects.Text, statsText: Phaser.GameObjects.Text) {
-    // clearTimeMs는 실제로 골인한 순간 기준이어야 하므로, 아래 whenIdle() 대기가 끝나기 전에
-    // 먼저 계산해둔다 — 순서를 바꾸면 대기 시간(최대 몇백 ms)만큼 클리어 시간이 부풀려진다.
+    // clearTimeMs는 실제로 골인한 순간 기준이어야 하므로, 아래 대기가 끝나기 전에 먼저
+    // 계산해둔다 — 순서를 바꾸면 대기 시간만큼 클리어 시간이 부풀려진다.
     const clearTimeMs = Date.now() - this.runStartTime;
-    await this.arrivalDispatcher.whenIdle();
+    await Promise.race([
+      this.arrivalDispatcher.whenIdle(),
+      new Promise<void>((resolve) => this.time.delayedCall(ARRIVAL_IDLE_TIMEOUT_MS, resolve)),
+    ]);
     try {
       const result: RunFinishOutput = await trpc.run.finish.mutate({
         mapId: MAP_ID,
