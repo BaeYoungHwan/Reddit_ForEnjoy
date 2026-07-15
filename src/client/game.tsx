@@ -2287,7 +2287,14 @@ class MazeScene extends Phaser.Scene {
   private async resolveArrival(x: number, y: number, dx: number, dy: number) {
     const resolution = await this.resolveTrapAndItem(x, y, () => this.applyReverseTrap());
 
-    if (resolution?.effectsToApply.includes('slow')) {
+    // 2026-07-15(배치 도입 후 실서버 QA로 발견): 배치 처리로 이 응답이 도착하기까지 오래 걸릴
+    // 수 있다(같은 이동 burst 전체가 끝나야 흘려보내지므로) — 그 사이 플레이어가 이미 이 칸(x,y)을
+    // 지나 훨씬 앞으로 가 있을 수 있다. applySlideTrap은 "지금 서 있는 위치"부터 미끄러지므로,
+    // 그 상태로 그냥 발동시키면 엉뚱한(전혀 관계없는) 위치에서 느닷없이 미끄러지기 시작해버린다 —
+    // 그 방향이 하필 벽이면 아무 이유 없이 튕기고 멈추는 것처럼 보인다(실서버 QA에서 재현됨).
+    // 아직 이 칸에 그대로 서 있을 때만(플레이어가 그 사이 더 이동하지 않았을 때만) 발동시킨다 —
+    // 이미 멀리 갔으면 이 슬라이드 페널티는 조용히 넘어간다(엉뚱한 위치에서 튀는 것보다 낫다).
+    if (resolution?.effectsToApply.includes('slow') && this.playerGridX === x && this.playerGridY === y) {
       this.applySlideTrap(dx, dy); // 슬라이드는 killTweensOf로 진행 중인 이동을 이기고 스스로 다시 잠금
     }
   }
