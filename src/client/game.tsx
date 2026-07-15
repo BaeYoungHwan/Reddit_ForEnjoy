@@ -1803,20 +1803,20 @@ class MazeScene extends Phaser.Scene {
   // 클라이언트만 옛 방식(2회 왕복)을 계속 쓰고 있었다.
   private async reportArrival(x: number, y: number): Promise<MoveArriveOutput> {
     try {
-      // 2026-07-15(MAX_INFLIGHT_ARRIVALS 백프레셔 가드 도입 후속): 응답이 오지도 실패하지도 않고
-      // 그냥 멈춰버리는 요청(네트워크가 완전히 끊기는 등)이 있으면, 이 task의 Promise가 영영
-      // settle되지 않아 arrivalDispatcher.pendingCount가 영구히 그 값으로 고정돼 그 이후 모든
-      // 이동이 막혀버린다 — 가드를 넣기 전엔 없던 새 실패 모드다. reportRunFinish가 whenIdle()에
-      // 이미 쓰고 있는 것과 동일한 상한(ARRIVAL_IDLE_TIMEOUT_MS)으로 타임아웃시켜, 아무리 늦어도
-      // 이 task는 반드시 settle되도록 만든다(실제 fetch 자체를 취소하진 못하지만, 이후 게임
-      // 진행에는 "이 칸은 판정 실패"로 처리되는 것으로 충분하다).
+      // 2026-07-15(회귀 발견 후 되돌림): 한때 여기에 ARRIVAL_IDLE_TIMEOUT_MS 타임아웃을
+      // Promise.race로 걸어 "응답이 영영 안 오면 pendingCount가 영구히 안 줄어 이동이 막힌다"는
+      // 문제를 막으려 했으나, 실제 요청을 취소하지 않은 채 "기다리길 포기"만 하는 방식이라 더
+      // 심각한 회귀를 냈다 — SequentialDispatcher는 "요청이 dispatch 순서대로 하나씩만
+      // in-flight"라는 걸 전제로 앵커 정합성을 지키는데(sequentialDispatcher.ts 문서 참고),
+      // 타임아웃이 먼저 이기면 실제로는 아직 서버로 가고 있는 요청을 큐가 "끝났다"고 착각하고
+      // 다음 요청을 내보내버린다 — 그 뒤 버려진 요청이 나중에 서버에 도달해 위치 앵커를
+      // 옮기면 다음 요청들과 순서가 어긋나고, 그게 resyncPositionFromServer를 연쇄적으로
+      // 발동시켜 화면에서 "일정 걸음마다 순간이동"으로 보였다(2026-07-15 실측 발견). 진짜로
+      // 요청이 응답 없이 영영 멈추는 경우(드묾, 네트워크 완전 단절 등)는 이 상태에서도 어차피
+      // 게임 전체가 사실상 못 쓰는 상태라 별도 대응은 하지 않는다(해커톤 스코프, 과설계 회피)
+      // — fetch 자체를 AbortController로 취소하는 더 견고한 해법은 별도 논의 대상으로 남긴다.
       return await this.arrivalDispatcher.enqueue(() =>
-        Promise.race([
-          trpc.move.arrive.mutate({ mapId: MAP_ID, x, y }),
-          new Promise<never>((_, reject) =>
-            this.time.delayedCall(ARRIVAL_IDLE_TIMEOUT_MS, () => reject(new Error('move.arrive 타임아웃')))
-          ),
-        ])
+        trpc.move.arrive.mutate({ mapId: MAP_ID, x, y })
       );
     } catch (err) {
       if (!IS_LOCAL_PREVIEW) {
@@ -1862,6 +1862,11 @@ class MazeScene extends Phaser.Scene {
   private async resyncPositionFromServer() {
     try {
       const anchor = await trpc.move.resync.query({ mapId: MAP_ID });
+
+      // resolveTrapAndItem과 동일한 이유(2039행 근처) — 응답이 골인 이후에 도착하면 아무것도
+      // 적용하지 않는다. 안 그러면 "MAZE CLEARED!" 화면이 뜬 뒤에도 캐릭터가 갑자기 되돌아가는
+      // 것처럼 보인다.
+      if (this.hasFinished) return;
 
       this.tweens.killTweensOf(this.playerImg);
       if (this.isSliding) {
