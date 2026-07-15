@@ -4,6 +4,7 @@ import {
   getKstDateString,
   itemBoardKey,
   itemSeededKey,
+  moveFailureStreakKey,
   parseTile,
   positionAnchorKey,
   tileMember,
@@ -490,6 +491,33 @@ describe('run.finish 골인 위치 검증 (리더보드 위조 방지 회귀 테
     await expect(
       caller.run.finish({ mapId: 'map-1', steps: 42, clearTimeMs: 9999 })
     ).resolves.toMatchObject({ rank: 1 });
+  });
+
+  it('실패 스트릭이 임계값 이상 쌓여 있어도, 실제로 골인하면 리더보드 기록/리셋이 정상 동작하고 스트릭도 함께 지워진다 — atGoal이 스트릭과 무관하게 리더보드 기록을 독립적으로 결정함을 확인(/review 79 커버리지 보강)', async () => {
+    const caller = createCaller({ userId: 'user-recovered-then-goal' });
+    await caller.map.getState({ mapId: 'map-1' }); // 앵커: 시작 좌표(1,1)
+
+    // STUCK_SESSION_FAILURE_THRESHOLD(3) 이상으로 실패 스트릭을 쌓아둔다 — 앵커 자체는 시작
+    // 좌표에 그대로 남아있다(실패한 호출은 커밋되지 않으므로).
+    for (let i = 0; i < 3; i++) {
+      await expect(caller.move.arrive({ mapId: 'map-1', x: 9, y: 9 })).rejects.toMatchObject({
+        message: 'INVALID_MOVE',
+      });
+    }
+
+    // 스트릭이 임계값 이상인 상태에서, 실제로 걸어서 골인 지점까지 도달한다.
+    await walkAnchorToGoal(caller, 'map-1', MAP_1_START);
+
+    // atGoal이 true이므로 스트릭 값과 무관하게 리더보드에 정상 반영돼야 한다(shouldReset과
+    // isNewRecord/rank 계산이 서로 다른 조건임을 확인 — atGoal만으로 리더보드 기록 여부가 결정됨).
+    await expect(
+      caller.run.finish({ mapId: 'map-1', steps: 15, clearTimeMs: 7000 })
+    ).resolves.toMatchObject({ rank: 1, isNewRecord: true });
+
+    // 정상 골인 리셋에 스트릭 카운터도 포함되어 있어야, 재도전 시 이전 세션의 스트릭이
+    // 새 런까지 이어져 오탐으로 리셋되는 일이 없다.
+    const date = getKstDateString();
+    expect(await mocks.redis.get(moveFailureStreakKey('map-1', date, 'user-recovered-then-goal'))).toBeUndefined();
   });
 
   // 이 테스트가 막는 위협은 "골인 지점 근처에 한 번도 안 가고 임의 좌표에서 즉시 호출"뿐이다.
