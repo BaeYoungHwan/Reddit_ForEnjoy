@@ -679,11 +679,14 @@ class MazeScene extends Phaser.Scene {
   // 전용으로 남겨둔다.
   private arrivalBatchDispatcher = new SequentialDispatcher<MoveArriveBatchOutput>();
   // 아직 서버로 안 보내고 모아두고 있는 좌표들 + 각 좌표의 fetchArrival 호출자에게 결과를
-  // 돌려줄 resolve/reject. flushArrivalBatch가 이 두 배열을 함께 소비한다(인덱스가 대응).
+  // 돌려줄 resolve. flushArrivalBatch가 이 두 배열을 함께 소비한다(인덱스가 대응).
+  // /review pr#83 지적: reject는 저장하지 않는다 — flushArrivalBatch는 성공/실패 양쪽 모두
+  // 항상 안전한 기본값으로 resolve하고(기존 reportArrival도 동일한 설계였음) 절대 reject하지
+  // 않으므로, reject를 필드에 담아두면 "실패 시 reject되는 경로가 있다"는 오해를 주는 죽은
+  // 코드가 된다.
   private pendingBatchWaypoints: Position[] = [];
   private pendingBatchResolvers: Array<{
     resolve: (output: MoveArriveOutput) => void;
-    reject: (err: unknown) => void;
   }> = [];
 
   // 지금 재생 중인 발걸음 소리 인스턴스 — 다음 발걸음이 날 때 아직 안 끝났으면 끊어서 겹쳐
@@ -1840,9 +1843,9 @@ class MazeScene extends Phaser.Scene {
   // 즉시 처리(실패 시 로컬 폴백)를 유지한다.
   private async reportArrival(x: number, y: number): Promise<MoveArriveOutput> {
     if (!IS_LOCAL_PREVIEW) {
-      return new Promise<MoveArriveOutput>((resolve, reject) => {
+      return new Promise<MoveArriveOutput>((resolve) => {
         this.pendingBatchWaypoints.push({ x, y });
-        this.pendingBatchResolvers.push({ resolve, reject });
+        this.pendingBatchResolvers.push({ resolve });
         if (this.pendingBatchWaypoints.length >= CLIENT_ARRIVAL_BATCH_MAX_WAYPOINTS) {
           void this.flushArrivalBatch();
         }
