@@ -2023,7 +2023,6 @@ class MazeScene extends Phaser.Scene {
   // 반환값은 effectsToApply를 담은 TrapResolution(hasFinished로 중단됐으면 null) — 호출자가
   // slow 여부를 직접 확인해 각자의 방식으로 처리해야 하기 때문이다(resolveArrival 참고).
   private async resolveTrapAndItem(x: number, y: number, onReverse: () => void): Promise<TrapResolution | null> {
-    const shieldCountBefore = this.shieldCount;
     const { trapType: installedTrapType, itemEncounter } = await this.fetchArrival(x, y);
 
     // 2026-07-15(코드 리뷰 반영, /review pr#71): 이 응답은 네트워크 왕복 후 도착하므로, 슬라이드로
@@ -2031,6 +2030,17 @@ class MazeScene extends Phaser.Scene {
     // 이펙트를 적용하면 골인 화면("MAZE CLEARED!")이 뜬 뒤에도 블라인드(화면 암전)/리스폰(위치·
     // 탐색기록 리셋) 같은 효과가 뒤늦게 발동하는 문제가 있었다. 골인 후에는 아무것도 적용하지 않는다.
     if (this.hasFinished) return null;
+
+    // 2026-07-15(코드 리뷰 반영, /review pr#71 — 쉴드 이중 소모 레이스): 이 스냅샷은 반드시
+    // await 이후(응답 도착 시점)에 읽어야 한다. 슬라이드는 매 칸이 트윈 타이머로 자동 진행되므로,
+    // await 이전에 미리 캡처해두면 "이전 칸의 응답이 아직 안 왔는데 다음 칸 판정이 이미 시작된"
+    // 상황에서 다음 칸이 이전 칸의 쉴드 소모 반영 전 값을 그대로 써버려 — 쉴드 1개로 두 함정을
+    // 모두 막아 shieldCount가 음수까지 내려가는 버그가 있었다. arrivalDispatcher가 네트워크
+    // 요청을 직렬화해주므로, 이 시점(이 칸 자신의 fetchArrival이 막 끝난 순간)엔 이전 칸의 소모가
+    // 항상 이미 반영돼 있음이 보장된다. 그러면서도 이 칸에서 방금 주웠을 수 있는 쉴드(아래
+    // applyItemDrop에서 반영)는 아직 카운트에 안 들어간 상태라 "같은 칸에서 주운 쉴드가 같은 칸의
+    // 함정을 소급 차단하지 않는다"는 기존 규칙은 그대로 유지된다.
+    const shieldCountBefore = this.shieldCount;
 
     const mysteryTrapType = itemEncounter.kind === 'trap' ? itemEncounter.type : null;
     const resolution = resolveTrapEncounters(installedTrapType, mysteryTrapType, shieldCountBefore > 0);
