@@ -358,13 +358,18 @@ const RANK_REVEAL_DURATION_MS = 350;
 // 실서버 왕복이 보통 300~800ms인 걸 감안해, 유저가 지연을 거의 못 느끼는 선에서 재시도.
 const MOVE_ARRIVE_RETRY_ATTEMPTS = 3;
 const MOVE_ARRIVE_RETRY_DELAY_MS = 300;
+// 위 "300~800ms" 중 최댓값 — MOVE_ARRIVE_RETRY_WORST_CASE_MS 계산에 재사용(/review pr#80
+// 지적: 매직넘버로 중복되면 나중에 실측 RTT가 바뀔 때 주석만 고치고 계산은 안 고치는 드리프트
+// 위험이 있었다).
+const ASSUMED_WORST_CASE_RTT_MS = 800;
 // 재시도가 전부 실패하는 최악의 경우 실제로 걸리는 시간(/review pr#80 지적) — 재시도 사이
-// 대기(마지막 시도 후엔 대기 없으므로 (횟수-1)번)에 왕복 자체 시간(최대 800ms 가정, 위 주석
-// 참고)까지 더한 값. ARRIVAL_IDLE_TIMEOUT_MS가 이 값보다 짧으면, 골인 직전 칸이 하필 재시도를
-// 다 소진하는 상황에서 재시도가 끝나기도 전에 그 타임아웃이 먼저 발동해버려 재시도를 도입한
-// 목적(리더보드 미기록 완화)이 무색해진다.
+// 대기(마지막 시도 후엔 대기 없으므로 (횟수-1)번)에 왕복 자체 시간까지 더한 값.
+// ARRIVAL_IDLE_TIMEOUT_MS가 이 값보다 짧으면, 골인 직전 칸이 하필 재시도를 다 소진하는
+// 상황에서 재시도가 끝나기도 전에 그 타임아웃이 먼저 발동해버려 재시도를 도입한 목적(리더보드
+// 미기록 완화)이 무색해진다.
 const MOVE_ARRIVE_RETRY_WORST_CASE_MS =
-  MOVE_ARRIVE_RETRY_ATTEMPTS * 800 + (MOVE_ARRIVE_RETRY_ATTEMPTS - 1) * MOVE_ARRIVE_RETRY_DELAY_MS;
+  MOVE_ARRIVE_RETRY_ATTEMPTS * ASSUMED_WORST_CASE_RTT_MS +
+  (MOVE_ARRIVE_RETRY_ATTEMPTS - 1) * MOVE_ARRIVE_RETRY_DELAY_MS;
 
 // 2026-07-15(/review pr#78 지적): reportRunFinish가 run.finish 호출 전 arrivalDispatcher가
 // 비워지길 기다리는데(whenIdle), 직전 move.arrive 요청이 네트워크 장애로 응답 자체가 영영
