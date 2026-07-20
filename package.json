@@ -26,7 +26,7 @@
     "@trpc/client": "^11.0.0",
     "@trpc/server": "^11.0.0",
     "devvit": "0.13.7",
-    "hono": "4.12.30",
+    "hono": "4.12.31",
     "phaser": "^4.2.1",
     "react": "19.2.7",
     "react-dom": "19.2.7",
