@@ -28,8 +28,8 @@
     "devvit": "0.13.7",
     "hono": "4.12.30",
     "phaser": "^4.2.1",
-    "react": "19.2.7",
-    "react-dom": "19.2.7",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
     "zod": "^3.24.0"
   },
   "devDependencies": {
